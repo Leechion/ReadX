@@ -38,6 +38,8 @@ jobs:
           path: |
             macos/release/*.dmg
             macos/release/*.zip
+            macos/release/*.blockmap
+            macos/release/latest-mac.yml
           retention-days: 7
 
       - name: Upload DMG to the existing GitHub Release
@@ -50,9 +52,9 @@ jobs:
           release_tag="${GITHUB_REF_NAME#macos-}"
           gh release view "$release_tag" --repo "$GITHUB_REPOSITORY" >/dev/null
           shopt -s nullglob
-          dmg_files=(macos/release/*.dmg)
-          if ((${#dmg_files[@]} != 1)); then
-            echo "Expected exactly one DMG, found ${#dmg_files[@]}"
+          release_files=(macos/release/*.dmg macos/release/*.zip macos/release/*.blockmap macos/release/latest-mac.yml)
+          if ((${#release_files[@]} < 4)); then
+            echo "Expected DMG, ZIP, blockmaps, and latest-mac.yml; found ${#release_files[@]} files"
             exit 1
           fi
-          gh release upload "$release_tag" "${dmg_files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$release_tag" "${release_files[@]}" --repo "$GITHUB_REPOSITORY" --clobber

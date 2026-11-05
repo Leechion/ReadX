@@ -35,8 +35,7 @@ func (s *Server) processingShelves(ctx context.Context, d *processingDescription
 }
 
 func (s *Server) protectRemovedCategory(ctx context.Context, name string) error {
-	s.processingMu.Lock()
-	defer s.processingMu.Unlock()
+	// The caller holds processingMu through pinning, definition removal and member cleanup.
 	categories, err := s.loadCategories(ctx)
 	if err != nil {
 		return err

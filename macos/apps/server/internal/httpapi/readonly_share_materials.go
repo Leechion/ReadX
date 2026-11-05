@@ -17,9 +17,10 @@ type shareLocator struct {
 	EndOffset   int    `json:"endOffset,omitempty"`
 }
 type shareBlock struct {
-	Kind  string `json:"kind"`
-	Text  string `json:"text"`
-	Image string `json:"image,omitempty"`
+	Kind         string `json:"kind"`
+	Text         string `json:"text"`
+	Image        string `json:"image,omitempty"`
+	ImageOmitted bool   `json:"imageOmitted,omitempty"`
 }
 type shareSection struct {
 	Href   string       `json:"href"`
@@ -124,6 +125,7 @@ func shareEPUBSections(data []byte) ([]shareSection, error) {
 					images[block.Src] = encoded
 				}
 				item.Image = encoded
+				item.ImageOmitted = encoded == ""
 			}
 			if total > 64<<20 {
 				return nil, fmt.Errorf("EPUB 章节和图片展开后超过分享上限 64 MiB")

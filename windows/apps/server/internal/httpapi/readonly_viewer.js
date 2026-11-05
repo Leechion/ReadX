@@ -40,6 +40,7 @@
         for (const block of section.blocks) {
           const node = add(root, /^h[1-6]$/.test(block.kind) ? 'h3' : 'p', block.text || '');
           if (block.image) { const img = add(node, 'img'); img.src = block.image; img.alt = block.text || '原文图片'; img.style.maxWidth = '100%'; }
+          if (block.imageOmitted) add(node, 'small', '此图片格式未在这里预览，请下载原 EPUB 查看。');
           blocks.push(node);
         }
         chapters.set(section.href, { root, blocks });

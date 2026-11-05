@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"bytes"
+	"cbctv2/server/internal/appstate"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -302,5 +303,95 @@ func TestProcessingLocalZoteroPullRemainsAvailableWhenSendingIsDenied(t *testing
 	s.enforceProcessing(func(http.ResponseWriter, *http.Request) { t.Fatal("push bypassed library deny") })(w, httptest.NewRequest("POST", "/v1/zotero/reconcile/apply", strings.NewReader(`{"choice":"push"}`)))
 	if w.Code != 403 {
 		t.Fatal(w.Body.String())
+	}
+}
+
+type processingPauseCategoriesKV struct {
+	sqlAppStateKV
+	entered, release chan struct{}
+}
+
+func (k processingPauseCategoriesKV) Update(ctx context.Context, key string, fn func([]byte, bool) ([]byte, error)) error {
+	if key == "library.categories" {
+		close(k.entered)
+		select {
+		case <-k.release:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return k.sqlAppStateKV.Update(ctx, key, fn)
+}
+func TestProcessingShelfDeleteSerializesConcurrentAssignments(t *testing.T) {
+	s := processingTestServer(t)
+	_, err := s.handle.Exec(`INSERT INTO documents(id,key,title) VALUES('paper','paper','Paper')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	categories, err := s.mutateCategoriesResult(context.Background(), func(items []Category) ([]Category, error) {
+		return append(items, Category{Name: "Sensitive", Color: "rose"}), nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(processingPolicy{Revision: 1, Library: "allow", Shelves: map[string]string{categories[0].ID: "deny"}})
+	if err = appstate.Save(context.Background(), s.appStateStore, processingPolicyKey, json.RawMessage(raw)); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	s.appStateStore = appstate.New(processingPauseCategoriesKV{sqlAppStateKV: sqlAppStateKV{handle: s.handle}, entered: entered, release: release})
+	deletionDone := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("DELETE", "/", nil)
+		r.SetPathValue("name", "Sensitive")
+		s.handleCategoryDelete(w, r)
+		deletionDone <- w.Code
+	}()
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete did not reach definition removal")
+	}
+	assigned := make(chan int, 1)
+	go func() {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest("PATCH", "/", strings.NewReader(`{"categories":["Sensitive"]}`))
+		r.SetPathValue("key", "paper")
+		s.handleDocumentMetaPatch(w, r)
+		assigned <- w.Code
+	}()
+	select {
+	case status := <-assigned:
+		t.Fatalf("assignment ran during denied-shelf deletion: %d", status)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case status := <-deletionDone:
+		if status != 200 {
+			t.Fatal(status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("delete blocked")
+	}
+	select {
+	case status := <-assigned:
+		if status != 400 {
+			t.Fatal("stale category accepted", status)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("assignment blocked")
+	}
+	meta, err := s.loadMeta(context.Background(), "paper")
+	if err != nil || len(meta.Categories) != 0 {
+		t.Fatal("dangling category remained", meta, err)
 	}
 }

@@ -34,11 +34,12 @@ type zoteroMirrorObject struct {
 	AnnotationIDs []string       `json:"annotationIds,omitempty"`
 }
 type zoteroMigrationFile struct {
-	Key   string   `json:"key"`
-	Name  string   `json:"name"`
-	Size  int64    `json:"size"`
-	Error string   `json:"error,omitempty"`
-	Files []string `json:"files,omitempty"`
+	Retained bool     `json:"retained,omitempty"`
+	Key      string   `json:"key"`
+	Name     string   `json:"name"`
+	Size     int64    `json:"size"`
+	Error    string   `json:"error,omitempty"`
+	Files    []string `json:"files,omitempty"`
 }
 type zoteroMigration struct {
 	ID         string                        `json:"id"`
@@ -398,6 +399,26 @@ func (s *Server) handleZoteroMigration(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
+	seenFiles := map[string]bool{}
+	for _, file := range state.Files {
+		seenFiles[file.Key] = true
+	}
+	priorKeys := []string{}
+	for key := range priorFiles {
+		priorKeys = append(priorKeys, key)
+	}
+	sort.Strings(priorKeys)
+	for _, key := range priorKeys {
+		if !seenFiles[key] {
+			file := priorFiles[key]
+			file.Retained = true
+			file.Error = "来源已不在当前快照，保留历史附件记录"
+			if len(file.Files) > 0 {
+				file.Error += "及已迁入副本"
+			}
+			state.Files = append(state.Files, file)
+		}
+	}
 	for key, object := range state.Objects {
 		if object.Kind == "items" && zoteroString(object.Local, "itemType") != "attachment" && zoteroString(object.Local, "itemType") != "note" && zoteroString(object.Local, "itemType") != "annotation" {
 			object.Documents = []string{}
@@ -519,6 +540,8 @@ func (s *Server) installZoteroNote(ctx context.Context, state *zoteroMigration, 
 	return nil
 }
 func (s *Server) installZoteroCollections(ctx context.Context, state *zoteroMigration, only ...[]string) error {
+	s.processingMu.Lock()
+	defer s.processingMu.Unlock()
 	labels, renames, managed := map[string]string{}, map[string]string{}, map[string]bool{}
 	if err := s.mutateCategories(ctx, func(categories []Category) ([]Category, error) {
 		for _, object := range state.Objects {

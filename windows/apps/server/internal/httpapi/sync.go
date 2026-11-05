@@ -283,6 +283,8 @@ func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.processingMu.Lock()
+	defer s.processingMu.Unlock()
 	tx, err := s.handle.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "开始应用同步数据失败")
@@ -336,6 +338,7 @@ func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "保存同步结果失败: "+err.Error())
 		return
 	}
+	s.revokeProcessingLocked()
 	writeJSON(w, http.StatusOK, map[string]any{"synced": true, "documents": countEntityKind(merged, "document/"), "annotations": countEntityKind(merged, "annotation/"), "readingPositions": countEntityKind(merged, "location/"), "lastSync": state.LastSync})
 }
 

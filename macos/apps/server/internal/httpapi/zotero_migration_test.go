@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -296,5 +298,105 @@ func TestZoteroMigrationPreservesFilesAndSyncConflicts(t *testing.T) {
 	doc, err := s.loadDocument(context.Background(), docKey)
 	if err != nil || doc.Title != "Edited mirror title" {
 		t.Fatal("metadata not reflected to library", doc.Title, err)
+	}
+	filtered := []zoteroObject{}
+	for _, item := range snapshot.Items {
+		if item.Key != "ATTACH02" {
+			filtered = append(filtered, item)
+		}
+	}
+	snapshot.Items = filtered
+	if err = appstate.Save(context.Background(), s.appStateStore, "zotero.snapshot:INSTANCE1", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	retained := migrate()
+	historyKept := false
+	for _, file := range retained.Files {
+		if file.Key == "ATTACH02" && file.Retained && len(file.Files) > 0 {
+			historyKept = true
+		}
+	}
+	if !historyKept {
+		t.Fatal("source removal discarded archive membership", retained.Files)
+	}
+	w = httptest.NewRecorder()
+	r = httptest.NewRequest("GET", "/", nil)
+	r.SetPathValue("id", state.ID)
+	s.handleZoteroArchive(w, r)
+	archive, err = zip.NewReader(bytes.NewReader(w.Body.Bytes()), int64(w.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	historyKept = false
+	for _, file := range archive.File {
+		if file.Name == "attachments/ATTACH02/appendix.docx" {
+			historyKept = true
+		}
+	}
+	if !historyKept {
+		t.Fatal("removed source attachment no longer exportable")
+	}
+}
+
+func TestZoteroLocalViewsPreserveIndependentEdits(t *testing.T) {
+	s := processingTestServer(t)
+	_, err := s.handle.Exec(`INSERT INTO documents(id,key,title,year) VALUES('paper','paper','reader title',2026)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = s.handle.Exec(`INSERT INTO annotations(id,document_id,note) VALUES('note','paper','[Zotero 笔记]'||char(10)||'reader edit')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	note := zoteroMirrorObject{Base: map[string]any{"itemType": "note", "note": "<div>base</div>"}, Local: map[string]any{"itemType": "note", "note": "<div>mirror edit</div>"}, AnnotationIDs: []string{"note"}}
+	local, err := s.zoteroLocalView(context.Background(), zoteroMigration{}, note)
+	if err == nil || zoteroString(local, "note") != "<div>mirror edit</div>" {
+		t.Fatal("local note copy overwritten", local, err)
+	}
+	base := map[string]any{"itemType": "journalArticle", "title": "base title", "date": "2025-03-05"}
+	documentBase := zoteroExpectedDocument(base)
+	object := zoteroMirrorObject{Base: base, Local: zoteroClone(base), Documents: []string{"paper"}, DocumentBase: documentBase}
+	object.Local["title"] = "mirror title"
+	if _, err = s.zoteroLocalView(context.Background(), zoteroMigration{}, object); err == nil {
+		t.Fatal("local metadata conflict not surfaced")
+	}
+	_, err = s.handle.Exec(`UPDATE documents SET title='base title' WHERE key='paper'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object.Local = zoteroClone(base)
+	local, err = s.zoteroLocalView(context.Background(), zoteroMigration{}, object)
+	if err != nil || local["date"] != "2026-03-05" {
+		t.Fatal("year edit lost original month/day", local, err)
+	}
+}
+
+func TestZoteroSnapshotReadsBeyondFiveThousandObjects(t *testing.T) {
+	s := processingTestServer(t)
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Zotero-Server-ID", "INSTANCE1")
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/" {
+			io.WriteString(w, `{}`)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/collections") {
+			io.WriteString(w, `[]`)
+			return
+		}
+		start, _ := strconv.Atoi(r.URL.Query().Get("start"))
+		items := []zoteroObject{}
+		for i := start; i < min(start+100, 5101); i++ {
+			items = append(items, zoteroObject{Key: fmt.Sprintf("A%07d", i), Version: 1, Data: map[string]any{"itemType": "journalArticle", "title": "Paper"}})
+		}
+		json.NewEncoder(w).Encode(items)
+	}))
+	defer fake.Close()
+	s.zoteroTestURL = fake.URL
+	w := httptest.NewRecorder()
+	s.handleZoteroSnapshot(w, httptest.NewRequest("POST", "/", strings.NewReader(`{}`)))
+	var snapshot zoteroSnapshot
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &snapshot) != nil || len(snapshot.Items) != 5101 {
+		t.Fatal("snapshot was truncated", w.Code)
 	}
 }

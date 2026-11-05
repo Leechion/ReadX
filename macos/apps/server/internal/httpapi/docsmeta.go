@@ -136,6 +136,8 @@ func (s *Server) handleCategoryDelete(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "分类名不能为空")
 		return
 	}
+	s.processingMu.Lock()
+	defer s.processingMu.Unlock()
 	if err := s.protectRemovedCategory(r.Context(), name); err != nil {
 		writeError(w, 500, err.Error())
 		return
@@ -252,6 +254,21 @@ func (s *Server) handleDocumentMetaPatch(w http.ResponseWriter, r *http.Request)
 	if body.Categories != nil {
 		s.processingMu.Lock()
 		defer s.processingMu.Unlock()
+		categories, err := s.loadCategories(r.Context())
+		if err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
+		known := map[string]bool{}
+		for _, category := range categories {
+			known[category.Name] = true
+		}
+		for _, name := range *body.Categories {
+			if trimmed := strings.TrimSpace(name); trimmed != "" && !known[trimmed] {
+				writeError(w, 400, "书架已删除或不存在，请刷新后重试")
+				return
+			}
+		}
 	}
 	if err := s.mutateAllMeta(r.Context(), func(all map[string]DocumentMeta) (map[string]DocumentMeta, error) {
 		current = emptyMeta(key)

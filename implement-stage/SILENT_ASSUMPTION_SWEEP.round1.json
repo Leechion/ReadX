@@ -1,0 +1,41 @@
+{
+  "undeclared": [
+    {
+      "site": "windows/apps/server/internal/httpapi/docsmeta.go:139-143; windows/apps/server/internal/httpapi/processing_shelves.go:38-81",
+      "decision": "Shelf deletion copies a deny rule to papers currently in the shelf, then releases processingMu before deleting the shelf and cleaning up its members.",
+      "why_it_matters": "A concurrent category PATCH can add that shelf name to a paper after the deny copy but before deletion. The paper is left with a dangling category name, which processingShelves can no longer resolve to the denied shelf ID, so a later send can escape the deny rule.",
+      "class": "semantic"
+    },
+    {
+      "site": "windows/apps/server/internal/httpapi/zotero_migration.go:282-286, 384-392, 672-697",
+      "decision": "A migration retry rebuilds the exported file manifest only from attachments in the latest snapshot.",
+      "why_it_matters": "If an attachment disappears from Zotero, its old state.Objects entry remains, but its prior file record is dropped. The copied file remains on disk but is omitted from subsequent ZIP exports, contrary to the no-delete-propagation and archive-preservation contract.",
+      "class": "semantic"
+    },
+    {
+      "site": "windows/apps/server/internal/httpapi/zotero_notes.go:199-225",
+      "decision": "Snapshot retrieval fails once either personal-library resource exceeds 5,000 objects.",
+      "why_it_matters": "The ledger describes a complete personal-library export, but libraries above this limit cannot be migrated. The endpoint reports the limit; the ledger does not record it.",
+      "class": "interface"
+    }
+  ],
+  "stale_rows": [
+    {
+      "id": "A-001",
+      "claim": "Removing a denied shelf preserves denial for its members.",
+      "mismatch": "The copy-to-member step and category deletion are not one locked operation, so a concurrent membership change can escape the copied deny."
+    },
+    {
+      "id": "A-007",
+      "claim": "The migration archive preserves the full snapshot and attachment files.",
+      "mismatch": "A retry after an attachment disappears drops its prior file record from the export manifest; additionally, snapshot retrieval rejects libraries over 5,000 items or collections."
+    },
+    {
+      "id": "A-010",
+      "claim": "The structured EPUB view includes local images.",
+      "mismatch": "Only PNG, JPEG, GIF, and WebP are embedded; other local image formats are silently omitted from the structured view. The original EPUB remains downloadable."
+    }
+  ],
+  "semantic_undeclared": 2,
+  "verdict": "gaps"
+}

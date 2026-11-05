@@ -25,3 +25,7 @@ F4：迁移／归档／原生页码、重复迁移、缺附件保留、双向笔
 扩展商店上架。macOS、浏览器唤起和真实 Zotero 验收取决于本机可用运行环境。
 
 ## Blockers
+
+## Assumption sweep
+
+Reviewer: gpt-6-luna（遵循用户全局偏好）；review_independence: same-family；acceptance_status: provisional。第一轮发现 2 项未声明语义决定、1 项接口范围和 3 条过时表述，原文保存在 SILENT_ASSUMPTION_SWEEP.round1.json。已修复并发书架删除、历史附件导出保留、5,000 对象限制及图片占位，另补本地双视图冲突保护；相关回归全部通过，等待 Luna 第二轮核对。被取消的 Astra 任务未参与结论。

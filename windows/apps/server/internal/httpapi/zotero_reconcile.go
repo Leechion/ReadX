@@ -64,10 +64,16 @@ func (s *Server) zoteroLocalView(ctx context.Context, state zoteroMigration, obj
 				if source == "venue" && local["proceedingsTitle"] != nil {
 					target = "proceedingsTitle"
 				}
+				if !zoteroEqual(local[target], object.Base[target]) && !zoteroEqual(local[target], fields[source]) {
+					return local, fmt.Errorf("本地镜像与书库题录同时修改了 %s，请先统一或明确采用 Zotero", source)
+				}
 				local[target] = fields[source]
 			}
 		}
 		if !zoteroEqual(fields["authors"], object.DocumentBase["authors"]) {
+			if !zoteroEqual(local["creators"], object.Base["creators"]) && !zoteroEqual(zoteroCreators(local["creators"]), doc.Authors) {
+				return local, fmt.Errorf("本地镜像与书库作者同时修改，请先统一或明确采用 Zotero")
+			}
 			creators := []any{}
 			if prior, ok := local["creators"].([]any); ok {
 				for _, entry := range prior {
@@ -85,6 +91,13 @@ func (s *Server) zoteroLocalView(ctx context.Context, state zoteroMigration, obj
 			year := ""
 			if doc.Year != nil {
 				year = fmt.Sprint(*doc.Year)
+				before := zoteroString(object.Base, "date")
+				if location := zoteroYearPattern.FindStringIndex(before); location != nil {
+					year = before[:location[0]] + year + before[location[1]:]
+				}
+			}
+			if !zoteroEqual(local["date"], object.Base["date"]) && !zoteroEqual(local["date"], year) {
+				return local, fmt.Errorf("本地镜像与书库年份同时修改，请先统一或明确采用 Zotero")
 			}
 			local["date"] = year
 		}
@@ -129,6 +142,10 @@ func (s *Server) zoteroLocalView(ctx context.Context, state zoteroMigration, obj
 		}
 		if quote == expectedQuote && note == expectedNote {
 			continue
+		}
+		localQuote, localNote := zoteroNoteValues(local)
+		if (localQuote != expectedQuote || localNote != expectedNote) && (localQuote != quote || localNote != note) {
+			return local, fmt.Errorf("本地镜像与阅读器批注同时修改且内容不同，请先统一或明确采用 Zotero")
 		}
 		edited := zoteroClone(local)
 		if zoteroString(local, "itemType") == "note" {

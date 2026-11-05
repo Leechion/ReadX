@@ -199,7 +199,7 @@ func (s *Server) handleZoteroSnapshot(w http.ResponseWriter, r *http.Request) {
 	snapshot := map[string]any{"serverId": id, "at": time.Now().UTC().Format(time.RFC3339), "disclosure": "本机题录、集合关系和笔记原始数据快照；不含附件二进制，不等于完整文库迁移。"}
 	for _, resource := range []string{"collections", "items"} {
 		objects := []zoteroObject{}
-		for page := 0; page < 50; page++ {
+		for page := 0; ; page++ {
 			raw, _, status, e := s.zoteroLocal(ctx, "GET", "/users/0/"+resource+"?limit=100&start="+fmt.Sprint(page*100), nil, id, "")
 			if e != nil {
 				writeError(w, 502, e.Error())
@@ -217,10 +217,6 @@ func (s *Server) handleZoteroSnapshot(w http.ResponseWriter, r *http.Request) {
 			objects = append(objects, batch...)
 			if len(batch) < 100 {
 				break
-			}
-			if page == 49 {
-				writeError(w, 413, "本次读取超过 5000 个对象，未保存截断快照")
-				return
 			}
 		}
 		snapshot[resource] = objects

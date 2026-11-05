@@ -283,3 +283,24 @@ func TestProcessingShelfIdentityAndDeletePreserveDeny(t *testing.T) {
 		t.Fatal("same name reused deleted identity", items, err)
 	}
 }
+
+func TestProcessingLocalZoteroPullRemainsAvailableWhenSendingIsDenied(t *testing.T) {
+	s := processingTestServer(t)
+	_, err := s.handle.Exec(`INSERT INTO app_state(key,value_json,updated_at) VALUES(?,?,'')`, processingPolicyKey, `{"revision":1,"library":"deny"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"/v1/zotero/snapshot", "/v1/zotero/migrations", "/v1/zotero/reconcile", "/v1/zotero/reconcile/apply"} {
+		called := false
+		w := httptest.NewRecorder()
+		s.enforceProcessing(func(http.ResponseWriter, *http.Request) { called = true })(w, httptest.NewRequest("POST", path, strings.NewReader(`{"choice":"pull"}`)))
+		if !called {
+			t.Fatalf("local read/pull blocked at %s: %s", path, w.Body.String())
+		}
+	}
+	w := httptest.NewRecorder()
+	s.enforceProcessing(func(http.ResponseWriter, *http.Request) { t.Fatal("push bypassed library deny") })(w, httptest.NewRequest("POST", "/v1/zotero/reconcile/apply", strings.NewReader(`{"choice":"push"}`)))
+	if w.Code != 403 {
+		t.Fatal(w.Body.String())
+	}
+}

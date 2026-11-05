@@ -42,7 +42,7 @@
     "test:packaged": "node scripts/packaged-smoke.mjs",
     "test:updates": "node scripts/import-smoke.cjs --updates",
     "test:backup": "npm run build -w @cbct/shared && npm run build -w @cbct/desktop && node --experimental-sqlite --test apps/desktop/test/backup.test.cjs scripts/browser-backup.test.cjs",
-    "test:external": "node scripts/go.mjs test ./internal/httpapi -run \"TestProcessing|TestScholar|TestBrowserCapture|TestReadonlyShare|TestZoteroNotes\" -timeout 60s -count=1 && node --test scripts/external-features.test.cjs"
+    "test:external": "node scripts/go.mjs test ./internal/httpapi -run \"TestProcessing|TestScholar|TestBrowserCapture|TestReadonlyShare|TestZotero\" -timeout 60s -count=1 && node --test scripts/external-features.test.cjs"
   },
   "allowScripts": {
     "electron@44.2.0": true,

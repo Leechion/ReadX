@@ -216,6 +216,9 @@ func (s *Server) handleProcessingApproval(w http.ResponseWriter, r *http.Request
 // These are research-related network/AI entry points, not local reading routes.
 func processingAction(r *http.Request) string {
 	p := r.URL.Path
+	if r.Method == http.MethodPost && (p == "/v1/zotero/snapshot" || p == "/v1/zotero/migrations" || p == "/v1/zotero/reconcile") {
+		return ""
+	}
 	switch {
 	case p == "/v1/import/files":
 		return "文件导入与 OCR／翻译"
@@ -391,6 +394,9 @@ func prepareProcessingRequest(r *http.Request, d *processingDescription) (string
 		if json.Unmarshal(raw, &value) == nil {
 			collectProcessingKeys(value, "", docs, projects)
 			if object, ok := value.(map[string]any); ok {
+				if r.URL.Path == "/v1/zotero/reconcile/apply" && object["choice"] == "pull" {
+					localOnly = true
+				}
 				field := ""
 				if r.URL.Path == "/v1/ai/models" || r.URL.Path == "/v1/ai/test" {
 					field = "baseURL"
@@ -533,7 +539,7 @@ func processingMaterials(r *http.Request) []string {
 	p := r.URL.Path
 	switch {
 	case strings.HasPrefix(p, "/v1/zotero/"):
-		return []string{"向本机 Zotero 查询所选条目／集合；写回时发送当前确认的 ReadX 子笔记文本及父条目标识。不会直接修改 Zotero 数据库。"}
+		return []string{"向本机 Zotero 查询题录、集合、笔记、原生批注和本机附件；迁移只复制到本地档案。确认回写时发送所选对象的题录／集合／笔记／批注 JSON 或 ReadX 专属研究笔记。不会直接修改 Zotero 数据库；不覆盖附件原文件，不自动传播删除。"}
 	case p == "/v1/shares/readonly":
 		return []string{"所选文献题录，以及你勾选的 PDF／EPUB 原文、个人批注、AI 精读、研究想法和对照数据；不包含配置、密钥、聊天、任务日志或系统文件路径"}
 	case p == "/v1/ai/models" || p == "/v1/ai/test":

@@ -14,6 +14,7 @@ import { ZoteroImportPanel } from './ZoteroImportPanel';
 import { ScholarDiscoveryPanel } from './ScholarDiscoveryPanel';
 import { CaptureInboxPanel } from './CaptureInboxPanel';
 import { ZoteroNotesPanel } from './ZoteroNotesPanel';
+import { ZoteroMigrationPanel } from './ZoteroMigrationPanel';
 import type { BatchShot } from './BatchShotVolley';
 
 const MAX_PDF_BYTES = 512 * 1048576;
@@ -329,6 +330,7 @@ export function ImportDialog({
       <ScholarDiscoveryPanel busy={busy} onDownload={importLink} />
       <CaptureInboxPanel busy={busy} onDownload={importLink} />
       <ZoteroNotesPanel busy={busy} />
+      <ZoteroMigrationPanel busy={busy} onImported={onImported} />
       <label className="text-sm">
         <input type="checkbox" checked={localOnly} disabled={busy} onChange={event => setLocalOnly(event.target.checked)} />
         仅保存原文（无需 AI / OCR 配置）

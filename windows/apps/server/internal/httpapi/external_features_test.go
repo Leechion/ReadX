@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestScholarSourcesRecordQueriesAndPartialFailures(t *testing.T) {
@@ -145,6 +146,27 @@ func TestScholarLibraryMatchesKnownDOIAndConservativeMetadata(t *testing.T) {
 	}
 	if hits[0].ExistingKey != "p" || hits[1].ExistingKey != "p" || hits[2].ExistingKey != "" {
 		t.Fatal(hits)
+	}
+}
+
+func TestScholarLiveSources(t *testing.T) {
+	if os.Getenv("READX_LIVE_SCHOLAR") != "1" {
+		t.Skip("opt-in public-source integration test")
+	}
+	s := processingTestServer(t)
+	for _, source := range []string{"crossref", "pubmed", "openalex"} {
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		results, total, err := s.searchScholar(ctx, source, "CBCT", 1)
+		cancel()
+		if err != nil {
+			t.Errorf("%s: %v", source, err)
+			continue
+		}
+		if len(results) == 0 || total == 0 {
+			t.Errorf("%s: empty live result", source)
+		} else {
+			t.Logf("%s: %d entries, source reports %d", source, len(results), total)
+		}
 	}
 }
 func TestBrowserCaptureOnlyStoresValidatedLocalDraft(t *testing.T) {

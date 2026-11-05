@@ -46,6 +46,7 @@ type Server struct {
 	scholarMu           sync.Mutex
 	nextEutils          time.Time
 	zoteroWriteMu       sync.Mutex
+	zoteroMigrationMu   sync.Mutex
 	zoteroWriteKey      string
 	zoteroWriteRemember bool
 	zoteroWriteServer   string
@@ -117,6 +118,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/zotero/note", withAuth(s.handleZoteroNote))
 	mux.Handle("POST /v1/zotero/note", withAuth(s.handleZoteroNote))
 	mux.Handle("GET /v1/zotero/draft", withAuth(s.handleZoteroDraft))
+	mux.Handle("GET /v1/zotero/migrations", withAuth(s.handleZoteroMigration))
+	mux.Handle("POST /v1/zotero/migrations", withAuth(s.handleZoteroMigration))
+	mux.Handle("GET /v1/zotero/migrations/{id}/archive", withAuth(s.handleZoteroArchive))
+	mux.Handle("PATCH /v1/zotero/mirror", withAuth(s.handleZoteroMirrorEdit))
+	mux.Handle("POST /v1/zotero/reconcile", withAuth(s.handleZoteroReconcile))
+	mux.Handle("POST /v1/zotero/reconcile/apply", withAuth(s.handleZoteroReconcileApply))
 	mux.Handle("/v1/meta", withAuth(s.handleMeta))
 	mux.Handle("/v1/sync/settings", withAuth(s.handleSyncSettings))
 	mux.Handle("/v1/sync", withAuth(s.handleSyncNow))

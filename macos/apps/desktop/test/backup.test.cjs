@@ -64,6 +64,20 @@ test('damaged backups and destination recursion are rejected before current data
   assert.equal(await fs.readFile(path.join(f.roots.data, 'library/paper.pdf'), 'utf8'), '%PDF-original');
 });
 
+test('restore retains denied rules and requires confirmation for previous allows', async t => {
+  const f = await fixture(t);
+  const db = new DatabaseSync(path.join(f.roots.data, 'app/data/v2/reader.db'));
+  db.prepare('INSERT INTO app_state VALUES(?,?)').run('processing.policy.v1', JSON.stringify({revision:9,library:'allow',documents:{private:'deny',public:'allow'},shelves:{s1:'deny',s2:'allow'},projects:{p:'allow'}}));
+  db.close();
+  await createBackup(f.archive, f.roots, f.browserState);
+  const data = path.join(f.root, 'new-data'), profile = path.join(f.root, 'new-profile');
+  await restoreBackup(f.archive, {data,profile});
+  const restored = new DatabaseSync(path.join(data, 'app/data/v2/reader.db'));
+  const policy = JSON.parse(restored.prepare("SELECT value_json FROM app_state WHERE key='processing.policy.v1'").get().value_json);
+  restored.close();
+  assert.equal(policy.library,'ask');assert.equal(policy.documents.private,'deny');assert.equal(policy.documents.public,'ask');assert.equal(policy.shelves.s1,'deny');assert.equal(policy.shelves.s2,'ask');assert.equal(policy.projects.p,'ask');assert.equal(policy.revision,10);assert.ok(policy.restoredAt);
+});
+
 test('committed WAL data is checkpointed into the archive without losing recent records', async t => {
   const f = await fixture(t);
   const db = new DatabaseSync(path.join(f.roots.data, 'app/data/v2/reader.db'));

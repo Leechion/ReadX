@@ -24,10 +24,12 @@ import (
 const processingPolicyKey = "processing.policy.v1"
 
 type processingPolicy struct {
-	Revision  int64             `json:"revision"`
-	Library   string            `json:"library"`
-	Documents map[string]string `json:"documents"`
-	Projects  map[string]string `json:"projects"`
+	Revision   int64             `json:"revision"`
+	Library    string            `json:"library"`
+	Documents  map[string]string `json:"documents"`
+	Projects   map[string]string `json:"projects"`
+	Shelves    map[string]string `json:"shelves"`
+	RestoredAt string            `json:"restoredAt,omitempty"`
 }
 type processingDescription struct {
 	Action        string   `json:"action"`
@@ -39,6 +41,8 @@ type processingDescription struct {
 	Disclosure    string   `json:"disclosure"`
 	DocumentNames []string `json:"documentNames"`
 	ProjectNames  []string `json:"projectNames"`
+	Shelves       []string `json:"shelves"`
+	ShelfNames    []string `json:"shelfNames"`
 }
 type processingAudit struct {
 	At        string   `json:"at"`
@@ -98,6 +102,9 @@ func (s *Server) processingPolicy(ctx context.Context) (processingPolicy, error)
 	if p.Projects == nil {
 		p.Projects = map[string]string{}
 	}
+	if p.Shelves == nil {
+		p.Shelves = map[string]string{}
+	}
 	return p, nil
 }
 func processingMode(mode string) bool { return mode == "ask" || mode == "allow" || mode == "deny" }
@@ -121,13 +128,24 @@ func (s *Server) handleProcessingPolicy(w http.ResponseWriter, r *http.Request) 
 	if decodeJSON(w, r, &body) != nil {
 		return
 	}
-	if !processingMode(body.Mode) || (body.Scope != "library" && body.Scope != "document" && body.Scope != "project") {
+	if !processingMode(body.Mode) || (body.Scope != "library" && body.Scope != "document" && body.Scope != "project" && body.Scope != "shelf") {
 		writeError(w, 400, "无效的处理权限")
 		return
 	}
 	if body.Scope != "library" {
 		if _, err := safeKey(body.Key, "对象键"); err != nil {
 			writeError(w, 400, err.Error())
+			return
+		}
+	}
+	if body.Scope == "shelf" {
+		categories, err := s.loadCategories(r.Context())
+		found := false
+		for _, category := range categories {
+			found = found || category.ID == body.Key
+		}
+		if err != nil || !found {
+			writeError(w, 400, "书架不存在，请刷新后重试")
 			return
 		}
 	}
@@ -145,6 +163,9 @@ func (s *Server) handleProcessingPolicy(w http.ResponseWriter, r *http.Request) 
 		if p.Projects == nil {
 			p.Projects = map[string]string{}
 		}
+		if p.Shelves == nil {
+			p.Shelves = map[string]string{}
+		}
 		switch body.Scope {
 		case "library":
 			p.Library = body.Mode
@@ -152,7 +173,10 @@ func (s *Server) handleProcessingPolicy(w http.ResponseWriter, r *http.Request) 
 			p.Documents[body.Key] = body.Mode
 		case "project":
 			p.Projects[body.Key] = body.Mode
+		case "shelf":
+			p.Shelves[body.Key] = body.Mode
 		}
+		p.RestoredAt = ""
 		p.Revision++
 		saved = p
 		return json.Marshal(p)
@@ -162,11 +186,7 @@ func (s *Server) handleProcessingPolicy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	// Policy changes revoke prior plans and cancel work authorized by the old epoch.
-	if s.processingCancel != nil {
-		s.processingCancel()
-	}
-	s.processingEpoch, s.processingCancel = context.WithCancel(context.Background())
-	s.processingTickets = map[string]processingTicket{}
+	s.revokeProcessingLocked()
 	writeJSON(w, 200, saved)
 }
 func (s *Server) handleProcessingApproval(w http.ResponseWriter, r *http.Request) {
@@ -392,6 +412,11 @@ func prepareProcessingRequest(r *http.Request, d *processingDescription) (string
 }
 func effectiveProcessingMode(p processingPolicy, d processingDescription) string {
 	modes := []string{p.Library}
+	for _, id := range d.Shelves {
+		if mode := p.Shelves[id]; mode != "" {
+			modes = append(modes, mode)
+		}
+	}
 	for _, key := range d.Documents {
 		if mode := p.Documents[key]; mode != "" {
 			modes = append(modes, mode)
@@ -567,6 +592,10 @@ func (s *Server) enforceProcessing(next http.HandlerFunc) http.HandlerFunc {
 				return
 			}
 		}
+		if err := s.processingShelves(r.Context(), &d); err != nil {
+			writeError(w, 500, err.Error())
+			return
+		}
 		for _, id := range d.Projects {
 			if nodes, e := s.latexService().Tree(r.Context(), id); e == nil {
 				for _, node := range nodes {
@@ -599,6 +628,11 @@ func (s *Server) enforceProcessing(next http.HandlerFunc) http.HandlerFunc {
 		s.processingMu.Lock()
 		p, err := s.processingPolicy(r.Context())
 		if err != nil {
+			s.processingMu.Unlock()
+			writeError(w, 500, err.Error())
+			return
+		}
+		if err := s.processingShelves(r.Context(), &d); err != nil {
 			s.processingMu.Unlock()
 			writeError(w, 500, err.Error())
 			return

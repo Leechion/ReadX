@@ -415,7 +415,11 @@ func (s *Server) runLocalPDFImport(
 	if policyErr != nil {
 		return importResult{Name: name}, policyErr
 	}
-	if effectiveProcessingMode(policy, processingDescription{Documents: []string{jobKey}}) == "deny" {
+	mode, modeErr := s.processingDocumentMode(ctx, policy, jobKey)
+	if modeErr != nil {
+		return importResult{Name: name}, modeErr
+	}
+	if mode == "deny" {
 		return importResult{Name: name}, fmt.Errorf("该论文或书库禁止外部处理，未提交 OCR／题录补全")
 	}
 	if _, lookupErr := s.loadDocument(ctx, jobKey); lookupErr == nil {

@@ -235,3 +235,51 @@ func TestProcessingDownloadedContentRechecksDocumentDeny(t *testing.T) {
 		t.Fatalf("document deny was not checked before OCR: %v", err)
 	}
 }
+
+func TestProcessingShelfIdentityAndDeletePreserveDeny(t *testing.T) {
+	s := processingTestServer(t)
+	_, err := s.handle.Exec(`INSERT INTO app_state(key,value_json,updated_at) VALUES('library.categories','[{"name":"敏感论文","color":"rose","order":0}]','')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := s.loadCategories(context.Background())
+	if err != nil || len(items) != 1 || items[0].ID == "" {
+		t.Fatal(items, err)
+	}
+	id := items[0].ID
+	again, _ := s.loadCategories(context.Background())
+	if again[0].ID != id {
+		t.Fatal("shelf identity changed")
+	}
+	if err = s.saveMeta(context.Background(), "paper", DocumentMeta{Categories: []string{"敏感论文"}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, body := range []string{`{"scope":"library","mode":"allow"}`, `{"scope":"shelf","key":"` + id + `","mode":"deny"}`} {
+		w := httptest.NewRecorder()
+		s.handleProcessingPolicy(w, httptest.NewRequest("PATCH", "/", strings.NewReader(body)))
+		if w.Code != 200 {
+			t.Fatal(w.Body.String())
+		}
+	}
+	out := policyRequest(s, `{"key":"paper"}`, "", func(http.ResponseWriter, *http.Request) { t.Fatal("sensitive shelf sent content") })
+	if out.Code != 403 {
+		t.Fatal(out.Body.String())
+	}
+	r := httptest.NewRequest("DELETE", "/", nil)
+	r.SetPathValue("name", "敏感论文")
+	w := httptest.NewRecorder()
+	s.handleCategoryDelete(w, r)
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	p, _ := s.processingPolicy(context.Background())
+	if p.Documents["paper"] != "deny" {
+		t.Fatal("removing shelf granted permission")
+	}
+	items, err = s.mutateCategoriesResult(context.Background(), func(items []Category) ([]Category, error) {
+		return append(items, Category{Name: "敏感论文", Color: "rose"}), nil
+	})
+	if err != nil || items[0].ID == id {
+		t.Fatal("same name reused deleted identity", items, err)
+	}
+}

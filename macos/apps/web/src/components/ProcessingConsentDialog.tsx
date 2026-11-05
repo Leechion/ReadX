@@ -29,6 +29,7 @@ export function ProcessingConsentDialog() {
     {!!info.files?.length && <p>文件：{info.files.join('、')}</p>}
     {!!info.documents.length && <p>文档：{info.documentNames?.join('、') || `${info.documents.length} 篇`}</p>}
     {!!info.projects.length && <p>项目：{info.projectNames?.join('、') || `${info.projects.length} 个`}</p>}
+    {!!info.shelfNames?.length && <p>书架：{info.shelfNames.join('、')}</p>}
     <p>{info.disclosure}</p>
     <p>确认仅适用于本次请求及其后台处理。可在 AI 设置中禁止该库、文档或项目的外部发送。</p>
     <footer><button onClick={() => current.answer(false)}>取消，不发送</button><button className="primary-button" onClick={() => current.answer(true)}>允许本次发送</button></footer>

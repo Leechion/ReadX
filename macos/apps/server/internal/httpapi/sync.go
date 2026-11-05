@@ -1109,6 +1109,19 @@ func applySyncLibraryMeta(ctx context.Context, tx *sql.Tx, merged map[string][]s
 		return err
 	}
 
+	localIDs := map[string]string{}
+	var localRaw string
+	if err := tx.QueryRowContext(ctx, `SELECT value_json FROM app_state WHERE key='library.categories'`).Scan(&localRaw); err == nil {
+		var local []Category
+		if err = json.Unmarshal([]byte(localRaw), &local); err != nil {
+			return err
+		}
+		for _, category := range local {
+			localIDs[category.Name] = category.ID
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	categories := make([]Category, 0)
 	for entity, versions := range merged {
 		if !strings.HasPrefix(entity, "category/") {
@@ -1124,6 +1137,16 @@ func applySyncLibraryMeta(ctx context.Context, tx *sql.Tx, merged map[string][]s
 		}
 		if category.Name != strings.TrimPrefix(entity, "category/") {
 			return errors.New("category name does not match its sync entity")
+		}
+		if id := localIDs[category.Name]; id != "" {
+			category.ID = id
+		}
+		if category.ID == "" {
+			id, err := randomLeeJobID()
+			if err != nil {
+				return err
+			}
+			category.ID = "shelf-" + id
 		}
 		categories = append(categories, category)
 	}

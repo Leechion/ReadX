@@ -177,6 +177,20 @@ function migrateDatabase(file: string, old: BackupRoots, roots: BackupRoots, ext
         }
       }
     }
+    if (tables.some(table => table.name === 'app_state')) {
+      const row = db.prepare("SELECT value_json FROM app_state WHERE key='processing.policy.v1'").get();
+      if (row) {
+        const policy = JSON.parse(String(row.value_json)) as Record<string, unknown>;
+        if (policy.library === 'allow') policy.library = 'ask';
+        for (const scope of ['documents', 'projects', 'shelves']) {
+          const rules = policy[scope] as Record<string, string> | undefined;
+          if (rules) for (const key of Object.keys(rules)) if (rules[key] === 'allow') rules[key] = 'ask';
+        }
+        policy.revision = Number(policy.revision || 0) + 1;
+        policy.restoredAt = new Date().toISOString();
+        db.prepare("UPDATE app_state SET value_json=? WHERE key='processing.policy.v1'").run(JSON.stringify(policy));
+      }
+    }
     db.exec('COMMIT; PRAGMA wal_checkpoint(TRUNCATE)');
   } catch (error) {
     try { db.exec('ROLLBACK'); } catch { /* The transaction may already have committed. */ }

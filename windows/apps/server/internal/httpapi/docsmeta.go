@@ -40,6 +40,7 @@ func emptyMeta(key string) DocumentMeta {
 // Category 是彩色分类的定义：名字 + 颜色 + 排序。与参考实现「彩色分类」一致，
 // 分类定义是库级的一份，论文只引用分类名（改色不需要回写每篇论文）。
 type Category struct {
+	ID    string `json:"id"`
 	Name  string `json:"name"`
 	Color string `json:"color"`
 	Order int    `json:"order"`
@@ -133,6 +134,10 @@ func (s *Server) handleCategoryDelete(w http.ResponseWriter, r *http.Request) {
 	name := strings.TrimSpace(r.PathValue("name"))
 	if name == "" {
 		writeError(w, http.StatusBadRequest, "分类名不能为空")
+		return
+	}
+	if err := s.protectRemovedCategory(r.Context(), name); err != nil {
+		writeError(w, 500, err.Error())
 		return
 	}
 	kept, err := s.mutateCategoriesResult(r.Context(), func(categories []Category) ([]Category, error) {
@@ -244,6 +249,10 @@ func (s *Server) handleDocumentMetaPatch(w http.ResponseWriter, r *http.Request)
 	}
 
 	current := emptyMeta(key)
+	if body.Categories != nil {
+		s.processingMu.Lock()
+		defer s.processingMu.Unlock()
+	}
 	if err := s.mutateAllMeta(r.Context(), func(all map[string]DocumentMeta) (map[string]DocumentMeta, error) {
 		current = emptyMeta(key)
 		if item, ok := all[key]; ok {
@@ -274,6 +283,9 @@ func (s *Server) handleDocumentMetaPatch(w http.ResponseWriter, r *http.Request)
 	}); err != nil {
 		writeError(w, http.StatusInternalServerError, "保存论文元数据失败: "+err.Error())
 		return
+	}
+	if body.Categories != nil {
+		s.revokeProcessingLocked()
 	}
 	writeJSON(w, http.StatusOK, current)
 }
@@ -470,6 +482,11 @@ func (s *Server) loadCategories(ctx context.Context) ([]Category, error) {
 	if !exists || categories == nil {
 		return []Category{}, nil
 	}
+	for _, category := range categories {
+		if category.ID == "" {
+			return s.mutateCategoriesResult(ctx, func(items []Category) ([]Category, error) { return items, nil })
+		}
+	}
 	return categories, nil
 }
 
@@ -492,6 +509,15 @@ func (s *Server) mutateCategoriesResult(ctx context.Context, fn func(categories 
 		next, err := fn(categories)
 		if err != nil {
 			return nil, err
+		}
+		for index := range next {
+			if next[index].ID == "" {
+				id, e := randomLeeJobID()
+				if e != nil {
+					return nil, e
+				}
+				next[index].ID = "shelf-" + id
+			}
 		}
 		result = next
 		return json.Marshal(next)

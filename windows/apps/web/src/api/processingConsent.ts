@@ -2,6 +2,7 @@ export interface ProcessingDescription {
   action: string; documents: string[]; projects: string[]; materials: string[];
   destinations: string[]; files?: string[]; disclosure: string;
   documentNames?: string[]; projectNames?: string[];
+  shelves?: string[]; shelfNames?: string[];
 }
 export interface ProcessingChallenge { requestId: string; processing: ProcessingDescription }
 type Decision = (challenge: ProcessingChallenge, signal?: AbortSignal) => Promise<boolean>;

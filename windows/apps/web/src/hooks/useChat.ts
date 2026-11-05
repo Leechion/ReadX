@@ -52,13 +52,23 @@ export function useChat(key: string | null, transport: ChatTransport = streamCha
   const epoch = useRef(0);
   const documentRef = useRef(key);
   const commit = useCallback((next: typeof data) => { dataRef.current = next; setData(next); }, []);
+  const flush = useCallback(() => {
+    const currentKey = documentRef.current;
+    if (!currentKey) return;
+    const snapshot = { ...dataRef.current, conversations: dataRef.current.conversations.map(c => ({ ...c,
+      turns: c.turns.map(turn => turn.role === 'ai' && !turn.completed && !turn.error
+        ? { ...turn, completed: false, error: '已停止；这条回答不进入后续上下文。' } : turn),
+    })) };
+    try { localStorage.setItem(storageKey(currentKey), JSON.stringify(snapshot)); }
+    catch { console.warn('本机聊天历史保存失败，请检查存储空间。'); }
+  }, []);
   useEffect(() => {
     documentRef.current = key;
     ++epoch.current;
     controller.current?.abort(); controller.current = null;
     commit(load(key)); setDataKey(key); setBusy(false); setStorageError(''); setDeleted(null);
-    return () => { ++epoch.current; controller.current?.abort(); controller.current = null; };
-  }, [key, commit]);
+    return () => { flush(); ++epoch.current; controller.current?.abort(); controller.current = null; };
+  }, [key, commit, flush]);
   const hasConversationHistory = data.conversations.some((conversation) =>
     conversation.turns.some((turn) => turn.role === 'user' && !!turn.text.trim()),
   );
@@ -67,10 +77,10 @@ export function useChat(key: string | null, transport: ChatTransport = streamCha
     void api.setStatus(key, hasConversationHistory ? 'reading' : 'queue').catch(() => {});
   }, [key, dataKey, hasConversationHistory, trackDocumentStatus]);
   useEffect(() => {
-    if (!key || documentRef.current !== key || busy) return;
+    if (!key || dataKey !== key || documentRef.current !== key || busy) return;
     try { localStorage.setItem(storageKey(key), JSON.stringify(data)); setStorageError(''); }
     catch { setStorageError('本机历史保存失败；请及时复制需要保留的回答。'); }
-  }, [data, busy, key]);
+  }, [data, dataKey, busy, key]);
 
   const send = useCallback(async (question: string, mode = '', regenerate = false, images: string[] = []) => {
     if (!key || controller.current || !question.trim()) return;
@@ -156,7 +166,7 @@ export function useChat(key: string | null, transport: ChatTransport = streamCha
         : turn) }
       : conversation) });
   }, [commit]);
-  const stop = useCallback(() => controller.current?.abort(), []);
+  const stop = useCallback(() => { flush(); controller.current?.abort(); }, [flush]);
   const newConversation = () => {
     if (controller.current) return;
     const current = dataRef.current;

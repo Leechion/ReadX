@@ -150,6 +150,8 @@ declare global {
     __CBCT_V2__?: BootstrapInfo;
     __READX_DESKTOP_UPDATES__?: DesktopUpdateBridge;
     __READX_SYNC__?: DesktopSyncBridge;
+    __READX_BACKUP__?: DesktopBackupBridge;
+    __READX_CAPTURE__?: { enable(): Promise<boolean> };
     __READX_LAUNCHER__?: DesktopLauncherBridge;
   }
 }
@@ -177,6 +179,14 @@ export interface DesktopSyncBridge {
   chooseFolder(): Promise<string | null>;
   getNutstorePassword(): Promise<string>;
   setNutstorePassword(password: string): Promise<void>;
+}
+
+export interface DesktopBackupBridge {
+  prepare(action: 'create' | 'restore'): Promise<boolean>;
+  cancel(): Promise<void>;
+  run(action: 'create' | 'restore', browserState: string): Promise<boolean>;
+  pendingBrowserState(): Promise<string | null>;
+  acknowledgeBrowserState(): Promise<void>;
 }
 
 export type LauncherWorkspace = 'library' | 'research' | 'presentation' | 'latex' | 'slack';

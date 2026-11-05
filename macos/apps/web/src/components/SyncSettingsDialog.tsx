@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { AppDialog } from './AppDialog';
+import { captureBrowserBackup } from '../lib/browserBackup';
 
 type SyncProvider = 'folder' | 'jianguoyun';
 
@@ -12,6 +13,21 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
   const [lastSync, setLastSync] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const backup = async (action: 'create' | 'restore') => {
+    if (busy || !window.__READX_BACKUP__) return;
+    setBusy(true);
+    setNotice('正在准备本地存储快照…');
+    try {
+      if (!await window.__READX_BACKUP__.prepare(action)) { setNotice('操作已取消'); return; }
+      const state = await captureBrowserBackup();
+      const started = await window.__READX_BACKUP__.run(action, state);
+      setNotice(started ? '应用即将关闭，完成后会自动重新启动。' : '操作已取消');
+    } catch (error) {
+      await window.__READX_BACKUP__.cancel();
+      setNotice(error instanceof Error ? error.message : String(error));
+    }
+    finally { setBusy(false); }
+  };
 
   useEffect(() => {
     let active = true;
@@ -114,6 +130,14 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
         <span className={`ai-chip${provider === 'jianguoyun' ? ' ok' : ''}`}>{provider === 'jianguoyun' ? '坚果云' : '本地目录'}</span>
       </header>
       <div className="ai-settings-body">
+        {window.__READX_BACKUP__ && <section className="ai-card">
+          <header>完整备份与恢复</header>
+          <p className="ai-hint">保存论文、数据库、译文、LaTeX 项目、聊天、研究工作台及独立文库。备份在应用关闭后执行，完成后自动重启；恢复前校验文件并保留当前数据。备份可能包含服务密钥，请妥善保管。</p>
+          <div className="ai-ocr-actions">
+            <button type="button" disabled={busy} onClick={() => void backup('create')}>创建完整备份</button>
+            <button type="button" disabled={busy} onClick={() => void backup('restore')}>从备份恢复</button>
+          </div>
+        </section>}
         <section className="ai-card">
           <header><span className="ai-card-icon" aria-hidden="true">⇄</span>选择同步服务商</header>
           <label>

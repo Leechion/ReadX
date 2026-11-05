@@ -13,6 +13,8 @@ import { downloadVerifiedUpdate } from './update-download';
 import { MacInstallerUpdater } from './mac-installer-update';
 import { createUpdateFetcher } from './update-fetch';
 import { DesktopLauncher } from './launcher';
+import { verifyBackup } from './backup';
+import { parseBrowserCapture } from './browser-capture';
 
 /**
  * Electron 壳只做三件事：拉起 Go server、等就绪、把本地 token 交给渲染进程。
@@ -46,6 +48,20 @@ let stopRequested = false;
 let recoveringServer = false;
 let fatalServerDialog = false;
 const restartTimes: number[] = [];
+const pendingBrowserCaptures: string[] = process.argv.filter(arg => arg.startsWith('readx-capture:')).slice(0, 10);
+app.on('open-url', (event, url) => { if (url.startsWith('readx-capture:')) { event.preventDefault(); pendingBrowserCaptures.push(url); void receiveBrowserCaptures(); } });
+async function receiveBrowserCaptures(): Promise<void> {
+  if (!server || !mainWindow) return;
+  for (const raw of pendingBrowserCaptures.splice(0, 10)) {
+    try {
+      const capture = parseBrowserCapture(raw);
+      const response = await net.fetch(originOf(startUrl(server)) + '/v1/capture/inbox', { method: 'POST', headers: { Authorization: `Bearer ${server.info.token}`, 'Content-Type': 'application/json' }, body: JSON.stringify(capture) });
+      if (!response.ok) throw new Error('本地服务未保存采集信息');
+      restoreMainWindow();
+      await dialog.showMessageBox(mainWindow, { message: '采集已保存', detail: '打开「导入文档 → 浏览器采集收件箱」即可查看来源并选择下载。尚未发送至题录或 AI 服务。' });
+    } catch (error) { dialog.showErrorBox('浏览器采集失败', describe(error)); }
+  }
+}
 
 // Keep source launches and the packaged macOS app on the same persistent library.
 if (process.platform === 'darwin' && !process.env.CBCT_DATA_ROOT) {
@@ -56,7 +72,9 @@ if (process.platform === 'darwin' && !process.env.CBCT_DATA_ROOT) {
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    pendingBrowserCaptures.push(...argv.filter(arg => arg.startsWith('readx-capture:')).slice(0, 10));
+    void receiveBrowserCaptures();
     restoreMainWindow();
   });
   void bootstrap();
@@ -65,6 +83,20 @@ if (!app.requestSingleInstanceLock()) {
 async function bootstrap(): Promise<void> {
   await app.whenReady();
   setupUpdater();
+  setupBackup();
+  ipcMain.handle('readx-capture:enable', event => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口启用采集');
+    return app.isPackaged ? app.setAsDefaultProtocolClient('readx-capture') : app.setAsDefaultProtocolClient('readx-capture', process.execPath, [app.getAppPath()]);
+  });
+  const resultArg = process.argv.find(arg => arg.startsWith('--readx-backup-result='));
+  if (resultArg) {
+    const file = resultArg.slice('--readx-backup-result='.length);
+    try {
+      const result = JSON.parse(fs.readFileSync(file, 'utf8')) as { message: string };
+      await dialog.showMessageBox({ message: 'ReadX 备份与恢复', detail: result.message });
+      fs.unlinkSync(file);
+    } catch (error) { dialog.showErrorBox('读取备份结果失败', describe(error)); }
+  }
 
   // 页面内的应用内跳转一律拦回本地阅读页；但指向外部的 http(s) 链接
   // （如每日推荐的「论文来源」）交给系统浏览器打开——原先 setWindowOpenHandler
@@ -123,6 +155,7 @@ async function bootstrap(): Promise<void> {
   }
 
   createWindow();
+  void receiveBrowserCaptures();
   setupLauncher();
 
   app.on('window-all-closed', () => {
@@ -251,6 +284,74 @@ function setupUpdater(): void {
 function publishUpdateStatus(status: DesktopUpdateStatus): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send('readx-updates:status', status);
+}
+
+function setupBackup(): void {
+  const pending = path.join(app.getPath('userData'), 'readx-browser-restore.json');
+  const checkSender = (event: Electron.IpcMainInvokeEvent) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口执行备份操作');
+  };
+  ipcMain.handle('readx-backup:browser-state', event => {
+    checkSender(event);
+    return fs.existsSync(pending) ? fs.readFileSync(pending, 'utf8') : null;
+  });
+  ipcMain.handle('readx-backup:acknowledge', event => {
+    checkSender(event);
+    if (fs.existsSync(pending)) fs.unlinkSync(pending);
+  });
+  let busy = false;
+  let prepared: { action: 'create' | 'restore'; archive: string } | null = null;
+  ipcMain.handle('readx-backup:cancel', event => { checkSender(event); if (!busy) prepared = null; });
+  ipcMain.handle('readx-backup:prepare', async (event, action: unknown) => {
+    checkSender(event);
+    if (busy || prepared) throw new Error('备份操作正在准备中');
+    if (!server?.child || !server.child.pid) throw new Error('请使用独立桌面模式执行备份；当前后端由其他进程管理');
+    if (action !== 'create' && action !== 'restore') throw new Error('未知备份操作');
+    busy = true;
+    try {
+      const selection = await dialog.showOpenDialog(mainWindow!, { title: action === 'create' ? '选择备份保存位置（将在其中新建备份文件夹）' : '选择包含 manifest.json 的备份文件夹', properties: ['openDirectory', ...(action === 'create' ? ['createDirectory' as const] : [])] });
+      if (selection.canceled || !selection.filePaths[0]) return false;
+      const archive = action === 'create' ? path.join(selection.filePaths[0], `ReadX-backup-${new Date().toISOString().replace(/[:.]/g, '-')}`) : selection.filePaths[0];
+      if (action === 'restore') await verifyBackup(archive);
+      const answer = await dialog.showMessageBox(mainWindow!, {
+        type: 'warning', buttons: ['取消', action === 'create' ? '关闭应用并备份' : '关闭应用并恢复'], defaultId: 0, cancelId: 0,
+        message: action === 'create' ? '创建完整备份' : '使用备份替换当前数据',
+        detail: `${archive}\n操作会关闭应用，完成后自动重新启动。${action === 'create' ? '备份包含论文、笔记、聊天、独立文库和配置，可能包含服务密钥，请妥善保管。' : '当前数据会保留在原目录旁的检查点文件夹。恢复不是合并；跨设备的加密密码可能需要重新填写。'}`,
+      });
+      if (answer.response !== 1) return false;
+      prepared = { action, archive };
+      return true;
+    } finally { busy = false; }
+  });
+  ipcMain.handle('readx-backup:run', async (event, action: unknown, browserState: unknown) => {
+    checkSender(event);
+    if (busy || !prepared || action !== prepared.action) throw new Error('请先选择并确认备份操作');
+    if (!server?.child || !server.child.pid) throw new Error('本地服务已退出，请重启后再操作');
+    if (typeof browserState !== 'string' || JSON.parse(browserState).version !== 1) throw new Error('桌面存储快照无效');
+    const { archive } = prepared;
+    prepared = null;
+    busy = true;
+    let launched = false;
+    try {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'readx-backup-'));
+      const stateFile = path.join(directory, 'browser-state.json');
+      fs.writeFileSync(stateFile, browserState, { mode: 0o600 });
+      const result = path.join(os.tmpdir(), `readx-backup-result-${Date.now()}.json`);
+      const plan = path.join(directory, 'plan.json');
+      fs.writeFileSync(plan, JSON.stringify({ action, archive, roots: { data: server.info.dataRoot, profile: app.getPath('userData') }, browserState: stateFile,
+        parents: [process.pid, server.child.pid], executable: process.execPath,
+        args: app.isPackaged ? [] : [app.getAppPath()], result }), { mode: 0o600 });
+      await mainWindow!.webContents.session.flushStorageData();
+      const worker = spawn(process.execPath, [path.join(__dirname, 'backup-worker.js'), plan], {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, cwd: os.tmpdir(), detached: true, stdio: 'ignore', windowsHide: true,
+      });
+      await new Promise<void>((resolve, reject) => { worker.once('spawn', resolve); worker.once('error', reject); });
+      worker.unref();
+      launched = true;
+      setTimeout(() => app.quit(), 100);
+      return true;
+    } finally { if (!launched) busy = false; }
+  });
 }
 
 async function startServer(previous?: ReadyInfo): Promise<ServerHandle> {

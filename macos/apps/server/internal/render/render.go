@@ -9,6 +9,7 @@
 package render
 
 import (
+	"cbctv2/server/internal/proctree"
 	"context"
 	"encoding/json"
 	"errors"
@@ -273,6 +274,7 @@ func (r *Renderer) AssemblePages(ctx context.Context, sourcePath string, pagePat
 		"--pagesManifest", manifestPath,
 		"--assemble", "1",
 	)
+	proctree.Configure(command)
 	env := os.Environ()
 	if strings.TrimSpace(os.Getenv("CBCT_ELECTRON_AS_NODE")) != "" {
 		env = append(env, "ELECTRON_RUN_AS_NODE=1")
@@ -357,6 +359,7 @@ func (r *Renderer) render(ctx context.Context, sourcePDF []byte, pages []Page, o
 		"--fonts", fontDir,
 		"--report", reportPath,
 	)
+	proctree.Configure(command)
 	if sourcePage > 0 {
 		command.Args = append(command.Args, "--page", strconv.Itoa(sourcePage))
 	}

@@ -557,11 +557,15 @@ func normalizeTags(tags []string) ([]string, error) {
 
 // decodeJSON 统一处理「带体请求」的读取与报错。
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	return decodeJSONLimit(w, r, target, 1<<20)
+}
+
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, target any, limit int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
 		var maxErr *http.MaxBytesError
 		if errors.As(err, &maxErr) {
-			writeError(w, http.StatusRequestEntityTooLarge, "请求体超过 1 MiB 上限")
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("请求体超过 %d 字节上限", limit))
 			return err
 		}
 		writeError(w, http.StatusBadRequest, "请求体必须是合法 JSON: "+err.Error())

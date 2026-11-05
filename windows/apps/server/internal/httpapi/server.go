@@ -39,6 +39,18 @@ type Server struct {
 	zLibrary            *booksources.ZLibrary
 	downloadPublication func(context.Context, string, int64, func(int64, int64)) ([]byte, string, error)
 	settingsMu          sync.Mutex
+	processingMu        sync.Mutex
+	processingEpoch     context.Context
+	processingCancel    context.CancelFunc
+	processingTickets   map[string]processingTicket
+	scholarMu           sync.Mutex
+	nextEutils          time.Time
+	zoteroWriteMu       sync.Mutex
+	zoteroWriteKey      string
+	zoteroWriteRemember bool
+	zoteroWriteServer   string
+	zoteroTestURL       string
+	scholarFetch        func(context.Context, string, int64) ([]byte, string, error)
 	syncMu              sync.Mutex
 	realtimeMu          sync.Mutex
 	realtimeSessions    map[string]*latexRealtimeSession
@@ -83,7 +95,25 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", s.handleHealth)
 
-	withAuth := func(h http.HandlerFunc) http.Handler { return s.requireBearer(h) }
+	withAuth := func(h http.HandlerFunc) http.Handler { return s.requireBearer(s.enforceProcessing(h)) }
+	mux.Handle("GET /v1/processing/policy", withAuth(s.handleProcessingPolicy))
+	mux.Handle("GET /v1/processing/audit", withAuth(s.handleProcessingAudit))
+	mux.Handle("PATCH /v1/processing/policy", withAuth(s.handleProcessingPolicy))
+	mux.Handle("POST /v1/processing/approve", withAuth(s.handleProcessingApproval))
+	mux.Handle("POST /v1/scholar/search", withAuth(s.handleScholarSearch))
+	mux.Handle("GET /v1/scholar/history", withAuth(s.handleScholarHistory))
+	mux.Handle("GET /v1/scholar/queue", withAuth(s.handleScholarQueue))
+	mux.Handle("POST /v1/scholar/queue", withAuth(s.handleScholarQueue))
+	mux.Handle("POST /v1/scholar/snowball", withAuth(s.handleScholarSnowball))
+	mux.Handle("POST /v1/shares/readonly", withAuth(s.handleReadonlyShare))
+	mux.Handle("GET /v1/capture/inbox", withAuth(s.handleCaptureInbox))
+	mux.Handle("POST /v1/capture/inbox", withAuth(s.handleCaptureInbox))
+	mux.Handle("POST /v1/zotero/authorize", withAuth(s.handleZoteroAuthorize))
+	mux.Handle("GET /v1/zotero/snapshot", withAuth(s.handleZoteroSnapshot))
+	mux.Handle("POST /v1/zotero/snapshot", withAuth(s.handleZoteroSnapshot))
+	mux.Handle("GET /v1/zotero/note", withAuth(s.handleZoteroNote))
+	mux.Handle("POST /v1/zotero/note", withAuth(s.handleZoteroNote))
+	mux.Handle("GET /v1/zotero/draft", withAuth(s.handleZoteroDraft))
 	mux.Handle("/v1/meta", withAuth(s.handleMeta))
 	mux.Handle("/v1/sync/settings", withAuth(s.handleSyncSettings))
 	mux.Handle("/v1/sync", withAuth(s.handleSyncNow))

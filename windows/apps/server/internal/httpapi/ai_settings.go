@@ -238,7 +238,7 @@ func (s *Server) handleAIModels(w http.ResponseWriter, r *http.Request) {
 	} else {
 		request.Header.Set("Authorization", "Bearer "+key)
 	}
-	response, err := (&http.Client{}).Do(request)
+	response, err := ai.NewHTTPClient().Do(request)
 	if err != nil {
 		writeError(w, 502, "获取模型列表失败："+redactKey(err.Error(), key))
 		return
@@ -323,7 +323,7 @@ func (s *Server) fetchModelCatalog(ctx context.Context, base, provider, key stri
 	} else {
 		request.Header.Set("Authorization", "Bearer "+key)
 	}
-	response, err := (&http.Client{}).Do(request)
+	response, err := ai.NewHTTPClient().Do(request)
 	if err != nil {
 		return nil
 	}

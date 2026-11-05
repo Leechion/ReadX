@@ -2,6 +2,7 @@ package ocr
 
 import (
 	"bytes"
+	"cbctv2/server/internal/proctree"
 	"context"
 	"embed"
 	"encoding/json"
@@ -154,6 +155,7 @@ func normalizeWithLeeProvider(ctx context.Context, raw []json.RawMessage, sizes 
 	script := filepath.Join(root, "normalize.py")
 	args := append(prefixArgs, script)
 	cmd := exec.CommandContext(ctx, python, args...)
+	proctree.Configure(cmd)
 	cmd.Dir = root
 	cmd.Stdin = bytes.NewReader(input)
 	output, err := cmd.Output()

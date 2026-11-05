@@ -3,6 +3,7 @@ import { api, type AISettings, type CodexModel, type OCRSettings } from '../api/
 import { effortLabel, reasoningOptionsForSelection } from './AIModelControls';
 import { ProviderLogo } from './providerLogos';
 import { AppDialog } from './AppDialog';
+import { ProcessingPolicySettings } from './ProcessingPolicySettings';
 
 /**
  * 服务商预设：点一下即填好「渠道 + 地址 + 建议模型」，仍然只落一份配置。
@@ -376,6 +377,7 @@ export function AISettingsDialog({ onClose }: { onClose: () => void }) {
       </header>
 
       <div className="ai-settings-body">
+        <ProcessingPolicySettings />
         <div className="ai-service-row">
           <span className="ai-service-badge">
             {/* 认识的服务商显示其标识；自定义用中性符号；都不是就别硬套别家 logo。 */}

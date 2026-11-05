@@ -30,6 +30,12 @@ type KV interface {
 	Put(ctx context.Context, key string, data []byte) error
 }
 
+// AtomicKV commits an update only if the read value is still current. A callback
+// may be retried on conflict; it must not perform external writes or other effects.
+type AtomicKV interface {
+	Update(context.Context, string, func([]byte, bool) ([]byte, error)) error
+}
+
 // Store 是带每 key 锁的键值存取入口。零值不可用，必须经 New 创建。
 type Store struct {
 	kv    KV
@@ -58,6 +64,9 @@ func (s *Store) Update(ctx context.Context, key string, fn func(cur []byte, exis
 	l := s.lockFor(key)
 	l.Lock()
 	defer l.Unlock()
+	if kv, ok := s.kv.(AtomicKV); ok {
+		return kv.Update(ctx, key, fn)
+	}
 	cur, exists, err := s.kv.Get(ctx, key)
 	if err != nil {
 		return fmt.Errorf("appstate: 读取 %s: %w", key, err)

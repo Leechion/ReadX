@@ -39,6 +39,7 @@ type importResult struct {
 }
 
 type publicationMetadataHint struct {
+	LocalOnly bool                  `json:"localOnly"`
 	Title     string                `json:"title"`
 	Author    string                `json:"author"`
 	Authors   []string              `json:"authors"`
@@ -228,140 +229,158 @@ func (s *Server) handlePublicationUpload(w http.ResponseWriter, r *http.Request)
 			file := files[index]
 			defer workers.Done()
 			defer func() { <-semaphore }()
-		update := func(stage, message string, completed, total int) {
-			report(importProgress{Stage: stage, Message: message, Name: file.Filename, File: index + 1, Files: len(files), Completed: completed, Total: total})
-		}
-		update("received", "上传已接收，正在检查文件", 0, 0)
-		func() {
-			result := importResult{Name: file.Filename}
-			defer func() {
-				result.Name = file.Filename
-				results[index] = result
-			}()
-			f, err := file.Open()
-			if err != nil {
-				result.Error = err.Error()
-				return
+			update := func(stage, message string, completed, total int) {
+				report(importProgress{Stage: stage, Message: message, Name: file.Filename, File: index + 1, Files: len(files), Completed: completed, Total: total})
 			}
-			defer f.Close()
-			limit := s.publicationByteLimit()
-			data, err := io.ReadAll(io.LimitReader(f, limit+1))
-			if err == nil && int64(len(data)) > limit {
-				err = fmt.Errorf("单个文件超过 %d MB", limit>>20)
-			}
-			if err == nil {
-				if isPDFData(data) {
-					hint := publicationMetadataHint{}
-					if index < len(hints) {
-						hint = hints[index]
-					}
-					sum := sha256.Sum256(data)
-					jobKey := "doc-" + hex.EncodeToString(sum[:16])
-					if _, lookupErr := s.loadDocument(ctx, jobKey); lookupErr == nil {
-						doc, restoreErr := s.restoreDocumentFromTrash(ctx, jobKey)
-						if restoreErr != nil {
-							result.Error = restoreErr.Error()
-							return
+			update("received", "上传已接收，正在检查文件", 0, 0)
+			func() {
+				result := importResult{Name: file.Filename}
+				defer func() {
+					result.Name = file.Filename
+					results[index] = result
+				}()
+				f, err := file.Open()
+				if err != nil {
+					result.Error = err.Error()
+					return
+				}
+				defer f.Close()
+				limit := s.publicationByteLimit()
+				data, err := io.ReadAll(io.LimitReader(f, limit+1))
+				if err == nil && int64(len(data)) > limit {
+					err = fmt.Errorf("单个文件超过 %d MB", limit>>20)
+				}
+				if err == nil {
+					if isPDFData(data) {
+						hint := publicationMetadataHint{}
+						if index < len(hints) {
+							hint = hints[index]
 						}
-						update("metadata", "论文已在库中，正在联网补齐缺失的出版信息", 0, 1)
-						doc, result.Warning, restoreErr = s.completeExistingPDFMetadata(ctx, file.Filename, doc)
-						if restoreErr != nil {
-							result.Error = restoreErr.Error()
-							return
-						}
-						result.Document = &doc
-						result.Existing = true
-						update("saving", "已恢复书库中的论文，复用原有处理结果", 1, 1)
-						return
-					} else if !errors.Is(lookupErr, sql.ErrNoRows) {
-						result.Error = lookupErr.Error()
-						return
-					}
-					jobCtx, jobCancel := context.WithCancel(ctx)
-					defer jobCancel()
-					s.beginImportJob(jobKey, file.Filename, len(hint.Pages), jobCancel)
-					// 先把这个 key 告知前端：文件刚进篮筐就能打开任务面板并轮询进度。
-					report(importProgress{Stage: "ocr", Message: "任务已创建，等待 OCR", Name: file.Filename, File: index + 1, Files: len(files), JobKey: jobKey})
-					s.jobStage(jobKey, "ocr", "running", "正在执行 OCR 与段落整理", 0, len(hint.Pages))
-					update("ocr", "正在识别论文并整理段落", 0, 0)
-					metadata := recognizedPaperMetadata{Title: strings.TrimSpace(hint.Title), DOI: strings.TrimSpace(hint.DOI), Authors: hint.Authors, Venue: strings.TrimSpace(hint.Venue), Year: hint.Year}
-					if author := strings.TrimSpace(hint.Author); len(metadata.Authors) == 0 && author != "" {
-						metadata.Authors = []string{author}
-					}
-					sizes, _ := importPageSizes(hint.Pages)
-					var processErr error
-					result, processErr = s.runLocalPDFImport(jobCtx, file.Filename, hint.Source, data, sizes, &metadata, func(stage, message string, completed, total int) {
-						update(stage, message, completed, total)
-					})
-					if processErr != nil {
-						result.Error = processErr.Error()
-						status := importFailureStatus(jobCtx, processErr)
-						message := processErr.Error()
-						if status == "cancelled" {
-							message = "已取消"
-						}
-						s.finishImportJob(jobKey, status, message)
-						return
-					}
-					if result.Document != nil {
-						update("saving", "原文与 OCR 段落译文已保存", 1, 1)
-						if err = s.saveRecognizedPDFMetadata(jobCtx, result.Document.ID, strings.TrimSuffix(filepath.Base(file.Filename), filepath.Ext(file.Filename)), metadata); err == nil {
-							updated, loadErr := s.loadDocument(jobCtx, result.Document.Key)
-							if loadErr != nil {
-								err = loadErr
-							} else {
-								result.Document = &updated
+						if hint.LocalOnly {
+							metadata := recognizedPaperMetadata{Title: strings.TrimSpace(hint.Title), DOI: strings.TrimSpace(hint.DOI), Authors: hint.Authors, Venue: strings.TrimSpace(hint.Venue), Year: hint.Year}
+							if len(metadata.Authors) == 0 && strings.TrimSpace(hint.Author) != "" {
+								metadata.Authors = []string{strings.TrimSpace(hint.Author)}
 							}
+							update("saving", "正在保存原文，不调用 AI 或 OCR", 0, 1)
+							result, err = s.importPublication(ctx, file.Filename, hint.Source, data, metadata)
+							if err != nil {
+								result.Error = err.Error()
+							}
+							return
 						}
-						if err != nil {
-							result.Error = err.Error()
-							status := importFailureStatus(jobCtx, err)
-							message := err.Error()
+						sum := sha256.Sum256(data)
+						jobKey := "doc-" + hex.EncodeToString(sum[:16])
+						if _, lookupErr := s.loadDocument(ctx, jobKey); lookupErr == nil {
+							doc, restoreErr := s.restoreDocumentFromTrash(ctx, jobKey)
+							if restoreErr != nil {
+								result.Error = restoreErr.Error()
+								return
+							}
+							update("metadata", "论文已在库中，正在联网补齐缺失的出版信息", 0, 1)
+							doc, result.Warning, restoreErr = s.completeExistingPDFMetadata(ctx, file.Filename, doc)
+							if restoreErr != nil {
+								result.Error = restoreErr.Error()
+								return
+							}
+							result.Document = &doc
+							result.Existing = true
+							update("saving", "已恢复书库中的论文，复用原有处理结果", 1, 1)
+							return
+						} else if !errors.Is(lookupErr, sql.ErrNoRows) {
+							result.Error = lookupErr.Error()
+							return
+						}
+						jobCtx, jobCancel := context.WithCancel(ctx)
+						defer jobCancel()
+						if s.beginImportJob(jobKey, file.Filename, len(hint.Pages), jobCancel) == nil {
+							result.Error = "相同论文已有导入任务正在运行，请查看处理进度"
+							return
+						}
+						// 先把这个 key 告知前端：文件刚进篮筐就能打开任务面板并轮询进度。
+						report(importProgress{Stage: "ocr", Message: "任务已创建，等待 OCR", Name: file.Filename, File: index + 1, Files: len(files), JobKey: jobKey})
+						s.jobStage(jobKey, "ocr", "running", "正在执行 OCR 与段落整理", 0, len(hint.Pages))
+						update("ocr", "正在识别论文并整理段落", 0, 0)
+						metadata := recognizedPaperMetadata{Title: strings.TrimSpace(hint.Title), DOI: strings.TrimSpace(hint.DOI), Authors: hint.Authors, Venue: strings.TrimSpace(hint.Venue), Year: hint.Year}
+						if author := strings.TrimSpace(hint.Author); len(metadata.Authors) == 0 && author != "" {
+							metadata.Authors = []string{author}
+						}
+						sizes, _ := importPageSizes(hint.Pages)
+						var processErr error
+						result, processErr = s.runLocalPDFImport(jobCtx, file.Filename, hint.Source, data, sizes, &metadata, func(stage, message string, completed, total int) {
+							update(stage, message, completed, total)
+						})
+						if processErr != nil {
+							result.Error = processErr.Error()
+							status := importFailureStatus(jobCtx, processErr)
+							message := processErr.Error()
 							if status == "cancelled" {
 								message = "已取消"
 							}
 							s.finishImportJob(jobKey, status, message)
-						} else if len(metadata.LayoutPages) == 0 {
-							result.Error = "OCR 没有保存可供排版的段落"
-							s.finishImportJob(jobKey, "failed", result.Error)
+							return
+						}
+						if result.Document != nil {
+							update("saving", "原文与 OCR 段落译文已保存", 1, 1)
+							if err = s.saveRecognizedPDFMetadata(jobCtx, result.Document.ID, strings.TrimSuffix(filepath.Base(file.Filename), filepath.Ext(file.Filename)), metadata); err == nil {
+								updated, loadErr := s.loadDocument(jobCtx, result.Document.Key)
+								if loadErr != nil {
+									err = loadErr
+								} else {
+									result.Document = &updated
+								}
+							}
+							if err != nil {
+								result.Error = err.Error()
+								status := importFailureStatus(jobCtx, err)
+								message := err.Error()
+								if status == "cancelled" {
+									message = "已取消"
+								}
+								s.finishImportJob(jobKey, status, message)
+							} else if len(metadata.LayoutPages) == 0 {
+								result.Error = "OCR 没有保存可供排版的段落"
+								s.finishImportJob(jobKey, "failed", result.Error)
+							} else {
+								// OCR 入库后后台翻译/排版仍在运行；由后台 worker 收尾任务。
+							}
+						}
+					} else {
+						sum := sha256.Sum256(data)
+						jobKey := "doc-" + hex.EncodeToString(sum[:16])
+						jobCtx, jobCancel := context.WithCancel(ctx)
+						defer jobCancel()
+						if s.beginImportJob(jobKey, file.Filename, 0, jobCancel) == nil {
+							result.Error = "相同文档已有导入任务正在运行"
+							return
+						}
+						s.jobStage(jobKey, "ocr", "skipped", "EPUB 使用章节结构，无需 OCR", -1, -1)
+						s.jobStage(jobKey, "translate", "skipped", "当前 EPUB 导入流程不执行 PDF 段落翻译", -1, -1)
+						s.jobStage(jobKey, "render", "skipped", "EPUB 按原章节结构阅读，无需 PDF 渲染", -1, -1)
+						s.jobStage(jobKey, "memory", "skipped", "EPUB 使用章节正文，不需要 PDF 论文记忆", -1, -1)
+						report(importProgress{Stage: "saving", Message: "正在解析 EPUB 章节并保存到书库", Name: file.Filename, File: index + 1, Files: len(files), JobKey: jobKey})
+						update("saving", "正在解析 EPUB 章节并保存到书库", 0, 0)
+						source := ""
+						if index < len(hints) {
+							source = hints[index].Source
+						}
+						result, err = s.importPublication(jobCtx, file.Filename, source, data)
+						if err != nil {
+							s.finishImportJob(jobKey, importFailureStatus(jobCtx, err), err.Error())
 						} else {
-							// OCR 入库后后台翻译/排版仍在运行；由后台 worker 收尾任务。
+							s.finishImportJob(jobKey, "done", "")
 						}
 					}
-				} else {
-					sum := sha256.Sum256(data)
-					jobKey := "doc-" + hex.EncodeToString(sum[:16])
-					jobCtx, jobCancel := context.WithCancel(ctx)
-					defer jobCancel()
-					s.beginImportJob(jobKey, file.Filename, 0, jobCancel)
-					s.jobStage(jobKey, "ocr", "skipped", "EPUB 使用章节结构，无需 OCR", -1, -1)
-					s.jobStage(jobKey, "translate", "skipped", "当前 EPUB 导入流程不执行 PDF 段落翻译", -1, -1)
-					s.jobStage(jobKey, "render", "skipped", "EPUB 按原章节结构阅读，无需 PDF 渲染", -1, -1)
-					s.jobStage(jobKey, "memory", "skipped", "EPUB 使用章节正文，不需要 PDF 论文记忆", -1, -1)
-					report(importProgress{Stage: "saving", Message: "正在解析 EPUB 章节并保存到书库", Name: file.Filename, File: index + 1, Files: len(files), JobKey: jobKey})
-					update("saving", "正在解析 EPUB 章节并保存到书库", 0, 0)
-					source := ""
-					if index < len(hints) {
-						source = hints[index].Source
-					}
-					result, err = s.importPublication(jobCtx, file.Filename, source, data)
-					if err != nil {
-						s.finishImportJob(jobKey, importFailureStatus(jobCtx, err), err.Error())
-					} else {
-						s.finishImportJob(jobKey, "done", "")
-					}
 				}
-			}
-			if err != nil {
-				result.Error = err.Error()
-			}
+				if err != nil {
+					result.Error = err.Error()
+				}
 			}()
-		last := results[index]
-		if last.Error != "" {
-			update("failed", last.Error, 0, 0)
-		} else {
-			update("done", "该文件已完成导入", 1, 1)
-		}
+			last := results[index]
+			if last.Error != "" {
+				update("failed", last.Error, 0, 0)
+			} else {
+				update("done", "该文件已完成导入", 1, 1)
+			}
 		}(index)
 	}
 	workers.Wait()
@@ -390,6 +409,15 @@ func (s *Server) runLocalPDFImport(
 	}
 	contentHash := sha256.Sum256(pdf)
 	jobKey := "doc-" + hex.EncodeToString(contentHash[:16])
+	// URL imports acquire their content identity only after download. Recheck the
+	// document rule before OCR or metadata completion can send this content out.
+	policy, policyErr := s.processingPolicy(ctx)
+	if policyErr != nil {
+		return importResult{Name: name}, policyErr
+	}
+	if effectiveProcessingMode(policy, processingDescription{Documents: []string{jobKey}}) == "deny" {
+		return importResult{Name: name}, fmt.Errorf("该论文或书库禁止外部处理，未提交 OCR／题录补全")
+	}
 	if _, lookupErr := s.loadDocument(ctx, jobKey); lookupErr == nil {
 		doc, restoreErr := s.restoreDocumentFromTrash(ctx, jobKey)
 		if restoreErr != nil {
@@ -425,12 +453,12 @@ func (s *Server) runLocalPDFImport(
 	if result.Document != nil {
 		s.linkImportJobDocument(jobKey, result.Document.Key)
 		s.jobStage(jobKey, "memory", "running", "论文原文已入库，正在后台准备论文记忆", 0, 1)
-		memoryCtx, cancelMemory := context.WithTimeout(context.Background(), 6*time.Hour)
+		memoryCtx, cancelMemory := s.processingBackground(ctx, 6*time.Hour)
 		go func() {
 			defer cancelMemory()
 			_ = s.preparePaperMemoryDuringImport(memoryCtx, result.Document.Key, jobKey, nil)
 		}()
-		backgroundCtx, cancelBackground := context.WithTimeout(context.Background(), 24*time.Hour)
+		backgroundCtx, cancelBackground := s.processingBackground(ctx, 24*time.Hour)
 		s.setJobCancel(jobKey, cancelBackground)
 		pages := append([]ocr.Page(nil), metadata.OCRPages...)
 		go func() {
@@ -743,7 +771,10 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 	if !strings.HasSuffix(strings.ToLower(name), ".pdf") {
 		name += ".pdf"
 	}
-	s.beginImportJob(key, name, 0, jobCancel)
+	if s.beginImportJob(key, name, 0, jobCancel) == nil {
+		emit(map[string]any{"error": "这篇论文已有导入任务正在运行"})
+		return
+	}
 	metadata := recognizedPaperMetadata{Title: document.Title, TranslatedTitle: document.TranslatedTitle, DOI: document.DOI, Authors: document.Authors, Venue: document.Venue}
 	if document.Year != nil {
 		metadata.Year = *document.Year
@@ -833,12 +864,12 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 	}
 	s.linkImportJobDocument(key, key)
 	s.jobStage(key, "memory", "running", "论文原文已入库，正在后台准备论文记忆", 0, 1)
-	memoryCtx, cancelMemory := context.WithTimeout(context.Background(), 6*time.Hour)
+	memoryCtx, cancelMemory := s.processingBackground(r.Context(), 6*time.Hour)
 	go func() {
 		defer cancelMemory()
 		_ = s.preparePaperMemoryDuringImport(memoryCtx, key, key, nil)
 	}()
-	backgroundCtx, cancelBackground := context.WithTimeout(context.Background(), 24*time.Hour)
+	backgroundCtx, cancelBackground := s.processingBackground(r.Context(), 24*time.Hour)
 	s.setJobCancel(key, cancelBackground)
 	ocrPages := append([]ocr.Page(nil), metadata.OCRPages...)
 	go func() {

@@ -64,8 +64,9 @@ type DocumentJob struct {
 }
 
 type jobRuntime struct {
-	job    *DocumentJob
-	cancel context.CancelFunc
+	job      *DocumentJob
+	cancel   context.CancelFunc
+	stopping bool // Cancellation requested; the worker has not unwound yet.
 }
 
 func cloneDocumentJob(job *DocumentJob) DocumentJob {
@@ -138,11 +139,16 @@ func (job *DocumentJob) setStage(key, status, message string, completed, total i
 }
 
 // beginImportJob 为新导入建立任务并登记可取消的上下文。
+// An active job is never replaced; nil tells the caller not to start a worker.
 func (s *Server) beginImportJob(key, name string, pages int, cancel context.CancelFunc) *DocumentJob {
 	previous, _ := s.loadImportJob(context.Background(), key)
 	job := newDocumentJob(key, name, pages)
 	s.jobsMu.Lock()
 	if runtime := s.importJobs[key]; runtime != nil && runtime.job != nil {
+		if runtime.job.Status == "running" || runtime.stopping {
+			s.jobsMu.Unlock()
+			return nil
+		}
 		previous = runtime.job
 	}
 	if previous != nil {
@@ -186,6 +192,9 @@ func (s *Server) jobStage(key, stage, status, message string, completed, total i
 // finishImportJob 结束当前运行并同步最后一次执行摘要。
 func (s *Server) finishImportJob(key, status, message string) {
 	s.updateImportJob(key, func(job *DocumentJob) {
+		if runtime := s.importJobs[key]; runtime != nil {
+			runtime.stopping = false
+		}
 		// 显式取消已是终态；OCR/翻译库返回 context.Canceled 时不能覆盖成失败。
 		if job.Status == "cancelled" && status != "cancelled" {
 			return
@@ -362,6 +371,7 @@ func (s *Server) cancelImportJob(key string) bool {
 		return false
 	}
 	cancel := runtime.cancel
+	runtime.stopping = true
 	job := runtime.job
 	job.Status = "cancelled"
 	job.Error = "已取消"
@@ -387,10 +397,15 @@ func (s *Server) cancelImportJob(key string) bool {
 // setJobCancel 让后台渲染接替导入请求的取消句柄：取消按钮在导入完成后仍有效。
 func (s *Server) setJobCancel(key string, cancel context.CancelFunc) {
 	s.jobsMu.Lock()
-	if runtime := s.importJobs[key]; runtime != nil {
+	active := false
+	if runtime := s.importJobs[key]; runtime != nil && runtime.job != nil && runtime.job.Status == "running" {
 		runtime.cancel = cancel
+		active = true
 	}
 	s.jobsMu.Unlock()
+	if !active && cancel != nil {
+		cancel()
+	}
 }
 
 // startDocumentRender 在导入提交后生成完整译文 PDF；任务面板可跟踪并取消渲染。

@@ -88,7 +88,7 @@ func (e *upstreamStatusError) Error() string { return e.message }
 func NewClient(cfg Config) *Client {
 	// Request deadlines are applied per operation. A fixed http.Client timeout
 	// would silently cap longer operations such as results analysis.
-	return &Client{cfg: cfg, http: &http.Client{}, workBuddyAuth: cfg.WorkBuddyAuth}
+	return &Client{cfg: cfg, http: NewHTTPClient(), workBuddyAuth: cfg.WorkBuddyAuth}
 }
 
 func (c *Client) post(ctx context.Context, payload chatRequest, timeout time.Duration) (*http.Response, error) {

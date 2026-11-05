@@ -11,6 +11,9 @@ import { DocumentJobDialog } from './DocumentJobDialog';
 import { AppDialog } from './AppDialog';
 import { zotero, type ZoteroSelection } from '../api/zotero';
 import { ZoteroImportPanel } from './ZoteroImportPanel';
+import { ScholarDiscoveryPanel } from './ScholarDiscoveryPanel';
+import { CaptureInboxPanel } from './CaptureInboxPanel';
+import { ZoteroNotesPanel } from './ZoteroNotesPanel';
 import type { BatchShot } from './BatchShotVolley';
 
 const MAX_PDF_BYTES = 512 * 1048576;
@@ -41,6 +44,7 @@ export function ImportDialog({
   const endBatchShot = useCallback((id: number) => setBatchShot(current => current?.id === id ? null : current), []);
   const [candidates, setCandidates] = useState<ImportCandidate[]>([]);
   const [error, setError] = useState('');
+  const [localOnly, setLocalOnly] = useState(false);
   const [zoteroQueuedKeys, setZoteroQueuedKeys] = useState<Set<string>>(() => new Set());
   // 弹弓式导入：选中的文件先落进队列，用户逐个投进篮筐才开始导入。
   const [queue, setQueue] = useState<File[]>([]);
@@ -117,9 +121,10 @@ export function ImportDialog({
       }
       const fileIndex = 1;
       const files = 1;
-      activity.update({ stage: 'upload', message: '正在准备上传，由 LeePDF 处理论文', name: file.name, file: fileIndex, files, completed: 0, total: 0 });
+      activity.update({ stage: 'upload', message: localOnly ? '正在上传原文，不调用 AI 或 OCR' : '正在准备上传，由 LeePDF 处理论文', name: file.name, file: fileIndex, files, completed: 0, total: 0 });
       const known = metadataHints.current.get(file);
       const hint: ImportMetadataHint = {
+        localOnly,
         title: known?.title ?? '', author: known?.authors[0] ?? '', authors: known?.authors,
         doi: known?.doi ?? '', arxiv: known?.arxiv ?? '', venue: known?.venue, year: known?.year, firstPage: '',
       };
@@ -128,14 +133,14 @@ export function ImportDialog({
         hint.source = source;
       }
       // PDF processing is delegated to LeePDF; EPUB keeps its chapter import flow.
-      setJobFile(file);
+      setJobFile(localOnly ? null : file);
       const result = await api.upload([file], request.signal, [hint], activity.receive);
       const imported = result.results[0];
       if (!imported) throw new Error('服务未返回导入结果，请刷新书库确认');
       setActive({ file, result: imported, cancelled: false });
       setResults((current) => [...current, ...result.results]);
       const failed = result.results.filter(item => item.error).length;
-      activity.update({ stage: 'complete', message: failed ? '导入失败，原因见下方' : 'LeePDF 译文已保存到书库', completed: 1, total: 1 });
+      activity.update({ stage: 'complete', message: failed ? '导入失败，原因见下方' : localOnly ? '原文已保存到书库' : 'LeePDF 译文已保存到书库', completed: 1, total: 1 });
     } catch (cause) {
       const cancelled = request.signal.aborted || (cause instanceof DOMException && cause.name === 'AbortError');
       const message = cancelled ? '已取消' : String(cause);
@@ -190,6 +195,7 @@ export function ImportDialog({
         const hints = batch.map(({ file }): ImportMetadataHint => {
           const known = metadataHints.current.get(file);
           return {
+            localOnly,
             title: known?.title ?? '', author: known?.authors[0] ?? '', authors: known?.authors,
             doi: known?.doi ?? '', arxiv: known?.arxiv ?? '', venue: known?.venue, year: known?.year,
             firstPage: '', source: sources.current.get(file),
@@ -320,6 +326,14 @@ export function ImportDialog({
       </header>
       <ol className="import-steps" aria-label="导入流程"><li><span>01</span>选择文件</li><li><span>02</span>加入待导入队列</li><li><span>03</span>识别题录并翻译</li></ol>
       <ZoteroImportPanel busy={busy} queuedKeys={zoteroQueuedKeys} onAdd={addZotero} />
+      <ScholarDiscoveryPanel busy={busy} onDownload={importLink} />
+      <CaptureInboxPanel busy={busy} onDownload={importLink} />
+      <ZoteroNotesPanel busy={busy} />
+      <label className="text-sm">
+        <input type="checkbox" checked={localOnly} disabled={busy} onChange={event => setLocalOnly(event.target.checked)} />
+        仅保存原文（无需 AI / OCR 配置）
+        <small className="block text-ink-faint">适用于下方文件队列，不调用在线识别或翻译；可阅读原文、批注，配置服务后可在阅读器中重新翻译。扫描件暂不识别文字。</small>
+      </label>
       <UploadShotStage
         queue={queue}
         active={active}

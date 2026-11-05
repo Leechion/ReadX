@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"cbctv2/server/internal/legacy"
 )
@@ -132,7 +133,7 @@ func (s *Server) handleRetranslate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "暂存旧译文 PDF 失败: "+err.Error())
 		return
 	}
-	jobCtx, cancel := context.WithCancel(context.Background())
+	jobCtx, cancel := s.processingBackground(r.Context(), 24*time.Hour)
 	title := doc.Title + "（重新翻译）"
 	if !reuseOCR {
 		title = doc.Title + "（重新识别并翻译）"

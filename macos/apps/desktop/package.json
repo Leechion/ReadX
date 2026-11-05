@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "electron .",
     "package:mac": "electron-builder --mac dmg zip --publish never",
-    "test": "npm run build && node --test test/update-status.test.cjs test/icon-resources.test.cjs test/launcher.test.cjs"
+    "test": "npm run build && node --experimental-sqlite --test test/update-status.test.cjs test/icon-resources.test.cjs test/launcher.test.cjs test/backup.test.cjs"
   },
   "devDependencies": {
     "@cbct/shared": "0.0.0",
@@ -75,7 +75,15 @@
       "hardenedRuntime": true,
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist"
-    }
+    },
+    "protocols": [
+      {
+        "name": "ReadX browser capture",
+        "schemes": [
+          "readx-capture"
+        ]
+      }
+    ]
   },
   "dependencies": {
     "electron-updater": "^6.8.9",

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"cbctv2/server/internal/proctree"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -180,6 +181,7 @@ func (s *Server) runLeePDFImport(ctx context.Context, jobKey, name string, pdf [
 
 	args := append(prefix, "-m", "retainpdf_pipeline.entrypoints.console", "provider-case", "--spec", specPath)
 	cmd := exec.CommandContext(ctx, py, args...)
+	proctree.Configure(cmd)
 	cmd.Dir = jobRoot
 	env := os.Environ()
 	pythonPaths := []string{

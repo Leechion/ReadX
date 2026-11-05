@@ -36,6 +36,14 @@ const syncBridge: DesktopSyncBridge = {
   setNutstorePassword: (password) => ipcRenderer.invoke('readx-sync:set-nutstore-password', password) as Promise<void>,
 };
 contextBridge.exposeInMainWorld('__READX_SYNC__', syncBridge);
+contextBridge.exposeInMainWorld('__READX_CAPTURE__', { enable: () => ipcRenderer.invoke('readx-capture:enable') });
+contextBridge.exposeInMainWorld('__READX_BACKUP__', {
+  prepare: (action: 'create' | 'restore') => ipcRenderer.invoke('readx-backup:prepare', action),
+  cancel: () => ipcRenderer.invoke('readx-backup:cancel'),
+  run: (action: 'create' | 'restore', browserState: string) => ipcRenderer.invoke('readx-backup:run', action, browserState),
+  pendingBrowserState: () => ipcRenderer.invoke('readx-backup:browser-state'),
+  acknowledgeBrowserState: () => ipcRenderer.invoke('readx-backup:acknowledge'),
+});
 
 const launcherBridge: DesktopLauncherBridge = {
   ready: () => ipcRenderer.send('readx-launcher:ready'),

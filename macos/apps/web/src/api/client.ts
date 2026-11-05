@@ -27,6 +27,7 @@ import type {
 } from '@cbct/shared';
 import { isApiFailure } from '@cbct/shared';
 import { downloadBlob } from '../lib/download';
+import { processingFetch, approveProcessingChallenge, type ProcessingChallenge } from './processingConsent';
 import type { RealtimeEvent } from '../lib/rtex/wire';
 
 /**
@@ -70,7 +71,7 @@ export async function request<T>(
 
   let response: Response;
   try {
-    response = await fetch(apiBase + path, {
+    response = await processingFetch(apiBase + path, {
       headers,
       signal: init?.signal,
       method: init?.method ?? 'GET',
@@ -250,7 +251,7 @@ async function fetchSSE(endpoint: string, requestBody: unknown, signal?: AbortSi
   const { apiBase, token } = bootstrap();
   const headers = new Headers({ 'Content-Type': 'application/json', Accept: 'text/event-stream' });
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(`${apiBase}${endpoint}`, {
+  const response = await processingFetch(`${apiBase}${endpoint}`, {
     method: 'POST', headers, body: JSON.stringify(requestBody), signal, credentials: 'omit',
   });
   if (!response.ok) {
@@ -288,20 +289,26 @@ async function consumeSSE<T>(
     if (!line.startsWith('data:')) return;
     const payload = line.slice(5).trim();
     if (!payload || payload === '[DONE]') return;
-    try {
-      if (onEvent(JSON.parse(payload) as T)) terminal = true;
-    } catch { /* 单帧解析失败不影响整体：缺终止帧会在下面统一报错。 */ }
+    let event: T;
+    try { event = JSON.parse(payload) as T; }
+    catch { return; /* 仅跳过损坏的 JSON；业务回调异常必须传给调用方。 */ }
+    terminal = onEvent(event);
   };
-  for (;;) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop() ?? '';
-    lines.forEach(processLine);
+  try {
+    while (!terminal) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) { processLine(line); if (terminal) break; }
+    }
+    if (!terminal) processLine(buffer + decoder.decode());
+    if (!terminal) throw new ApiError(noTerminalMessage, 502);
+  } finally {
+    try { await reader.cancel(); } catch { /* Preserve the original callback/stream error. */ }
+    reader.releaseLock();
   }
-  processLine(buffer + decoder.decode());
-  if (!terminal) throw new ApiError(noTerminalMessage, 502);
 }
 
 export async function streamChat(
@@ -790,6 +797,7 @@ export interface ImportStreamEvent {
 }
 
 export interface ImportMetadataHint {
+  localOnly?: boolean;
   title: string;
   author: string;
   authors?: string[];
@@ -801,7 +809,7 @@ export interface ImportMetadataHint {
   source?: string;
 }
 
-function uploadPublications(files: File[], signal?: AbortSignal, metadata?: ImportMetadataHint[], onProgress?: (event: ImportStreamEvent) => void): Promise<{ results: ImportedDocument[] }> {
+function uploadPublications(files: File[], signal?: AbortSignal, metadata?: ImportMetadataHint[], onProgress?: (event: ImportStreamEvent) => void, processingGrant?: string): Promise<{ results: ImportedDocument[] }> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new DOMException('Aborted', 'AbortError')); return; }
     const { apiBase, token } = bootstrap();
@@ -839,10 +847,21 @@ function uploadPublications(files: File[], signal?: AbortSignal, metadata?: Impo
     xhr.open('POST', apiBase + '/v1/import/files');
     xhr.setRequestHeader('Accept', 'text/event-stream');
     if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`);
+    if (processingGrant) xhr.setRequestHeader('X-ReadX-Processing-Grant', processingGrant);
     xhr.upload.onprogress = event => onProgress?.({ progress: { stage: 'upload', message: '正在上传文件与排版数据到本地服务', completed: event.loaded, total: event.lengthComputable ? event.total : 0 } });
     xhr.upload.onload = () => onProgress?.({ progress: { stage: 'upload', message: '上传已完成，等待本地服务检查文件', completed: 0, total: 0 } });
     xhr.onprogress = () => { try { read(); } catch (error) { finish(error); xhr.abort(); } };
     xhr.onload = () => {
+      if (xhr.status === 428 && !processingGrant) {
+        let challenge: ProcessingChallenge;
+        try { challenge = JSON.parse(xhr.responseText) as ProcessingChallenge; } catch (error) { finish(error); return; }
+        const headers = new Headers(); if (token) headers.set('Authorization', `Bearer ${token}`);
+        void approveProcessingChallenge(challenge, apiBase, headers, signal).then(grant => {
+          settled = true; signal?.removeEventListener('abort', abort);
+          resolve(uploadPublications(files, signal, metadata, onProgress, grant));
+        }).catch(finish);
+        return;
+      }
       try {
         if (xhr.status < 200 || xhr.status >= 300) {
           let message = `HTTP ${xhr.status}`;
@@ -889,7 +908,7 @@ export async function authenticatedFetch(
   const { apiBase, token } = bootstrap();
   const headers = new Headers(init?.headers);
   if (token) headers.set('Authorization', `Bearer ${token}`);
-  const response = await fetch(apiBase + path, {
+  const response = await processingFetch(apiBase + path, {
     ...init,
     headers,
     credentials: 'omit',
@@ -1442,6 +1461,7 @@ export const api = {
       response = await fetchSSE('/v1/ai/generate', { key, kind, visuals, ...paper }, signal);
     } catch (error) {
       if (signal?.aborted) throw error;
+      if (error instanceof ApiError) throw error;
       throw new ApiError(error instanceof Error ? error.message : '本地服务未响应', 0);
     }
     let result: GenerateResponse | null = null;

@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"cbctv2/server/internal/proctree"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -420,6 +421,7 @@ func (s *Server) runLeeStageCommand(ctx context.Context, jobKey string, bridge *
 	env = setEnv(env, "RETAIN_PDF_FONTS_DIR", filepath.Join(resourceRoot, "fonts"))
 	args := append(prefix, "-m", "retainpdf_pipeline.entrypoints.console", command, "--spec", specPath)
 	cmd := exec.CommandContext(ctx, py, args...)
+	proctree.Configure(cmd)
 	cmd.Dir = filepath.Dir(specPath)
 	cmd.Env = env
 	logPath := filepath.Join(filepath.Dir(specPath), "retain-import.log")

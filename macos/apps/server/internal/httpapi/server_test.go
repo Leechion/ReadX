@@ -33,6 +33,11 @@ func defaultTestConfig(root string) config.Config {
 
 func serve(t *testing.T, cfg config.Config, handle *sql.DB) *httptestServerBundle {
 	t.Helper()
+	// Existing behavior tests explicitly allow external processing. Policy tests
+	// remove this fixture value to exercise the production ask-by-default mode.
+	if _, err := handle.Exec(`INSERT OR IGNORE INTO app_state(key,value_json,updated_at) VALUES('processing.policy.v1','{"revision":1,"library":"allow","documents":{},"projects":{}}','')`); err != nil {
+		t.Fatal(err)
+	}
 	frontend := httptest.NewServer(New(cfg, handle).Handler())
 	bundle := &httptestServerBundle{frontend: frontend, token: cfg.Token, cfg: cfg, handle: handle}
 	t.Cleanup(func() {

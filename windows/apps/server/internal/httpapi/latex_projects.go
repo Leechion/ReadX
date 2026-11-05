@@ -199,7 +199,9 @@ func (s *Server) handleLatexFile(w http.ResponseWriter, r *http.Request) {
 			Content  string `json:"content"`
 			Revision string `json:"revision"`
 		}
-		if err := decodeJSON(w, r, &body); err != nil {
+		// JSON escaping can expand each UTF-8 byte to six ASCII bytes. The
+		// service still enforces the 8 MiB limit on decoded file content.
+		if err := decodeJSONLimit(w, r, &body, 6*latex.MaxFileBytes+(1<<20)); err != nil {
 			return
 		}
 		revision, err := service.WriteFile(r.Context(), id, relative, []byte(body.Content), body.Revision)

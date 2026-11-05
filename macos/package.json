@@ -27,7 +27,7 @@
     "test:import": "node scripts/import-smoke.cjs",
     "test:presentation": "node scripts/test-presentation.cjs",
     "build:go": "node scripts/build-server.mjs",
-    "test": "npm run test:go && npm run test -w @cbct/shared && npm run test:latex && npm run test:books && npm run test:margin-notes && npm run test:processing && node --test scripts/research-workbench.test.cjs && npm run typecheck && npm run test -w @cbct/desktop",
+    "test": "npm run test:go && npm run test -w @cbct/shared && npm run test:latex && npm run test:books && npm run test:margin-notes && npm run test:processing && node --test scripts/research-workbench.test.cjs && npm run typecheck && npm run test -w @cbct/desktop && node --test scripts/browser-backup.test.cjs && node --test scripts/review-fixes.test.cjs && npm run test:external",
     "test:books": "node --test scripts/book-sources.test.cjs",
     "test:margin-notes": "node --test scripts/margin-note.test.cjs",
     "test:processing": "node --test scripts/processing-jobs.test.cjs",
@@ -40,7 +40,9 @@
     "check:parity": "node ../scripts/sync-platforms.mjs --check",
     "test:desktop": "node scripts/run-desktop-smoke.mjs",
     "test:packaged": "node scripts/packaged-smoke.mjs",
-    "test:updates": "node scripts/import-smoke.cjs --updates"
+    "test:updates": "node scripts/import-smoke.cjs --updates",
+    "test:backup": "npm run build -w @cbct/shared && npm run build -w @cbct/desktop && node --experimental-sqlite --test apps/desktop/test/backup.test.cjs scripts/browser-backup.test.cjs",
+    "test:external": "node scripts/go.mjs test ./internal/httpapi -run \"TestProcessing|TestScholar|TestBrowserCapture|TestReadonlyShare|TestZoteroNotes\" -timeout 60s -count=1 && node --test scripts/external-features.test.cjs"
   },
   "allowScripts": {
     "electron@44.2.0": true,

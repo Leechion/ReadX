@@ -1,0 +1,8 @@
+{
+  "manifest_version": 3,
+  "name": "ReadX 论文采集",
+  "version": "0.1.0",
+  "description": "点击后将当前页面的来源与候选题录保存到本机 ReadX 收件箱。",
+  "permissions": ["activeTab", "scripting"],
+  "action": { "default_popup": "popup.html", "default_title": "采集到 ReadX" }
+}

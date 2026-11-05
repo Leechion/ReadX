@@ -15,6 +15,7 @@ import { LibraryProcessingControl } from './LibraryProcessingControl';
 import { LibraryTrashButton } from './LibraryTrashButton';
 import { EmptyTrashDialog } from './EmptyTrashDialog';
 import { CitationExportDialog } from './CitationExportDialog';
+import { ReadonlyShareDialog } from './ReadonlyShareDialog';
 import { SyncSettingsDialog } from './SyncSettingsDialog';
 import { DailyRecommendations } from './DailyRecommendations';
 import { ResizeHandle } from './ResizeHandle';
@@ -228,6 +229,7 @@ export function LibraryScreen({
   const [arxivProgress, setArxivProgress] = useState('');
   const [arxivSummary, setArxivSummary] = useState('');
   const [citationOpen, setCitationOpen] = useState(false);
+  const [shareOpen, setShareOpen] = useState(false);
   const [syncSettingsOpen, setSyncSettingsOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
@@ -464,6 +466,7 @@ export function LibraryScreen({
         导出书目
       </button>
     ) : null}
+    {view !== 'trash' && <button type="button" className="library-toolbar-command" onClick={() => setShareOpen(true)}>只读分享</button>}
     <button
       type="button"
       onClick={() => setDailyOpen((value) => !value)}
@@ -893,6 +896,7 @@ export function LibraryScreen({
         />
       ) : null}
       {syncSettingsOpen ? <SyncSettingsDialog onClose={() => setSyncSettingsOpen(false)} onSyncComplete={onReload} /> : null}
+      {shareOpen ? <ReadonlyShareDialog documents={allDocuments.filter(doc => !meta.items[doc.key]?.deleted)} onClose={() => setShareOpen(false)} /> : null}
     </div>
   );
 }

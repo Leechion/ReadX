@@ -95,6 +95,7 @@ func (s *Server) handleCategoryUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 	updated := false
 	categories, err := s.mutateCategoriesResult(r.Context(), func(categories []Category) ([]Category, error) {
+		updated = false // A conditional write may retry against a newer list.
 		for index := range categories {
 			if categories[index].Name == name {
 				categories[index].Color = color
@@ -244,6 +245,7 @@ func (s *Server) handleDocumentMetaPatch(w http.ResponseWriter, r *http.Request)
 
 	current := emptyMeta(key)
 	if err := s.mutateAllMeta(r.Context(), func(all map[string]DocumentMeta) (map[string]DocumentMeta, error) {
+		current = emptyMeta(key)
 		if item, ok := all[key]; ok {
 			current = item
 		}

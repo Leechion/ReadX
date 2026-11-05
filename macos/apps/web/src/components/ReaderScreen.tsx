@@ -439,19 +439,8 @@ export function ReaderScreen({
       restored.current = false;
     };
   }, [documentKey, navigatePage]);
-  useEffect(() => {
-    if (!documentKey) return;
-    const onSyncComplete = () => {
-      void api.location(documentKey).then((result) => {
-        if (!result.location) return;
-        navigatePage(result.location.kind === 'pdf'
-          ? (result.location.page ?? 1)
-          : (result.location.index ?? 1));
-      }).catch(() => undefined);
-    };
-    window.addEventListener('readx-sync-complete', onSyncComplete);
-    return () => window.removeEventListener('readx-sync-complete', onSyncComplete);
-  }, [documentKey, navigatePage]);
+  // Sync updates saved positions; an active reader restores only on entry, so
+  // background sync cannot move the page currently being read.
   useEffect(() => {
     if (!documentKey || !locationReady || count === 0) return;
     const chapter = sections.find((item) => item.index === current);

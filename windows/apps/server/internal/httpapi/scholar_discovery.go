@@ -15,6 +15,7 @@ import (
 )
 
 type scholarHit struct {
+	ExistingKey string `json:"existingKey,omitempty"`
 	paperCandidate
 	Source   string   `json:"source"`
 	SourceID string   `json:"sourceId"`
@@ -28,6 +29,8 @@ type scholarRun struct {
 	Error     string `json:"error,omitempty"`
 }
 type scholarSearch struct {
+	SessionID  string       `json:"sessionId,omitempty"`
+	ParentID   string       `json:"parentId,omitempty"`
 	ID         string       `json:"id"`
 	At         string       `json:"at"`
 	Page       int          `json:"page"`
@@ -45,12 +48,25 @@ func scholarIdentity(hit scholarHit) string {
 func dedupeScholar(hits []scholarHit) []scholarHit {
 	out := []scholarHit{}
 	indices := map[string]int{}
+	titles := map[string]int{}
 	for _, hit := range hits {
 		key := scholarIdentity(hit)
 		if key == ":" || strings.TrimSpace(hit.Title) == "" {
 			continue
 		}
-		if index, ok := indices[key]; ok {
+		index, ok := indices[key]
+		fallback := scholarTitleIdentity(hit)
+		if !ok && fallback != "" {
+			if candidate, exists := titles[fallback]; exists && (out[candidate].DOI == "" || hit.DOI == "" || normalizePublicationDOI(out[candidate].DOI) == normalizePublicationDOI(hit.DOI)) {
+				index = candidate
+				ok = true
+			}
+		}
+		if ok {
+			if out[index].DOI == "" && hit.DOI != "" {
+				out[index].DOI = hit.DOI
+			}
+			indices[key] = index
 			for _, source := range append(hit.Sources, hit.Source) {
 				found := false
 				for _, prior := range out[index].Sources {
@@ -63,6 +79,9 @@ func dedupeScholar(hits []scholarHit) []scholarHit {
 			continue
 		}
 		indices[key] = len(out)
+		if fallback != "" {
+			titles[fallback] = len(out)
+		}
 		if len(hit.Sources) == 0 {
 			hit.Sources = []string{hit.Source}
 		}
@@ -245,8 +264,9 @@ func (s *Server) searchScholar(ctx context.Context, source, q string, page int) 
 }
 func (s *Server) handleScholarSearch(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Queries map[string]string `json:"queries"`
-		Page    int               `json:"page"`
+		Queries   map[string]string `json:"queries"`
+		Page      int               `json:"page"`
+		SessionID string            `json:"sessionId"`
 	}
 	if decodeJSON(w, r, &body) != nil {
 		return
@@ -256,6 +276,13 @@ func (s *Server) handleScholarSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Page > 100 || len(body.Queries) < 1 || len(body.Queries) > 3 {
 		writeError(w, 400, "请选择 1–3 个来源，页数不超过 100")
+		return
+	}
+	for source, q := range body.Queries {
+		body.Queries[source] = strings.TrimSpace(q)
+	}
+	if err := s.checkScholarSession(r.Context(), body.SessionID, "", scholarSignature(body.Queries)); err != nil {
+		writeError(w, 409, err.Error())
 		return
 	}
 	id, err := randomLeeJobID()
@@ -291,7 +318,7 @@ func (s *Server) handleScholarSearch(w http.ResponseWriter, r *http.Request) {
 		hits = append(hits, items...)
 	}
 	result.Results = dedupeScholar(hits)
-	if err := appstate.Save(r.Context(), s.appStateStore, "scholar-search:"+id, result); err != nil {
+	if err := s.persistScholarSearch(r.Context(), &result, body.SessionID, "", scholarSignature(body.Queries)); err != nil {
 		writeError(w, 500, "保存检索记录失败："+err.Error())
 		return
 	}
@@ -374,6 +401,8 @@ func (s *Server) handleScholarSnowball(w http.ResponseWriter, r *http.Request) {
 		DOI       string `json:"doi"`
 		Direction string `json:"direction"`
 		Page      int    `json:"page"`
+		SessionID string `json:"sessionId"`
+		ParentID  string `json:"parentId"`
 	}
 	if decodeJSON(w, r, &body) != nil {
 		return
@@ -398,14 +427,31 @@ func (s *Server) handleScholarSnowball(w http.ResponseWriter, r *http.Request) {
 		body.DOI = doc.DOI
 	}
 	doi := normalizePublicationDOI(body.DOI)
-	if !strings.HasPrefix(doi, "10.") {
-		writeError(w, 400, "请提供可靠的 DOI 锚点")
+	openalexID := strings.TrimPrefix(strings.TrimSpace(body.DOI), "https://openalex.org/")
+	validID := len(openalexID) > 1 && len(openalexID) < 30 && openalexID[0] == 'W'
+	if validID {
+		for _, c := range openalexID[1:] {
+			validID = validID && c >= '0' && c <= '9'
+		}
+	}
+	if !strings.HasPrefix(doi, "10.") && !validID {
+		writeError(w, 400, "请提供 DOI 或 OpenAlex W 标识")
+		return
+	}
+	seedPath := "https://doi.org/" + url.PathEscape(doi)
+	if validID {
+		doi = openalexID
+		seedPath = openalexID
+	}
+	signature := body.Direction + ":" + doi
+	if err := s.checkScholarSession(r.Context(), body.SessionID, body.ParentID, signature); err != nil {
+		writeError(w, 409, err.Error())
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 40*time.Second)
 	defer cancel()
 	var seed openAlexWorkRef
-	err := s.fetchScholarJSON(ctx, "https://api.openalex.org/works/https://doi.org/"+url.PathEscape(doi)+"?select=id,doi,title,publication_year", &seed)
+	err := s.fetchScholarJSON(ctx, "https://api.openalex.org/works/"+seedPath+"?select=id,doi,title,publication_year", &seed)
 	if err != nil {
 		writeError(w, 502, err.Error())
 		return
@@ -456,7 +502,7 @@ func (s *Server) handleScholarSnowball(w http.ResponseWriter, r *http.Request) {
 	}
 	id, _ := randomLeeJobID()
 	record := scholarSearch{ID: id, At: time.Now().UTC().Format(time.RFC3339), Page: body.Page, Runs: []scholarRun{{Source: "openalex", Query: body.Direction + ":" + doi, Total: total, Retrieved: len(hits)}}, Results: dedupeScholar(hits), Disclosure: "引文关系来自 OpenAlex 目录，不代表支持或反驳；全文未验证。本次仅扩展一层，每页最多 20 条。"}
-	if err = appstate.Save(r.Context(), s.appStateStore, "scholar-search:"+id, record); err != nil {
+	if err = s.persistScholarSearch(r.Context(), &record, body.SessionID, body.ParentID, signature); err != nil {
 		writeError(w, 500, err.Error())
 		return
 	}

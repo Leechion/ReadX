@@ -4,6 +4,19 @@ export type Todo = {
   id: string; title: string; priority: 'high' | 'medium' | 'low'; due: string; done: boolean;
   notes?: string; createdAt?: string; completedAt?: string;
 };
+
+export interface ReadingCandidate { title: string; doi?: string; url?: string; source?: string; sourceId?: string }
+export function addReadingTasks(data: WorkbenchData, papers: ReadingCandidate[]): WorkbenchData {
+  const ids = new Set(data.todos.map(todo => todo.id));
+  const added: Todo[] = [];
+  for (const paper of papers) {
+    const identity = paper.doi?.toLowerCase().replace(/^https?:\/\/doi.org\//, '') || paper.url || `${paper.source}:${paper.sourceId}`;
+    const id = `scholar-reading:${identity}`;
+    if (!paper.title || ids.has(id)) continue;
+    ids.add(id); added.push({ id, title: `阅读：${paper.title}`, priority: 'medium', due: '', done: false, createdAt: new Date().toISOString(), notes: `待获取／核验全文\n${paper.doi || ''}\n${paper.url || ''}` });
+  }
+  return { ...data, todos: [...data.todos, ...added] };
+}
 export type LogEntry = { id: string; day: string; text: string; minutes: number; seconds?: number };
 export type Requirement = { id: string; title: string; due: string; done: boolean };
 export type PaperStatus = 'draft' | 'submitted' | 'revision' | 'accepted' | 'published';

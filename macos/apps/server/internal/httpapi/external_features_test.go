@@ -61,7 +61,7 @@ func TestScholarSnowballPagesReferencesAndCitations(t *testing.T) {
 			calls++
 			u, _ := url.Parse(endpoint)
 			switch {
-			case strings.Contains(endpoint, "https://doi.org/"):
+			case strings.Contains(endpoint, "select=id,doi,title"):
 				return []byte(`{"id":"https://openalex.org/W123","title":"seed","doi":"10.1234/seed"}`), "application/json", nil
 			case strings.Contains(endpoint, "select=id,referenced_works"):
 				ids := []string{}
@@ -81,7 +81,11 @@ func TestScholarSnowballPagesReferencesAndCitations(t *testing.T) {
 			}
 		}
 		w := httptest.NewRecorder()
-		s.handleScholarSnowball(w, httptest.NewRequest("POST", "/", strings.NewReader(`{"doi":"10.1234/seed","direction":"`+direction+`","page":2}`)))
+		anchor := "10.1234/seed"
+		if direction == "citations" {
+			anchor = "W123"
+		}
+		s.handleScholarSnowball(w, httptest.NewRequest("POST", "/", strings.NewReader(`{"doi":"`+anchor+`","direction":"`+direction+`","page":2}`)))
 		var found scholarSearch
 		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &found) != nil || len(found.Results) != 1 || found.Runs[0].Total != 21 {
 			t.Fatal(w.Body.String())
@@ -89,6 +93,58 @@ func TestScholarSnowballPagesReferencesAndCitations(t *testing.T) {
 		if calls > 3 {
 			t.Fatal("unexpected recursive expansion", calls)
 		}
+	}
+}
+
+func TestScholarSessionsMergePagesAndKeepExpansionParent(t *testing.T) {
+	s := processingTestServer(t)
+	hit := func(source, id, doi, title string) scholarHit {
+		return scholarHit{paperCandidate: paperCandidate{Title: title, Year: 2025, Authors: []string{"Li Wei"}, DOI: doi}, Source: source, SourceID: id}
+	}
+	first := scholarSearch{ID: "first", At: "2026-11-05T00:00:00Z", Page: 1, Results: []scholarHit{hit("pubmed", "1", "", "Sparse-view CBCT")}}
+	if err := s.persistScholarSearch(context.Background(), &first, "", "", "query"); err != nil {
+		t.Fatal(err)
+	}
+	second := scholarSearch{ID: "second", Page: 2, Results: []scholarHit{hit("crossref", "2", "10.1234/a", "Sparse view CBCT")}}
+	if err := s.checkScholarSession(context.Background(), first.SessionID, "", "changed"); err == nil {
+		t.Fatal("changed query accepted")
+	}
+	if err := s.persistScholarSearch(context.Background(), &second, first.SessionID, "", "query"); err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetPathValue("id", first.SessionID)
+	s.handleScholarSessions(w, r)
+	var session scholarSession
+	if json.Unmarshal(w.Body.Bytes(), &session) != nil || len(session.Pages) != 2 || len(session.Results) != 1 || len(session.Results[0].Sources) != 2 || session.Results[0].DOI == "" {
+		t.Fatal(w.Body.String())
+	}
+	child := scholarSearch{ID: "child", Page: 1, Results: []scholarHit{}}
+	if err := s.checkScholarSession(context.Background(), "", first.ID, "references:10.1234/a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.persistScholarSearch(context.Background(), &child, "", first.ID, "references:10.1234/a"); err != nil || child.ParentID != first.ID {
+		t.Fatal(child, err)
+	}
+	different := hit("crossref", "3", "10.1234/different", "Sparse view CBCT")
+	if len(dedupeScholar([]scholarHit{second.Results[0], different})) != 2 {
+		t.Fatal("different known DOIs merged")
+	}
+}
+
+func TestScholarLibraryMatchesKnownDOIAndConservativeMetadata(t *testing.T) {
+	s := processingTestServer(t)
+	_, err := s.handle.Exec(`INSERT INTO documents(id,key,title,authors,year,doi) VALUES('p','p','Sparse-view CBCT','["Li Wei"]',2025,'10.1234/A')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hits := []scholarHit{{paperCandidate: paperCandidate{DOI: "https://doi.org/10.1234/a"}}, {paperCandidate: paperCandidate{Title: "Sparse view CBCT", Authors: []string{"Li Wei"}, Year: 2025}}, {paperCandidate: paperCandidate{Title: "Sparse view CBCT"}}}
+	if err = s.markScholarLibrary(context.Background(), hits); err != nil {
+		t.Fatal(err)
+	}
+	if hits[0].ExistingKey != "p" || hits[1].ExistingKey != "p" || hits[2].ExistingKey != "" {
+		t.Fatal(hits)
 	}
 }
 func TestBrowserCaptureOnlyStoresValidatedLocalDraft(t *testing.T) {

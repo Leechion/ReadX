@@ -11,6 +11,7 @@ function load(relative) {
 }
 const consent = load('apps/web/src/api/processingConsent.ts');
 const capture = load('apps/desktop/src/browser-capture.ts');
+const workbench = load('apps/web/src/lib/researchWorkbench.ts');
 const link = data => 'readx-capture://collect?data=' + encodeURIComponent(Buffer.from(JSON.stringify(data)).toString('base64'));
 const challenge = {requestId:'plan-1',processing:{action:'test',documents:[],projects:[],materials:['private'],destinations:['example']}};
 test('capture preserves Unicode metadata and excludes unknown fields', () => {
@@ -42,4 +43,12 @@ test('denied policy is returned without asking for approval', async t => {
   global.fetch=async()=>new Response('denied',{status:403});
   const unregister=consent.registerProcessingDecision(async()=>{assert.fail('policy deny must not prompt');});t.after(unregister);
   assert.equal((await consent.processingFetch('/v1/ai/chat')).status,403);
+});
+test('reading candidates create repeatable workbench tasks without fabricated library records', () => {
+  const initial = workbench.normalizeWorkbench({});
+  const papers = [{title:'CBCT paper',doi:'10.1234/test',url:'https://example.org'}];
+  const once = workbench.addReadingTasks(initial,papers);
+  const twice = workbench.addReadingTasks(once,papers);
+  assert.equal(twice.todos.length,1);assert.match(twice.todos[0].notes,/待获取／核验全文/);
+  assert.equal(twice.todos[0].done,false);assert.equal(initial.todos.length,0);
 });

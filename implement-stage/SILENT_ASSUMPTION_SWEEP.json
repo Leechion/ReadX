@@ -1,0 +1,34 @@
+{
+  "undeclared": [
+    {
+      "site": "windows/apps/server/internal/httpapi/zotero_reconcile.go:104-128",
+      "decision": "When ReadX categories and the Zotero mirror’s collections both change, the ReadX-derived collection list replaces the mirror edit without checking for a conflict.",
+      "why_it_matters": "The mirror editor permits collection edits. A simultaneous ReadX category change can therefore silently discard that edit and later push the overwritten value, contrary to A-017.",
+      "class": "semantic"
+    },
+    {
+      "site": "windows/apps/server/internal/httpapi/zotero_migration.go:424-425, 672",
+      "decision": "After an attachment disappears from the latest snapshot, parent document mappings and collection document mappings are rebuilt using only current snapshot attachments.",
+      "why_it_matters": "A retained local paper can keep its old shelf label while its key disappears from the collection’s document list. A subsequent collection write may then omit that paper’s deny policy from authorization checks, contrary to A-016. The added history test removes a non-PDF attachment, so it does not exercise this mapping case.",
+      "class": "semantic"
+    }
+  ],
+  "stale_rows": [
+    {
+      "id": "A-017",
+      "mismatch": "The simultaneous-edit conflict checks cover title, DOI, venue, authors, year, and note content, but not collection membership."
+    },
+    {
+      "id": "A-016",
+      "mismatch": "Collection policy scope can omit a retained paper after its attachment disappears from a later snapshot."
+    }
+  ],
+  "semantic_undeclared": 2,
+  "verdict": "gaps",
+  "resolved_previous": [
+    "A-001 shelf-delete race: deletion and membership updates now serialize; stale assignments are rejected, with a regression test.",
+    "A-007/A-018 attachment history: prior files absent from a later snapshot remain in the export, with a regression test.",
+    "A-007/A-020 snapshot cap: the 5,000-object limit was removed and a test covers more than 5,000 items.",
+    "A-010 unsupported image formats: the ledger now specifies supported raster formats and the viewer shows an omission placeholder, with a regression test."
+  ]
+}

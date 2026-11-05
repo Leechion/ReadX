@@ -422,11 +422,17 @@ func (s *Server) handleZoteroMigration(w http.ResponseWriter, r *http.Request) {
 	for key, object := range state.Objects {
 		if object.Kind == "items" && zoteroString(object.Local, "itemType") != "attachment" && zoteroString(object.Local, "itemType") != "note" && zoteroString(object.Local, "itemType") != "annotation" {
 			object.Documents = []string{}
-			for _, child := range snapshot.Items {
-				if zoteroString(child.Data, "parentItem") == object.Key && zoteroString(child.Data, "itemType") == "attachment" {
-					for _, doc := range state.Objects[zoteroObjectID("items", child.Key)].Documents {
-						object.Documents = appendUnique(object.Documents, doc)
-					}
+			children := []string{}
+			for childID, child := range state.Objects {
+				if child.Kind == "items" && zoteroString(child.Local, "parentItem") == object.Key && zoteroString(child.Local, "itemType") == "attachment" {
+					children = append(children, childID)
+				}
+			}
+			sort.Strings(children)
+			for _, childID := range children {
+				child := state.Objects[childID]
+				for _, doc := range child.Documents {
+					object.Documents = appendUnique(object.Documents, doc)
 				}
 			}
 			state.Objects[key] = object

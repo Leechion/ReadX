@@ -125,7 +125,17 @@ func (s *Server) zoteroLocalView(ctx context.Context, state zoteroMigration, obj
 						selected = appendUnique(selected, key)
 					}
 				}
-				local["collections"] = selected
+				baseCollections := zoteroStrings(object.Base["collections"])
+				mirrorCollections := zoteroStrings(local["collections"])
+				sort.Strings(baseCollections)
+				sort.Strings(mirrorCollections)
+				sort.Strings(selected)
+				if !zoteroEqual(selected, baseCollections) {
+					if !zoteroEqual(mirrorCollections, baseCollections) && !zoteroEqual(mirrorCollections, selected) {
+						return local, fmt.Errorf("本地镜像与书库的集合归属同时修改，请先统一或明确采用 Zotero")
+					}
+					local["collections"] = selected
+				}
 			}
 		}
 	}

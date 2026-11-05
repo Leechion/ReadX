@@ -336,6 +336,37 @@ func TestZoteroMigrationPreservesFilesAndSyncConflicts(t *testing.T) {
 	if !historyKept {
 		t.Fatal("removed source attachment no longer exportable")
 	}
+	filtered = []zoteroObject{}
+	for _, item := range snapshot.Items {
+		if item.Key != "ATTACH01" {
+			filtered = append(filtered, item)
+		}
+	}
+	snapshot.Items = filtered
+	if err = appstate.Save(context.Background(), s.appStateStore, "zotero.snapshot:INSTANCE1", snapshot); err != nil {
+		t.Fatal(err)
+	}
+	retained = migrate()
+	retainedParent := retained.Objects["items:PARENT01"]
+	retainedCollection := retained.Objects["collections:COLL0001"]
+	if len(retainedParent.Documents) != 1 || retainedParent.Documents[0] != docKey || len(retainedCollection.Documents) != 1 || retainedCollection.Documents[0] != docKey || len(retained.Objects["items:NOTES001"].AnnotationIDs) != 1 {
+		t.Fatal("retained paper lost parent, note or policy mapping")
+	}
+	plan = reconcile("collections:COLL0001")
+	if len(plan.Entries[0].Documents) != 1 || plan.Entries[0].Documents[0] != docKey {
+		t.Fatal("collection plan omitted retained paper", plan.Entries)
+	}
+	if err = appstate.Save(context.Background(), s.appStateStore, processingPolicyKey, processingPolicy{Revision: 1, Library: "allow", Documents: map[string]string{docKey: "deny"}}); err != nil {
+		t.Fatal(err)
+	}
+	requestBody, _ := json.Marshal(map[string]any{"planId": plan.ID, "objectId": "collections:COLL0001", "choice": "push", "documentKeys": plan.Entries[0].Documents})
+	guarded := httptest.NewRecorder()
+	s.enforceProcessing(func(http.ResponseWriter, *http.Request) {
+		t.Error("retained private paper escaped collection write policy")
+	})(guarded, httptest.NewRequest("POST", "/v1/zotero/reconcile/apply", bytes.NewReader(requestBody)))
+	if guarded.Code != 403 {
+		t.Fatal("retained document did not protect collection writes", guarded.Body.String())
+	}
 }
 
 func TestZoteroLocalViewsPreserveIndependentEdits(t *testing.T) {
@@ -368,6 +399,33 @@ func TestZoteroLocalViewsPreserveIndependentEdits(t *testing.T) {
 	local, err = s.zoteroLocalView(context.Background(), zoteroMigration{}, object)
 	if err != nil || local["date"] != "2026-03-05" {
 		t.Fatal("year edit lost original month/day", local, err)
+	}
+	state := zoteroMigration{ID: "source", Objects: map[string]zoteroMirrorObject{}}
+	categories := []Category{}
+	for _, key := range []string{"COLL0001", "COLL0002", "COLL0003"} {
+		categories = append(categories, Category{ID: "zotero-source-" + key, Name: key, Color: "sky"})
+		state.Objects["collections:"+key] = zoteroMirrorObject{Kind: "collections", Key: key}
+	}
+	if err = s.saveCategories(context.Background(), categories); err != nil {
+		t.Fatal(err)
+	}
+	if err = s.saveMeta(context.Background(), "paper", DocumentMeta{Categories: []string{"COLL0003"}}); err != nil {
+		t.Fatal(err)
+	}
+	object.Base["collections"] = []any{"COLL0001"}
+	object.Local = zoteroClone(object.Base)
+	object.Local["collections"] = []any{"COLL0002"}
+	object.DocumentBase["categories"] = []string{"COLL0001"}
+	local, err = s.zoteroLocalView(context.Background(), state, object)
+	if err == nil || !zoteroEqual(local["collections"], []string{"COLL0002"}) {
+		t.Fatal("competing collection edit silently overwritten", local, err)
+	}
+	if err = s.saveMeta(context.Background(), "paper", DocumentMeta{Categories: []string{"COLL0001", "Unmanaged local topic"}}); err != nil {
+		t.Fatal(err)
+	}
+	local, err = s.zoteroLocalView(context.Background(), state, object)
+	if err != nil || !zoteroEqual(local["collections"], []string{"COLL0002"}) {
+		t.Fatal("local-only topic discarded mirror collection edit", local, err)
 	}
 }
 

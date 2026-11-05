@@ -28,4 +28,10 @@ F4：迁移／归档／原生页码、重复迁移、缺附件保留、双向笔
 
 ## Assumption sweep
 
-Reviewer: gpt-6-luna（遵循用户全局偏好）；review_independence: same-family；acceptance_status: provisional。第一轮发现 2 项未声明语义决定、1 项接口范围和 3 条过时表述，原文保存在 SILENT_ASSUMPTION_SWEEP.round1.json。已修复并发书架删除、历史附件导出保留、5,000 对象限制及图片占位，另补本地双视图冲突保护；相关回归全部通过，等待 Luna 第二轮核对。被取消的 Astra 任务未参与结论。
+Reviewer: gpt-6-luna（遵循用户全局偏好）；review_independence: same-family；acceptance_status: provisional。第一轮发现 2 项未声明语义决定、1 项接口范围和 3 条过时表述，原文保存在 SILENT_ASSUMPTION_SWEEP.round1.json。已修复并发书架删除、历史附件导出保留、5,000 对象限制及图片占位，另补本地双视图冲突保护；相关回归全部通过，第二轮记录见下。被取消的 Astra 任务未参与结论。
+
+第二轮 Luna 原文保存在 SILENT_ASSUMPTION_SWEEP.json，发现 2 项未声明语义问题：集合双本地编辑冲突、移除 PDF 后父条目／集合权限关联。已补修并增加移除 PDF 的权限回归及集合冲突回归；测试退出 0。按两轮预算结束审查，补修由执行者验证，未再次委派。review_independence: same-family；acceptance_status: provisional。
+
+完整语义约定和接口约定逐条见 ASSUMPTIONS.md；无伪造结果的存活桩。四组实现及前序基线检查通过；真实环境阻塞见 docs/外部集成剩余工作交付-2026-11-05.md。
+
+最终相关 Go 回归 41 通过、1 个 opt-in 网络用例跳过；前端及 SSE／聊天回归 10 通过，备份恢复 9 通过。Windows 生产构建与 macOS arm64 服务交叉编译通过，31 个共用源码／测试文件镜像无差异。真实目录单独联调的 OpenAlex 503 不记为通过。

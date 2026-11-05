@@ -1,28 +1,35 @@
 package httpapi
 
 import (
+	"cbctv2/server/internal/legacy"
 	"crypto/sha256"
+	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
 
 type shareNote struct {
-	Page  *int   `json:"page"`
-	Kind  string `json:"kind"`
-	Quote string `json:"quote"`
-	Note  string `json:"note"`
+	Page    *int          `json:"page"`
+	Kind    string        `json:"kind"`
+	Quote   string        `json:"quote"`
+	Note    string        `json:"note"`
+	Locator *shareLocator `json:"locator,omitempty"`
 }
 type shareReading struct {
 	Kind string `json:"kind"`
 	Text string `json:"text"`
 }
 type shareDocument struct {
+	Key      string         `json:"key"`
 	Title    string         `json:"title"`
 	Authors  []string       `json:"authors"`
 	DOI      string         `json:"doi"`
@@ -32,20 +39,26 @@ type shareDocument struct {
 	Readings []shareReading `json:"readings"`
 	PDF      string         `json:"pdf,omitempty"`
 	SHA256   string         `json:"sha256,omitempty"`
+	EPUB     string         `json:"epub,omitempty"`
+	Sections []shareSection `json:"sections,omitempty"`
 }
 type readonlyShare struct {
-	Version    int             `json:"version"`
-	CreatedAt  string          `json:"createdAt"`
-	Documents  []shareDocument `json:"documents"`
-	Disclosure string          `json:"disclosure"`
+	Version     int               `json:"version"`
+	CreatedAt   string            `json:"createdAt"`
+	Documents   []shareDocument   `json:"documents"`
+	Disclosure  string            `json:"disclosure"`
+	Ideas       []shareIdea       `json:"ideas,omitempty"`
+	Comparisons []shareComparison `json:"comparisons,omitempty"`
 }
 
 func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Keys            []string `json:"keys"`
-		IncludeOriginal bool     `json:"includeOriginal"`
-		IncludeNotes    bool     `json:"includeNotes"`
-		IncludeReadings bool     `json:"includeReadings"`
+		Keys               []string `json:"keys"`
+		IncludeOriginal    bool     `json:"includeOriginal"`
+		IncludeNotes       bool     `json:"includeNotes"`
+		IncludeReadings    bool     `json:"includeReadings"`
+		IncludeIdeas       bool     `json:"includeIdeas"`
+		IncludeComparisons bool     `json:"includeComparisons"`
 	}
 	if decodeJSON(w, r, &body) != nil {
 		return
@@ -67,17 +80,25 @@ func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 404, "文献不存在")
 			return
 		}
-		item := shareDocument{Title: doc.Title, Authors: doc.Authors, DOI: doc.DOI, Venue: doc.Venue, Year: doc.Year, Notes: []shareNote{}, Readings: []shareReading{}}
+		item := shareDocument{Key: doc.Key, Title: doc.Title, Authors: doc.Authors, DOI: doc.DOI, Venue: doc.Venue, Year: doc.Year, Notes: []shareNote{}, Readings: []shareReading{}}
 		if body.IncludeNotes {
-			rows, e := s.handle.QueryContext(r.Context(), `SELECT page,kind,quote,note FROM annotations WHERE document_id=? ORDER BY page,created_at`, doc.ID)
+			rows, e := s.handle.QueryContext(r.Context(), `SELECT page,kind,quote,note,locator_json FROM annotations WHERE document_id=? ORDER BY page,created_at`, doc.ID)
 			if e != nil {
 				writeError(w, 500, e.Error())
 				return
 			}
 			for rows.Next() {
 				var n shareNote
-				if e = rows.Scan(&n.Page, &n.Kind, &n.Quote, &n.Note); e != nil {
+				var locator string
+				if e = rows.Scan(&n.Page, &n.Kind, &n.Quote, &n.Note, &locator); e != nil {
 					break
+				}
+				if locator != "" && locator != "{}" {
+					var value shareLocator
+					if e = json.Unmarshal([]byte(locator), &value); e != nil {
+						break
+					}
+					n.Locator = &value
 				}
 				item.Notes = append(item.Notes, n)
 			}
@@ -90,9 +111,12 @@ func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if body.IncludeReadings {
+		if body.IncludeReadings || body.IncludeComparisons {
 			var raw string
-			_ = s.handle.QueryRowContext(r.Context(), `SELECT value_json FROM readings WHERE document_id=?`, doc.ID).Scan(&raw)
+			if err := s.handle.QueryRowContext(r.Context(), `SELECT value_json FROM readings WHERE document_id=?`, doc.ID).Scan(&raw); err != nil && !errors.Is(err, sql.ErrNoRows) {
+				writeError(w, 500, err.Error())
+				return
+			}
 			entries := map[string]ReadingEntry{}
 			if raw != "" {
 				if e := json.Unmarshal([]byte(raw), &entries); e != nil {
@@ -108,12 +132,25 @@ func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 			}
 			sort.Strings(kinds)
 			for _, kind := range kinds {
-				item.Readings = append(item.Readings, shareReading{Kind: kind, Text: entries[kind].Value})
+				if body.IncludeReadings {
+					item.Readings = append(item.Readings, shareReading{Kind: kind, Text: entries[kind].Value})
+				}
+			}
+			if body.IncludeComparisons {
+				bundle.Comparisons = append(bundle.Comparisons, shareExperiment(doc, entries["experiment"].Value))
 			}
 		}
 		if body.IncludeOriginal {
-			if doc.Format != "pdf" || doc.PDFPath == "" {
-				writeError(w, 400, "所选条目没有可分享 PDF；可取消包含原文后导出题录和笔记")
+			if doc.PDFPath == "" {
+				paths := legacy.NewPaths(s.cfg.DataRoot)
+				if doc.Format == "pdf" {
+					doc.PDFPath, _ = paths.PDFFile(doc.Key)
+				} else if doc.Format == "epub" {
+					doc.PDFPath = filepath.Join(paths.LibraryDir(), doc.Key+".epub")
+				}
+			}
+			if (doc.Format != "pdf" && doc.Format != "epub") || doc.PDFPath == "" {
+				writeError(w, 400, "所选条目没有可分享原文件；可取消包含原文后导出题录和笔记")
 				return
 			}
 			info, e := os.Stat(doc.PDFPath)
@@ -132,10 +169,27 @@ func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sum := sha256.Sum256(data)
-			item.PDF = base64.StdEncoding.EncodeToString(data)
+			if doc.Format == "epub" {
+				item.EPUB = base64.StdEncoding.EncodeToString(data)
+				item.Sections, e = shareEPUBSections(data)
+				if e != nil {
+					writeError(w, 400, e.Error())
+					return
+				}
+			} else {
+				item.PDF = base64.StdEncoding.EncodeToString(data)
+			}
 			item.SHA256 = hex.EncodeToString(sum[:])
 		}
 		bundle.Documents = append(bundle.Documents, item)
+	}
+	if body.IncludeIdeas {
+		ideas, e := s.loadIdeas(r.Context())
+		if e != nil {
+			writeError(w, 500, e.Error())
+			return
+		}
+		bundle.Ideas = shareSelectedIdeas(ideas, seen, bundle.Documents)
 	}
 	raw, err := json.Marshal(bundle)
 	if err != nil {
@@ -147,23 +201,11 @@ func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 500, err.Error())
 		return
 	}
-	html := `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-` + nonce + `'; style-src 'unsafe-inline'; frame-src blob:; object-src blob:; connect-src 'none'; base-uri 'none'; form-action 'none'"><title>ReadX 只读分享</title><style>body{font:16px/1.7 system-ui;max-width:1100px;margin:24px auto;padding:16px}pre{white-space:pre-wrap;overflow-wrap:anywhere}iframe{width:100%;height:70vh;border:1px solid #ccc}article{border-bottom:1px solid #ccc;padding:20px 0}button{margin:8px;padding:8px}small{color:#555}</style><h1>ReadX 只读分享</h1><p id="disclosure"></p><main id="content"></main><script id="share-data" type="application/json">` + base64.StdEncoding.EncodeToString(raw) + `</script><script nonce="` + nonce + `">` + readonlyViewerScript + `</script></html>`
+	html := `<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-` + nonce + `'; style-src 'unsafe-inline'; frame-src blob:; object-src blob:; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'"><title>ReadX 只读分享</title><style>body{font:16px/1.7 system-ui;max-width:1100px;margin:24px auto;padding:16px}pre{white-space:pre-wrap;overflow-wrap:anywhere}iframe{width:100%;height:70vh;border:1px solid #ccc}article{border-bottom:1px solid #ccc;padding:20px 0}button{margin:8px;padding:8px}small{color:#555}table{border-collapse:collapse;width:100%}td,th{border:1px solid #bbb;padding:8px;vertical-align:top}.evidence-target{outline:3px solid #d99b23;background:#fff1b8}</style><h1>ReadX 只读分享</h1><p id="disclosure"></p><main id="content"></main><script id="share-data" type="application/json">` + base64.StdEncoding.EncodeToString(raw) + `</script><script nonce="` + nonce + `">` + readonlyViewerScript + `</script></html>`
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="ReadX-readonly-share.html"`)
 	_, _ = fmt.Fprint(w, html)
 }
 
-const readonlyViewerScript = `
-const bytes=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
-const data=JSON.parse(new TextDecoder().decode(bytes(document.getElementById('share-data').textContent)));
-document.getElementById('disclosure').textContent=data.disclosure;
-const add=(parent,tag,text)=>{const node=document.createElement(tag);node.textContent=text;parent.append(node);return node;};
-for(const doc of data.documents){
- const article=add(document.getElementById('content'),'article','');add(article,'h2',doc.title);add(article,'p',[...(doc.authors||[]),doc.venue,doc.year,doc.doi].filter(Boolean).join(' · '));
- let frame=null,uri='';
- if(doc.pdf){uri=URL.createObjectURL(new Blob([bytes(doc.pdf)],{type:'application/pdf'}));frame=document.createElement('iframe');frame.title=doc.title;frame.src=uri+'#page=1';article.append(frame);add(article,'small','PDF 预览取决于浏览器。无法预览时可下载后用 PDF 阅读器查看。');const link=add(article,'a','下载所附 PDF');link.href=uri;link.download='paper.pdf';}
- else add(article,'p','未附原文，仅展示已选择的题录和研究材料。');
- for(const note of doc.notes||[]){const block=add(article,'section','');add(block,'h3','个人批注 · '+(note.page?'PDF 页序 '+note.page:'章节定位／无页码'));add(block,'blockquote',note.quote||'');add(block,'pre',note.note||'');if(frame&&note.page){const button=add(block,'button','查看原文第 '+note.page+' 页');button.onclick=()=>{frame.src=uri+'#page='+note.page;frame.scrollIntoView({behavior:'smooth'});};}}
- for(const reading of doc.readings||[]){add(article,'h3','AI 精读 · '+reading.kind);add(article,'pre',reading.text);}
-}
-`
+//go:embed readonly_viewer.js
+var readonlyViewerScript string

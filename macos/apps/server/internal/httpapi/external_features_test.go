@@ -211,6 +211,65 @@ func TestReadonlyShareUsesWhitelistAndEscapesContent(t *testing.T) {
 		}
 	}
 }
+
+func TestReadonlyShareIncludesEPUBLocatorsSelectedIdeasAndComparisonStates(t *testing.T) {
+	s := processingTestServer(t)
+	imported, err := s.importPublication(context.Background(), "fixture.epub", "fixture", epubFixture(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := imported.Document.Key
+	_, err = s.handle.Exec(`INSERT INTO annotations(id,document_id,quote,note,locator_json) VALUES('epub-note',?,'Original chapter text.','My question',?)`, imported.Document.ID, `{"kind":"epub","href":"chapter.xhtml","blockStart":1,"blockEnd":1,"startOffset":0,"endOffset":22}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ideas := []ResearchIdea{{Question: "Why this result?", Status: "draft", Evidence: []IdeaEvidence{{PaperKey: key, Origin: "个人笔记", Excerpt: "My evidence"}, {PaperKey: "not-selected", Origin: "个人笔记", Excerpt: "do-not-share-other-evidence"}}}, {Question: "do-not-share-unrelated-idea", Evidence: []IdeaEvidence{{PaperKey: "not-selected"}}}}
+	rawIdeas, _ := json.Marshal(ideas)
+	_, err = s.handle.Exec(`INSERT INTO app_state(key,value_json,updated_at) VALUES('ideas',?,'')`, string(rawIdeas))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := httptest.NewRecorder()
+	s.handleReadonlyShare(w, httptest.NewRequest("POST", "/", strings.NewReader(`{"keys":["`+key+`"],"includeOriginal":true,"includeNotes":true,"includeIdeas":true,"includeComparisons":true}`)))
+	if w.Code != 200 {
+		t.Fatal(w.Body.String())
+	}
+	page := w.Body.String()
+	begin := strings.Index(page, `type="application/json">`) + len(`type="application/json">`)
+	end := strings.Index(page[begin:], "</script>") + begin
+	raw, err := base64.StdEncoding.DecodeString(page[begin:end])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bundle readonlyShare
+	if json.Unmarshal(raw, &bundle) != nil {
+		t.Fatal(string(raw))
+	}
+	doc := bundle.Documents[0]
+	if doc.EPUB == "" || len(doc.Sections) != 1 || doc.Notes[0].Locator.Href != "chapter.xhtml" || doc.Notes[0].Locator.BlockStart != 1 {
+		t.Fatal("missing chapter context", doc)
+	}
+	sections, _ := json.Marshal(doc.Sections)
+	if strings.Contains(string(sections), "malicious()") || !strings.Contains(string(sections), "data:image/png;base64,") {
+		t.Fatal("unsafe or missing EPUB content", string(sections))
+	}
+	if len(bundle.Ideas) != 1 || len(bundle.Ideas[0].Evidence) != 1 || strings.Contains(string(raw), "do-not-share") {
+		t.Fatal("unselected idea or evidence leaked", string(raw))
+	}
+	if len(bundle.Comparisons) != 1 || bundle.Comparisons[0].Status != "未抽取" {
+		t.Fatal("missing comparison fabricated a claim", bundle.Comparisons)
+	}
+	comparison := shareExperiment(DocumentSummary{Key: "paper"}, `{"dataset":[{"k":"Views","v":"50","page":3,"excerpt":"50 views","secret":"private"}],"config":{"apiKey":"private"}}`)
+	encoded, _ := json.Marshal(comparison)
+	if comparison.Status != "已有抽取" || len(comparison.Groups["dataset"]) != 1 || strings.Contains(string(encoded), "private") {
+		t.Fatal(string(encoded))
+	}
+	if output := os.Getenv("READX_SHARE_FIXTURE_PATH"); output != "" {
+		if err = os.WriteFile(output, w.Body.Bytes(), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 func TestZoteroNotesRequireGrantAndRejectVersionConflicts(t *testing.T) {
 	s := processingTestServer(t)
 	_, _ = s.handle.Exec(`INSERT INTO documents(id,key,title) VALUES('paper','paper','Paper')`)

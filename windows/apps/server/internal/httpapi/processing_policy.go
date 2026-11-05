@@ -535,7 +535,7 @@ func processingMaterials(r *http.Request) []string {
 	case strings.HasPrefix(p, "/v1/zotero/"):
 		return []string{"向本机 Zotero 查询所选条目／集合；写回时发送当前确认的 ReadX 子笔记文本及父条目标识。不会直接修改 Zotero 数据库。"}
 	case p == "/v1/shares/readonly":
-		return []string{"所选文献的题录，以及你勾选的原文 PDF、个人批注和 AI 精读；不包含配置、密钥、聊天、任务日志或绝对路径"}
+		return []string{"所选文献题录，以及你勾选的 PDF／EPUB 原文、个人批注、AI 精读、研究想法和对照数据；不包含配置、密钥、聊天、任务日志或系统文件路径"}
 	case p == "/v1/ai/models" || p == "/v1/ai/test":
 		return []string{"服务凭据、模型标识及测试文本；此接口不发送论文全文"}
 	case strings.Contains(p, "latex"):

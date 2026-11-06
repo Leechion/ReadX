@@ -620,7 +620,7 @@ export function LibraryScreen({
             </div>
             <div className="library-more" ref={moreRef}>
               <button ref={moreButtonRef} type="button" className="library-more-trigger" aria-label="更多书库操作" aria-expanded={moreOpen} aria-controls="library-more-panel" onClick={() => setMoreOpen((value) => !value)}>⋯</button>
-              {moreOpen ? <div id="library-more-panel" className="library-more-panel" aria-label="更多书库操作" onClickCapture={() => setMoreOpen(false)}>{toolbarCommands()}</div> : null}
+              {moreOpen ? <div id="library-more-panel" className="library-more-panel" aria-label="更多书库操作" onClick={() => setMoreOpen(false)}>{toolbarCommands()}</div> : null}
             </div>
           </div>
         </header>

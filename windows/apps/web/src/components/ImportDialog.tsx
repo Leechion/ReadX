@@ -10,6 +10,8 @@ import { UploadShotStage, type ActiveImport } from './UploadShotStage';
 import { DocumentJobDialog } from './DocumentJobDialog';
 import { AppDialog } from './AppDialog';
 import { zotero, type ZoteroSelection } from '../api/zotero';
+import { MAX_SECTION_IMPORT_BYTES, fileFormatLabel, importSizeLimit } from '../api/importLimits';
+import { inferDocumentFormat } from '@cbct/shared';
 import { ZoteroImportPanel } from './ZoteroImportPanel';
 import { ScholarDiscoveryPanel } from './ScholarDiscoveryPanel';
 import { CaptureInboxPanel } from './CaptureInboxPanel';
@@ -17,10 +19,8 @@ import { ZoteroNotesPanel } from './ZoteroNotesPanel';
 import { ZoteroMigrationPanel } from './ZoteroMigrationPanel';
 import type { BatchShot } from './BatchShotVolley';
 
-const MAX_PDF_BYTES = 512 * 1048576;
-const MAX_EPUB_BYTES = 100 * 1048576;
 const MAX_CONCURRENT_IMPORTS = 14;
-const MAX_UPLOAD_BATCH_BYTES = 512 * 1048576;
+const MAX_UPLOAD_BATCH_BYTES = MAX_SECTION_IMPORT_BYTES * 16;
 
 export function ImportDialog({
   files,
@@ -116,9 +116,8 @@ export function ImportDialog({
     setError('');
     activity.begin('preparing', `正在检查 ${file.name}`);
     try {
-      const isPDF = /\.pdf$/i.test(file.name) || file.type === 'application/pdf';
-      if (file.size > (isPDF ? MAX_PDF_BYTES : MAX_EPUB_BYTES)) {
-        throw new Error(isPDF ? 'PDF 文件不能超过 LeePDF 默认的 512 MB 上传上限' : '单个 EPUB 文件不超过 100 MB');
+      if (file.size > importSizeLimit(file.name)) {
+        throw new Error(/\.pdf$/i.test(file.name) || file.type === 'application/pdf' ? 'PDF 文件不能超过 LeePDF 默认的 512 MB 上传上限' : `单个 ${fileFormatLabel(file.name)} 文件不超过 100 MB`);
       }
       const fileIndex = 1;
       const files = 1;
@@ -161,7 +160,7 @@ export function ImportDialog({
     setActive(null);
     setJobFile(null);
     const shotId = ++batchShotId.current;
-    const shotFiles = pending.filter(file => file.size <= (/\.pdf$/i.test(file.name) || file.type === 'application/pdf' ? MAX_PDF_BYTES : MAX_EPUB_BYTES));
+    const shotFiles = pending.filter(file => file.size <= importSizeLimit(file.name));
     setBatchShot(shotFiles.length ? { id: shotId, files: shotFiles } : null);
     setQueue([]);
     setBatchItems(pending.map((file) => ({ file, status: 'queued' as const, message: '等待处理' })));
@@ -172,8 +171,7 @@ export function ImportDialog({
       const batches: Array<Array<{ file: File; index: number }>> = [];
       let batchBytes = 0;
       for (const [index, file] of pending.entries()) {
-        const isPDF = /\.pdf$/i.test(file.name) || file.type === 'application/pdf';
-        if (file.size > (isPDF ? MAX_PDF_BYTES : MAX_EPUB_BYTES)) {
+        if (file.size > importSizeLimit(file.name)) {
           const imported = { name: file.name, existing: false, error: `${file.name} 超出单文件大小限制` };
           importedResults[index] = imported;
           setResults((current) => [...current, imported]);
@@ -313,7 +311,7 @@ export function ImportDialog({
       }}
     >
       <header>
-        <div><p className="section-eyebrow">BUILD YOUR LIBRARY</p><h2>导入文档</h2><p className="import-subtitle">PDF / EPUB · 识别题录并保存全文翻译</p></div>
+        <div><p className="section-eyebrow">BUILD YOUR LIBRARY</p><h2>导入文档</h2><p className="import-subtitle">PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI · 识别题录并保存全文翻译</p></div>
         <button
           onClick={() => {
             controller.current?.abort();
@@ -368,7 +366,7 @@ export function ImportDialog({
         </section>
       )}
       <p className="text-xs text-ink-faint">
-        PDF 最大 512 MB（LeePDF 服务会继续校验 OCR 限制）；EPUB 最大 100 MB。文件夹会递归收集 PDF / EPUB；选择后点击“并行导入全部”开始处理。
+        PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI 均可导入：PDF 单文件最大 512 MB（LeePDF 服务会继续校验 OCR 限制），其余格式最大 100 MB。TXT/MD/DOCX/FB2/MOBI 按章节结构入库阅读。文件夹会递归收集这些格式；选择后点击“并行导入全部”开始处理。
       </p>
       <label className="import-link-field">
         链接、arXiv 编号、DOI 或标题
@@ -429,7 +427,7 @@ export function ImportDialog({
     </AppDialog>
     {jobFile ? (
       <DocumentJobDialog
-        document={{ key: activity.jobKey || '', title: active?.result?.document?.title || jobFile.name, authors: active?.result?.document?.authors || [], format: /\.epub$/i.test(jobFile.name) || jobFile.type === 'application/epub+zip' ? 'epub' : 'pdf' }}
+        document={{ key: activity.jobKey || '', title: active?.result?.document?.title || jobFile.name, authors: active?.result?.document?.authors || [], format: inferDocumentFormat(jobFile.name) }}
         jobKey={activity.jobKey || null}
         coverFile={jobFile}
         importing={busy}

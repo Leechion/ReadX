@@ -590,7 +590,7 @@ func sameRawEntities(a, b map[string]json.RawMessage) bool {
 
 func publishSyncAsset(source, folder string) (string, string, error) {
 	ext := strings.ToLower(filepath.Ext(source))
-	if ext != ".pdf" && ext != ".epub" {
+	if !isSyncAssetExtension(ext) {
 		return "", "", nil
 	}
 	input, err := os.Open(source)
@@ -634,7 +634,7 @@ func materializeSyncAsset(folder string, doc syncDocument, library string) (stri
 	if doc.AssetHash == "" {
 		return "", nil
 	}
-	if len(doc.AssetHash) != 64 || (doc.AssetExt != ".pdf" && doc.AssetExt != ".epub") {
+	if len(doc.AssetHash) != 64 || !isSyncAssetExtension(doc.AssetExt) {
 		return "", errors.New("invalid synchronized asset reference")
 	}
 	if _, err := hex.DecodeString(doc.AssetHash); err != nil {
@@ -1220,7 +1220,7 @@ func materializeSyncAssets(folder string, merged map[string][]syncmerge.Version)
 			if doc.AssetHash == "" {
 				continue
 			}
-			if len(doc.AssetHash) != 64 || (doc.AssetExt != ".pdf" && doc.AssetExt != ".epub") {
+			if len(doc.AssetHash) != 64 || !isSyncAssetExtension(doc.AssetExt) {
 				return errors.New("invalid synchronized asset reference")
 			}
 			if _, err := hex.DecodeString(doc.AssetHash); err != nil {

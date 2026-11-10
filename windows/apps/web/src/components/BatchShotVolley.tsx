@@ -1,10 +1,11 @@
 import { useEffect, useState } from 'react';
+import { fileFormatLabel } from '../api/importLimits';
 import './batch-shot.css';
 
 export interface BatchShot { id: number; files: File[] }
 
 export function ShotPaper({ file }: { file: File }) {
-  return <><span className="shot-sheet"><span className="shot-fold" /><span className="shot-ln" style={{ top: 26, width: 24 }} /><span className="shot-ln" style={{ top: 33, width: 32 }} /><span className="shot-ln" style={{ top: 40, width: 28 }} /></span><span className="shot-tag">{/\.pdf$/i.test(file.name) || file.type === 'application/pdf' ? 'PDF' : 'EPUB'}</span></>;
+  return <><span className="shot-sheet"><span className="shot-fold" /><span className="shot-ln" style={{ top: 26, width: 24 }} /><span className="shot-ln" style={{ top: 33, width: 32 }} /><span className="shot-ln" style={{ top: 40, width: 28 }} /></span><span className="shot-tag">{fileFormatLabel(file.name)}</span></>;
 }
 
 const FLIGHT_MS = 1050;

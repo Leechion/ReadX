@@ -19,8 +19,47 @@ export type DocumentStatus = 'queue' | 'reading' | 'done' | 'archive';
 /** 后端状态值可能先于前端枚举演进（S1 之后会加分类），因此运行时按 string 收，展示时兜底。 */
 export type WireStatus = DocumentStatus | (string & {});
 
+export type DocumentFormat = 'pdf' | 'epub' | 'txt' | 'md' | 'docx' | 'fb2' | 'mobi';
+
+/** 章节型格式在服务器解析为 document_sections，由章节阅读器展示；PDF 走行级 OCR 排版。 */
+const SECTION_FORMATS = new Set<string>(['epub', 'txt', 'md', 'docx', 'fb2', 'mobi']);
+
+export function isSectionFormat(format?: string): boolean {
+  return format !== undefined && SECTION_FORMATS.has(format);
+}
+
+/** 章节格式原文件的下载后缀与 MIME；与服务端 sectionFileMimes 保持一致。 */
+const SECTION_DOWNLOADS: Record<string, { suffix: string; mime: string }> = {
+  epub: { suffix: '.epub', mime: 'application/epub+zip' },
+  txt: { suffix: '.txt', mime: 'text/plain;charset=utf-8' },
+  md: { suffix: '.md', mime: 'text/markdown;charset=utf-8' },
+  docx: { suffix: '.docx', mime: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' },
+  fb2: { suffix: '.fb2', mime: 'text/xml;charset=utf-8' },
+  mobi: { suffix: '.mobi', mime: 'application/x-mobipocket-ebook' },
+};
+
+export function sectionDownloadInfo(format: string): { suffix: string; mime: string } | null {
+  return SECTION_DOWNLOADS[format] ?? null;
+}
+
+/** 由文件名推断导入格式；未知扩展名按 PDF 处理（服务端会再按内容嗅探兜底）。 */
+export function inferDocumentFormat(name: string): DocumentFormat {
+  const lower = name.toLowerCase();
+  if (/\.epub$/i.test(lower)) return 'epub';
+  if (/\.md$|\.markdown$|\.mdown$|\.mkd$/i.test(lower)) return 'md';
+  if (/\.txt$/i.test(lower)) return 'txt';
+  if (/\.docx$/i.test(lower)) return 'docx';
+  if (/\.fb2$/i.test(lower)) return 'fb2';
+  if (/\.mobi$|\.azw3?$/i.test(lower)) return 'mobi';
+  return 'pdf';
+}
+
+export function formatBadgeLabel(format?: string): string {
+  return (format || 'pdf').toUpperCase();
+}
+
 export interface DocumentSummary {
-  format?: 'pdf' | 'epub';
+  format?: DocumentFormat;
   hasPdf?: boolean;
   id: string;
   key: string;

@@ -208,7 +208,7 @@ func (d *nutstoreWebDAV) downloadAssets(ctx context.Context, folder string, merg
 			if doc.AssetHash == "" {
 				continue
 			}
-			if len(doc.AssetHash) != 64 || (doc.AssetExt != ".pdf" && doc.AssetExt != ".epub") {
+			if len(doc.AssetHash) != 64 || !isSyncAssetExtension(doc.AssetExt) {
 				return errors.New("invalid synchronized asset reference")
 			}
 			remote := "readx-sync/blobs/" + doc.AssetHash + doc.AssetExt

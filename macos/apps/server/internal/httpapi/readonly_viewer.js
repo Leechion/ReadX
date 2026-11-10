@@ -31,8 +31,8 @@
       uri = download(article, doc.pdf, 'application/pdf', 'paper.pdf');
       frame = add(article, 'iframe'); frame.title = doc.title; frame.src = uri + '#page=1';
       add(article, 'small', 'PDF 预览取决于浏览器；无法预览时可下载原文件。');
-    } else if (doc.epub) {
-      download(article, doc.epub, 'application/epub+zip', 'book.epub');
+    } else if (doc.epub || doc.sections?.length) {
+      if (doc.epub) download(article, doc.epub, 'application/epub+zip', 'book.epub');
       add(article, 'p', '以下为结构化章节原文，保留段落定位；原版式请下载 EPUB 查看。');
       for (const section of doc.sections || []) {
         const root = add(article, 'details'); root.open = true; add(root, 'summary', section.title);

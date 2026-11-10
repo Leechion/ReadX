@@ -145,11 +145,11 @@ func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 				paths := legacy.NewPaths(s.cfg.DataRoot)
 				if doc.Format == "pdf" {
 					doc.PDFPath, _ = paths.PDFFile(doc.Key)
-				} else if doc.Format == "epub" {
-					doc.PDFPath = filepath.Join(paths.LibraryDir(), doc.Key+".epub")
+				} else if ext, known := sectionFileExtensions[doc.Format]; known {
+					doc.PDFPath = filepath.Join(paths.LibraryDir(), doc.Key+ext)
 				}
 			}
-			if (doc.Format != "pdf" && doc.Format != "epub") || doc.PDFPath == "" {
+			if (doc.Format != "pdf" && !isSectionFormat(doc.Format)) || doc.PDFPath == "" {
 				writeError(w, 400, "所选条目没有可分享原文件；可取消包含原文后导出题录和笔记")
 				return
 			}
@@ -169,12 +169,14 @@ func (s *Server) handleReadonlyShare(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			sum := sha256.Sum256(data)
-			if doc.Format == "epub" {
-				item.EPUB = base64.StdEncoding.EncodeToString(data)
-				item.Sections, e = shareEPUBSections(data)
+			if isSectionFormat(doc.Format) {
+				item.Sections, e = shareBookSections(doc.Format, data)
 				if e != nil {
 					writeError(w, 400, e.Error())
 					return
+				}
+				if doc.Format == "epub" {
+					item.EPUB = base64.StdEncoding.EncodeToString(data)
 				}
 			} else {
 				item.PDF = base64.StdEncoding.EncodeToString(data)

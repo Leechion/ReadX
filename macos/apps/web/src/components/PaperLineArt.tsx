@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { DocumentSummary } from '@cbct/shared';
+import { isSectionFormat } from '@cbct/shared';
 import type { DocumentMeta } from '../api/client';
 import { api } from '../api/client';
 import './paper-line-art.css';
@@ -232,7 +233,7 @@ export function PaperLineArt({ doc, meta }: { doc: DocumentSummary; meta: Docume
 
   useEffect(() => {
     setText(pageTextCache.get(cacheKey) || '');
-    if (doc.format === 'epub' || !host.current || pageTextCache.has(cacheKey)) return;
+    if (isSectionFormat(doc.format) || !host.current || pageTextCache.has(cacheKey)) return;
     const controller = new AbortController();
     const observer = new IntersectionObserver((entries) => {
       if (!entries.some(entry => entry.isIntersecting)) return;

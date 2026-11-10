@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentSummary, PDFLayout } from '@cbct/shared';
-import { pageParagraphs, segmentParagraph, statusLabel } from '@cbct/shared';
+import { isSectionFormat, pageParagraphs, segmentParagraph, statusLabel } from '@cbct/shared';
 import { api, type Annotation, type DocumentJob, type EPUBSection, type NewAnnotation, type TranslationPreview } from '../api/client';
 import { useFullscreen } from '../hooks/useFullscreen';
 import type { DocumentPhase } from '../hooks/useDocument';
@@ -54,7 +54,8 @@ export function ReaderScreen({
   pendingFind = null,
   onOpenDocument,
 }: Props) {
-  const epub = selected?.format === 'epub';
+  // 章节型格式（EPUB/TXT/MD/DOCX/FB2/MOBI）共用同一套章节阅读路径；epub 即「按章节读」。
+  const epub = isSectionFormat(selected?.format);
   const documentKey = selected?.key ?? null;
   const [marginDraft, setMarginDraft] = useState<{ page: number; id?: string; text: string; color: string; quote?: string; selection?: NewAnnotation; pageAspect?: number } | null>(null);
   const [marginBusy, setMarginBusy] = useState(false);
@@ -675,7 +676,7 @@ export function ReaderScreen({
   useEffect(() => () => dragCleanup.current?.(), []);
   const runningStage = documentJob?.stages.find((stage) => stage.status === 'running');
   const translationStage = documentJob?.stages.find((stage) => stage.key === 'translate');
-  const translationStatus = epub ? 'EPUB 原文'
+  const translationStatus = epub ? '章节原文'
     : documentJob?.status === 'failed' ? '处理失败'
     : documentJob?.status === 'running' ? runningStage?.key === 'translate' ? '翻译中' : `${runningStage?.label || '处理'}中`
     : translatedPDF.document ? '已翻译'
@@ -782,7 +783,7 @@ export function ReaderScreen({
     >
       {epub ? (
         <div className="translation-document">
-          <p>LeePDF 排版译文只适用于 PDF。EPUB 请阅读原文。</p>
+          <p>LeePDF 排版译文只适用于 PDF。章节型文档请阅读原文。</p>
         </div>
       ) : translatedPDF.document ? (
         <PDFDocumentView

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ImportProgress, ImportedDocument } from '../api/client';
+import { fileFormatLabel, isImportFileName } from '../api/importLimits';
 import { BatchShotVolley, ShotPaper, type BatchShot } from './BatchShotVolley';
 
 /**
@@ -189,12 +190,12 @@ export function UploadShotStage({
   const [hot, setHot] = useState(false);
   const [selectionNotice, setSelectionNotice] = useState('');
   const queueFiles = (selected: File[], folder = false) => {
-    const documents = selected.filter((file) => /\.(pdf|epub)$/i.test(file.name) || file.type === 'application/pdf' || file.type === 'application/epub+zip');
+    const documents = selected.filter((file) => isImportFileName(file.name) || file.type === 'application/pdf' || file.type === 'application/epub+zip');
     if (documents.length) onQueue(documents);
     const skipped = selected.length - documents.length;
     setSelectionNotice(folder
       ? `已从文件夹及子文件夹中找到 ${documents.length} 篇文献${skipped ? `，忽略 ${skipped} 个其他文件` : ''}`
-      : skipped ? `已忽略 ${skipped} 个非 PDF / EPUB 文件` : '');
+      : skipped ? `已忽略 ${skipped} 个暂不支持的文件（支持 PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI）` : '');
   };
   const [aim, setAim] = useState<Aim | null>(null);
   /** 正在飞行的球：起点、初速、起始时间；null 表示没在飞。 */
@@ -381,7 +382,7 @@ export function UploadShotStage({
           选择文件
           <input
             type="file"
-            accept=".pdf,.epub,application/pdf,application/epub+zip"
+            accept=".pdf,.epub,.txt,.md,.docx,.fb2,.mobi,application/pdf,application/epub+zip,text/plain,text/markdown"
             multiple
             disabled={disabled}
             onChange={(event) => {
@@ -479,7 +480,7 @@ export function UploadShotStage({
         {batchShot ? null : batchBusy ? <div className="shot-invite"><strong>正在并行处理文献</strong></div> : !ammo ? (
           <div className="shot-invite">
             <strong>添加论文或文件夹</strong>
-            <span>文件夹会包含子文件夹中的 PDF / EPUB</span>
+            <span>文件夹会包含子文件夹中的 PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI</span>
           </div>
         ) : (
           <div className="shot-hint">
@@ -507,7 +508,7 @@ export function UploadShotStage({
                     <path d="M21 1 h8 v8 z" className="shot-mini-fold" />
                     <rect x="2" y="29" width="22" height="9" rx="2" className="shot-mini-tag" />
                     <text x="13" y="35.6" textAnchor="middle" fontSize="7" fontWeight="700" className="shot-mini-text">
-                      {/\.pdf$/i.test(file.name) ? 'PDF' : 'EPUB'}
+                      {fileFormatLabel(file.name)}
                     </text>
                   </svg>
                 </span>
@@ -536,7 +537,7 @@ export function UploadShotStage({
                 </g>
                 <rect x="2" y="29" width="22" height="9" rx="2" className="shot-mini-tag" />
                 <text x="13" y="35.6" textAnchor="middle" fontSize="7" fontWeight="700" className="shot-mini-text">
-                  {/\.pdf$/i.test(active.file.name) ? 'PDF' : 'EPUB'}
+                  {fileFormatLabel(active.file.name)}
                 </text>
               </svg>
             </span>

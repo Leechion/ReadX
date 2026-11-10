@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
 import type { DocumentSummary } from '@cbct/shared';
+import { inferDocumentFormat, isSectionFormat } from '@cbct/shared';
 import { api, type DocumentProcessingJob, type JobStage } from '../api/client';
 import { AppDialog } from './AppDialog';
 import { WorkspaceIcon } from './WorkspaceIcon';
@@ -134,7 +135,7 @@ export function LibraryProcessingControl({ documents, onOpenDocument, onReload }
   const restartable = (job: DocumentProcessingJob, status: string) => {
     if (!['failed', 'interrupted', 'cancelled'].includes(status)) return false;
     const document = documents.find(doc => doc.key === (job.documentKey || job.key));
-    return Boolean(document && document.format !== 'epub');
+    return Boolean(document && !isSectionFormat(document.format));
   };
 
   useEffect(() => {
@@ -196,7 +197,7 @@ export function LibraryProcessingControl({ documents, onOpenDocument, onReload }
       {selectedTask ? <Suspense fallback={null}>
         <DocumentJobDialog
           key={selectedTask.key}
-          document={selectedDocument ?? { key: selectedTask.key, title: selectedTask.name, format: /\.epub$/i.test(selectedTask.name) ? 'epub' : 'pdf' }}
+          document={selectedDocument ?? { key: selectedTask.key, title: selectedTask.name, format: inferDocumentFormat(selectedTask.name) }}
           jobKey={selectedTask.key}
           fileKey={selectedDocument?.key || selectedTask.documentKey}
           importing={!selectedDocument}

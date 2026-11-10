@@ -2,7 +2,7 @@ import { createElement, useCallback, useEffect, useMemo, useRef, useState } from
 import type { CSSProperties, ReactNode } from 'react';
 import type { DocumentSummary } from '@cbct/shared';
 import type { DesktopUpdateStatus } from '@cbct/shared';
-import { statusLabel } from '@cbct/shared';
+import { isSectionFormat, statusLabel } from '@cbct/shared';
 import type { Category, DocumentMeta } from '../api/client';
 import { api, type SearchHit, type SearchResponse } from '../api/client';
 import type { Filters, WorkspacePhase } from '../hooks/useWorkspace';
@@ -344,7 +344,7 @@ export function LibraryScreen({
   const favoriteCount = allDocuments.filter((doc) => meta.items[doc.key]?.favorite && !meta.items[doc.key]?.deleted).length;
   const toggleTrash = (key: string) => meta.patch(key, { deleted: !meta.items[key]?.deleted });
   const missingPDFs = useMemo(() => allDocuments.filter((doc) =>
-    !meta.items[doc.key]?.deleted && doc.title.trim() && doc.format !== 'epub' && !(doc.hasPdf ?? Boolean(doc.pdfPath))),
+    !meta.items[doc.key]?.deleted && doc.title.trim() && !isSectionFormat(doc.format) && !(doc.hasPdf ?? Boolean(doc.pdfPath))),
   [allDocuments, meta.items]);
 
   const fetchMissingArxivPDFs = async () => {
@@ -1123,8 +1123,8 @@ function ListRow({
         <button type="button" onClick={onToggleFavorite} className={meta?.favorite ? 'text-accent' : 'text-ink-faint hover:text-ink'}>
           {meta?.favorite ? '★' : '☆'}
         </button>
-        {doc.format !== 'epub' && doc.hasPdf && doc.paperMemoryStatus && doc.paperMemoryStatus !== 'done' ? <button type="button" onClick={onOpenProcessing} className="text-accent hover:underline" title={doc.paperMemoryMessage || '查看论文记忆处理进度'}>处理</button> : null}
-        {doc.format !== 'epub' && doc.hasPdf ? <button type="button" onClick={() => onRetranslate(doc)} className="text-ink-faint hover:text-accent">重新翻译</button> : null}
+        {!isSectionFormat(doc.format) && doc.hasPdf && doc.paperMemoryStatus && doc.paperMemoryStatus !== 'done' ? <button type="button" onClick={onOpenProcessing} className="text-accent hover:underline" title={doc.paperMemoryMessage || '查看论文记忆处理进度'}>处理</button> : null}
+        {!isSectionFormat(doc.format) && doc.hasPdf ? <button type="button" onClick={() => onRetranslate(doc)} className="text-ink-faint hover:text-accent">重新翻译</button> : null}
         <button type="button" onClick={() => onOpenReproduction(doc.key)} className="text-ink-faint hover:text-accent">
           复现
         </button>

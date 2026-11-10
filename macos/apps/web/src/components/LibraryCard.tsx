@@ -1,5 +1,5 @@
 import type { DocumentSummary } from '@cbct/shared';
-import { statusLabel } from '@cbct/shared';
+import { formatBadgeLabel, isSectionFormat, statusLabel } from '@cbct/shared';
 import type { Category, DocumentMeta } from '../api/client';
 import { categoryDot } from '../categories';
 import { LibraryTrashButton } from './LibraryTrashButton';
@@ -56,7 +56,7 @@ export function LibraryCard({
       >
         <PaperLineArt doc={doc} meta={meta} />
         <span className="cover-top">
-          <span>{doc.format === 'epub' ? 'EPUB' : 'PDF'}</span>
+          <span>{formatBadgeLabel(doc.format)}</span>
           <span>{doc.year ?? ''}</span>
         </span>
         <span className="cover-text">
@@ -141,7 +141,7 @@ export function LibraryCard({
         </details>
       ) : null}
 
-      {doc.format !== 'epub' && doc.hasPdf ? (
+      {!isSectionFormat(doc.format) && doc.hasPdf ? (
         <div className="book-card-footer">
           {doc.paperMemoryStatus && doc.paperMemoryStatus !== 'done' ? (
             <button type="button" className="book-process-button" onClick={onOpenProcessing} title={doc.paperMemoryMessage || '查看论文记忆处理进度'}>

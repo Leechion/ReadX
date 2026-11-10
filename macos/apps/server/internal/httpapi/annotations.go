@@ -191,8 +191,8 @@ func (s *Server) handleAnnotationCreate(w http.ResponseWriter, r *http.Request) 
 				return
 			}
 		} else if loc.Kind == "epub" {
-			if doc.Format != "epub" || body.Page != nil || loc.Href == "" || loc.BlockStart < 0 || loc.BlockEnd < loc.BlockStart || loc.StartOffset < 0 || loc.EndOffset < 0 {
-				writeError(w, 400, "EPUB 批注必须使用章节与字符位置")
+			if !isSectionFormat(doc.Format) || body.Page != nil || loc.Href == "" || loc.BlockStart < 0 || loc.BlockEnd < loc.BlockStart || loc.StartOffset < 0 || loc.EndOffset < 0 {
+				writeError(w, 400, "章节批注必须使用章节与字符位置")
 				return
 			}
 			var raw string

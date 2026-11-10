@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { GlobalWorkerOptions, getDocument } from 'pdfjs-dist';
 import workerURL from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
+import { formatBadgeLabel, isSectionFormat, sectionDownloadInfo } from '@cbct/shared';
 import { api, type DocumentJob, type JobStage } from '../api/client';
 import { AppDialog } from './AppDialog';
 import { downloadBlob } from '../lib/download';
@@ -145,7 +146,7 @@ export function DocumentJobDialog({
   useEffect(() => {
     let cancelled = false;
     setCover('');
-    if (document.format === 'epub') return;
+    if (isSectionFormat(document.format)) return;
     if (!coverFile && !assetKey) return;
     if (!coverFile && importing && !fileKey) return;
     void (async () => {
@@ -194,8 +195,8 @@ export function DocumentJobDialog({
     setNotice('');
     try {
       const data = await api.file(assetKey);
-      const epub = document.format === 'epub';
-      download(new Blob([data], { type: epub ? 'application/epub+zip' : 'application/pdf' }), `${effectiveKey}.${epub ? 'epub' : 'pdf'}`);
+      const section = isSectionFormat(document.format) ? sectionDownloadInfo(document.format!) : null;
+      download(new Blob([data], { type: section?.mime ?? 'application/pdf' }), `${effectiveKey}.${section?.suffix.slice(1) ?? 'pdf'}`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : String(error));
     }
@@ -269,16 +270,16 @@ export function DocumentJobDialog({
     : status ? STATUS_LABEL[status] ?? status : pending ? '处理中' : '还没有任务记录';
   const activeMessage = tracking ? job?.stages.find((stage) => stage.status === 'running' && stage.message)?.message : '';
   const statusDetail = job
-    ? document.format === 'epub'
-      ? '按 EPUB 章节结构保存；无需 OCR 和 PDF 版面渲染'
+    ? isSectionFormat(document.format)
+      ? '按章节结构保存；无需 OCR 和 PDF 版面渲染'
       : activeMessage
       ? activeMessage
       : translationTotal > 0
       ? `已处理 ${translationCompleted} / ${translationTotal} ${translationUnit} · 排版 ${processedPages} / ${renderTotal || '—'} ${renderingUnit}`
       : `排版 ${processedPages} / ${renderTotal || '—'} ${renderingUnit}`
     : pending
-      ? document.format === 'epub' ? '正在上传文件，任务创建后显示章节导入状态' : '正在上传文件，任务创建后显示 OCR 进度'
-      : document.format === 'epub' ? '导入后这里会显示 EPUB 章节导入状态。' : '导入后这里会显示 LeePDF 的 OCR、翻译与渲染进度。';
+      ? isSectionFormat(document.format) ? '正在上传文件，任务创建后显示章节导入状态' : '正在上传文件，任务创建后显示 OCR 进度'
+      : isSectionFormat(document.format) ? '导入后这里会显示章节导入状态。' : '导入后这里会显示 LeePDF 的 OCR、翻译与渲染进度。';
   const openDisabled = importing || !effectiveKey || job?.status === 'failed' || job?.status === 'cancelled';
   // 能否一键重新处理：文档已入库（PDF）、当前没有在跑的任务、且翻译这一段确实停在中途。
   const translateInterrupted = translateStage
@@ -286,7 +287,7 @@ export function DocumentJobDialog({
     : false;
   const libraryKey = fileKey || resolvedLibraryKey || (!importing ? document.key : '');
   const reprocessable = Boolean(job) && Boolean(libraryKey) && (!importing || Boolean(fileKey || resolvedLibraryKey)) && !pending
-    && !tracking && document.format !== 'epub'
+    && !tracking && !isSectionFormat(document.format)
     && (['interrupted', 'failed', 'cancelled'].includes(status) || translateInterrupted);
 
   return (
@@ -326,9 +327,9 @@ export function DocumentJobDialog({
           <div className="job-downloads" aria-label="文件下载">
             <p className="job-side-label">文件与阅读</p>
             <div>
-              <button type="button" onClick={downloadOriginal} disabled={openDisabled} title="下载原版 PDF" aria-label="下载原版 PDF">⇩</button>
+              <button type="button" onClick={downloadOriginal} disabled={openDisabled} title="下载原文件" aria-label="下载原文件">⇩</button>
               <button type="button" onClick={() => { if (!openDisabled) onOpenReader(); }} disabled={openDisabled} title="在阅读器中打开" aria-label="在阅读器中打开">▤</button>
-              {document.format !== 'epub' ? <button type="button" onClick={downloadTranslated} disabled={openDisabled} title="下载译文 PDF" aria-label="下载译文 PDF">Aa</button> : null}
+              {!isSectionFormat(document.format) ? <button type="button" onClick={downloadTranslated} disabled={openDisabled} title="下载译文 PDF" aria-label="下载译文 PDF">Aa</button> : null}
             </div>
           </div>
         </aside>
@@ -362,9 +363,9 @@ export function DocumentJobDialog({
                   <p>{statusDetail}</p>
                 </div>
                 <div className="job-progress-summary">
-                  <span>{document.format === 'epub' ? '章节' : `翻译进度（${translationUnit}）`}</span>
-                  <strong>{document.format === 'epub' ? 'EPUB' : `${translationCompleted}`}<small>{document.format === 'epub' ? '' : ` / ${translationTotal || '—'}`}</small></strong>
-                  {document.format !== 'epub' ? <div className="job-meter" role="progressbar" aria-label="翻译进度" aria-valuemin={0} aria-valuemax={translationTotal || 1} aria-valuenow={translationCompleted}><span style={{ width: `${translationTotal ? Math.min(100, (translationCompleted / translationTotal) * 100) : 0}%` }} /></div> : null}
+                  <span>{isSectionFormat(document.format) ? '章节' : `翻译进度（${translationUnit}）`}</span>
+                  <strong>{isSectionFormat(document.format) ? '章节导入' : `${translationCompleted}`}<small>{isSectionFormat(document.format) ? '' : ` / ${translationTotal || '—'}`}</small></strong>
+                  {!isSectionFormat(document.format) ? <div className="job-meter" role="progressbar" aria-label="翻译进度" aria-valuemin={0} aria-valuemax={translationTotal || 1} aria-valuenow={translationCompleted}><span style={{ width: `${translationTotal ? Math.min(100, (translationCompleted / translationTotal) * 100) : 0}%` }} /></div> : null}
                 </div>
               </div>
 
@@ -373,7 +374,7 @@ export function DocumentJobDialog({
                   <span className={`job-spinner${tracking ? ' running' : ''}`} aria-hidden="true">{tracking ? '↻' : status === 'done' ? '✓' : '!'}</span>
                   <div>
                     <strong>处理流程</strong>
-                    <p>{activeMessage || (document.format === 'epub' ? '保留原章节结构并准备阅读' : '识别原文、翻译段落并生成可读译文')}</p>
+                    <p>{activeMessage || (isSectionFormat(document.format) ? '保留原章节结构并准备阅读' : '识别原文、翻译段落并生成可读译文')}</p>
                   </div>
                 </div>
 
@@ -403,8 +404,8 @@ export function DocumentJobDialog({
               <button type="button" className="job-live" onClick={() => { if (!openDisabled) onOpenReader(); }} disabled={openDisabled}>
                 <span aria-hidden="true">↗</span>
                 <div>
-                  <strong>{document.format === 'epub' ? '打开文档阅读器' : '打开译文阅读器'}</strong>
-                  <small>{importing ? '处理完成后可打开' : document.format === 'epub' ? '保留 EPUB 原章节结构' : '查看 ReadX 生成的译文 PDF'}</small>
+                  <strong>{isSectionFormat(document.format) ? '打开文档阅读器' : '打开译文阅读器'}</strong>
+                  <small>{importing ? '处理完成后可打开' : isSectionFormat(document.format) ? '保留原章节结构' : '查看 ReadX 生成的译文 PDF'}</small>
                 </div>
                 <span className="job-live-shortcut">打开</span>
               </button>
@@ -428,7 +429,7 @@ export function DocumentJobDialog({
                     <span className="job-action-note">{memoryRunning ? '译文已入库，论文记忆后台整理中' : job ? `任务${STATUS_LABEL[status] ?? status}` : '尚无运行中的任务'}</span>
                   </>
                 )}
-                <span className="job-meta">{document.format === 'epub' ? 'EPUB · 章节结构' : `OCR · ${job?.stages.find((stage) => stage.key === 'ocr')?.status === 'done' ? '已识别' : '未完成'}`}</span>
+                <span className="job-meta">{isSectionFormat(document.format) ? `${formatBadgeLabel(document.format)} · 章节结构` : `OCR · ${job?.stages.find((stage) => stage.key === 'ocr')?.status === 'done' ? '已识别' : '未完成'}`}</span>
                 <button type="button" onClick={() => setDetailsOpen((value) => !value)}>
                   {detailsOpen ? '收起' : '详情'}
                 </button>
@@ -455,10 +456,10 @@ export function DocumentJobDialog({
               {notice ? <p className="job-notice" role="status">{notice}</p> : null}
               {errorMessage ? <p className="job-error" role="alert">{errorMessage}</p> : null}
 
-              {document.format === 'epub' ? (
-                <section className="job-card" aria-label="EPUB 导入进度">
-                  <p className="job-side-label">EPUB 处理方式</p>
-                  <p>EPUB 按原章节结构保存并在阅读器中打开；无需 OCR 和 PDF 版面渲染。</p>
+              {isSectionFormat(document.format) ? (
+                <section className="job-card" aria-label="章节导入进度">
+                  <p className="job-side-label">章节文档处理方式</p>
+                  <p>按原章节结构保存并在阅读器中打开；无需 OCR 和 PDF 版面渲染。</p>
                 </section>
               ) : <section className="job-progress-metrics" aria-label="翻译和排版进度">
                 <article className="job-card job-metric-card">
@@ -490,7 +491,7 @@ export function DocumentJobDialog({
                     <li key={run.id}>
                       <strong>{STATUS_LABEL[run.status] ?? run.status}</strong>
                       <span>{new Date(run.startedAt).toLocaleString([], { hour12: false })}</span>
-                      {document.format !== 'epub' ? <span>{run.pages} 页</span> : <span>EPUB</span>}
+                      {isSectionFormat(document.format) ? <span>{formatBadgeLabel(document.format)}</span> : <span>{run.pages} 页</span>}
                       {run.error ? <small>{run.error}</small> : null}
                     </li>
                   ))}
@@ -523,16 +524,16 @@ export function DocumentJobDialog({
               <section className="job-card job-files">
                 <button type="button" onClick={downloadOriginal} disabled={openDisabled}>
                   <span aria-hidden="true">▣</span>
-                  <div><strong>{document.format === 'epub' ? '原版 EPUB' : '原版 PDF'}</strong><small>导入时保存的原始文件</small></div>
+                  <div><strong>{isSectionFormat(document.format) ? `原版 ${formatBadgeLabel(document.format)}` : '原版 PDF'}</strong><small>导入时保存的原始文件</small></div>
                   <span aria-hidden="true">⇩</span>
                 </button>
-                {document.format !== 'epub' ? <button type="button" onClick={downloadTranslated} disabled={openDisabled}>
+                {!isSectionFormat(document.format) ? <button type="button" onClick={downloadTranslated} disabled={openDisabled}>
                   <span aria-hidden="true">Aa</span>
                   <div><strong>译文 PDF</strong><small>ReadX 排版完成后提供</small></div>
                   <span aria-hidden="true">⇩</span>
                 </button> : null}
               </section>
-              {document.format !== 'epub' ? <p className="job-action-note">PDF 的 OCR、段落整理、翻译与排版由 ReadX 本地处理。</p> : <p className="job-action-note">EPUB 保留原章节结构，在阅读器中打开。</p>}
+              {!isSectionFormat(document.format) ? <p className="job-action-note">PDF 的 OCR、段落整理、翻译与排版由 ReadX 本地处理。</p> : <p className="job-action-note">文档保留原章节结构，在阅读器中打开。</p>}
             </div>
           ) : null}
 

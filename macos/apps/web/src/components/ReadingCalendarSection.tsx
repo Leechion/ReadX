@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { formatBadgeLabel, isSectionFormat } from '@cbct/shared';
 import type { CalendarDay, CalendarPaper, CalendarResponse } from '../api/client';
 import { api } from '../api/client';
 import type { WorkspacePhase } from '../hooks/useWorkspace';
@@ -285,7 +286,7 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
                       <span className="heat-paper-meta">
                         {new Date(paper.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
                         {' · '}
-                        {paper.format === 'epub' ? 'EPUB' : `第 ${paper.page || 1} 页`}
+                        {isSectionFormat(paper.format) ? formatBadgeLabel(paper.format) : `第 ${paper.page || 1} 页`}
                         {paper.hasReading ? ' · 精读' : ''}
                         {paper.hasAnnotation ? ' · 批注' : ''}
                       </span>

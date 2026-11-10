@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"archive/zip"
 	"cbctv2/server/internal/publication"
 	"encoding/base64"
 	"encoding/json"
@@ -93,13 +94,23 @@ func shareSelectedIdeas(ideas []ResearchIdea, selected map[string]bool, document
 	return out
 }
 func shareEPUBSections(data []byte) ([]shareSection, error) {
-	book, err := publication.ParseEPUB(data)
+	return shareBookSections("epub", data)
+}
+
+// shareBookSections renders a section-format book for the readonly share.
+// Only zip-based EPUBs inline their images; the other formats reach the share
+// as pure text sections already parsed at import time.
+func shareBookSections(format string, data []byte) ([]shareSection, error) {
+	book, err := parseSectionBook(format, "share."+format, data)
 	if err != nil {
 		return nil, err
 	}
-	archive, err := publication.Archive(data)
-	if err != nil {
-		return nil, err
+	var archive *zip.Reader
+	if format == "epub" {
+		archive, err = publication.Archive(data)
+		if err != nil {
+			return nil, err
+		}
 	}
 	result := []shareSection{}
 	images := map[string]string{}
@@ -109,7 +120,7 @@ func shareEPUBSections(data []byte) ([]shareSection, error) {
 		for _, block := range section.Blocks {
 			item := shareBlock{Kind: block.Kind, Text: block.Text}
 			total += len(block.Text)
-			if block.Kind == "image" && block.Src != "" {
+			if block.Kind == "image" && block.Src != "" && archive != nil {
 				encoded, exists := images[block.Src]
 				if !exists {
 					raw, err := publication.ReadResource(archive, block.Src)
@@ -128,7 +139,7 @@ func shareEPUBSections(data []byte) ([]shareSection, error) {
 				item.ImageOmitted = encoded == ""
 			}
 			if total > 64<<20 {
-				return nil, fmt.Errorf("EPUB 章节和图片展开后超过分享上限 64 MiB")
+				return nil, fmt.Errorf("章节和图片展开后超过分享上限 64 MiB")
 			}
 			part.Blocks = append(part.Blocks, item)
 		}

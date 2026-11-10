@@ -16,7 +16,7 @@ export function ReadonlyShareDialog({ documents, onClose }: { documents: Documen
   };
   return <AppDialog open onClose={onClose} busy={busy}><header><h2>只读分享</h2><button disabled={busy} onClick={onClose}>关闭</button></header>
     <p>生成可离线打开的 HTML 文件。默认只分享题录；请选择允许给接收者查看的材料。</p>
-    <label><input type="checkbox" checked={original} disabled={busy} onChange={event => setOriginal(event.target.checked)} />包含 PDF／EPUB 原文（合计最多 64 MiB，请确认可分享）</label>
+    <label><input type="checkbox" checked={original} disabled={busy} onChange={event => setOriginal(event.target.checked)} />包含原文（PDF 附件 / 章节文档正文，合计最多 64 MiB，请确认可分享）</label>
     <label><input type="checkbox" checked={notes} disabled={busy} onChange={event => setNotes(event.target.checked)} />包含个人批注、存疑和摘录</label>
     <label><input type="checkbox" checked={readings} disabled={busy} onChange={event => setReadings(event.target.checked)} />包含五重奏 AI 精读</label>
     <label><input type="checkbox" checked={ideas} disabled={busy} onChange={event => setIdeas(event.target.checked)} />包含证据关联所选论文的研究想法（含个人判断，请核对正文）</label>

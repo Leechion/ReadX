@@ -78,11 +78,16 @@ func (s *Server) importPublication(ctx context.Context, name, source string, dat
 		return result, fmt.Errorf("单个 PDF 超过 OCR 处理上限 %d MB", limit>>20)
 	}
 	if !isPDFData(data) {
-		format = "epub"
 		var err error
-		book, err = publication.ParseEPUB(data)
+		format, err = detectDocumentFormat(name, data)
 		if err != nil {
-			return result, fmt.Errorf("文件必须是有效的 PDF 或 EPUB: %w", err)
+			return result, err
+		}
+		if format != "pdf" {
+			book, err = parseSectionBook(format, name, data)
+			if err != nil {
+				return result, fmt.Errorf("文件不是可阅读的 %s 文档: %w", strings.ToUpper(format), err)
+			}
 		}
 	}
 	sum := sha256.Sum256(data)
@@ -100,7 +105,7 @@ func (s *Server) importPublication(ctx context.Context, name, source string, dat
 	}
 	title := strings.TrimSuffix(filepath.Base(name), filepath.Ext(name))
 	authors := []string{}
-	if format == "epub" {
+	if isSectionFormat(format) {
 		if book.Title != "" {
 			title = book.Title
 		}
@@ -201,7 +206,7 @@ func (s *Server) handlePublicationUpload(w http.ResponseWriter, r *http.Request)
 	defer r.MultipartForm.RemoveAll()
 	files := r.MultipartForm.File["files"]
 	if len(files) == 0 || len(files) > 16 {
-		writeError(w, 400, "每次请选择 1–16 个 PDF / EPUB 文件（单个 PDF 不超过 50 MB；单次上传总量不超过 816 MB）")
+		writeError(w, 400, "每次请选择 1–16 个文档（PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI；单个不超过 50 MB）")
 		return
 	}
 	var hints []publicationMetadataHint
@@ -353,12 +358,12 @@ func (s *Server) handlePublicationUpload(w http.ResponseWriter, r *http.Request)
 							result.Error = "相同文档已有导入任务正在运行"
 							return
 						}
-						s.jobStage(jobKey, "ocr", "skipped", "EPUB 使用章节结构，无需 OCR", -1, -1)
-						s.jobStage(jobKey, "translate", "skipped", "当前 EPUB 导入流程不执行 PDF 段落翻译", -1, -1)
-						s.jobStage(jobKey, "render", "skipped", "EPUB 按原章节结构阅读，无需 PDF 渲染", -1, -1)
-						s.jobStage(jobKey, "memory", "skipped", "EPUB 使用章节正文，不需要 PDF 论文记忆", -1, -1)
-						report(importProgress{Stage: "saving", Message: "正在解析 EPUB 章节并保存到书库", Name: file.Filename, File: index + 1, Files: len(files), JobKey: jobKey})
-						update("saving", "正在解析 EPUB 章节并保存到书库", 0, 0)
+						s.jobStage(jobKey, "ocr", "skipped", "章节型文档使用原有结构，无需 OCR", -1, -1)
+						s.jobStage(jobKey, "translate", "skipped", "章节导入流程不执行 PDF 段落翻译", -1, -1)
+						s.jobStage(jobKey, "render", "skipped", "按原章节结构阅读，无需 PDF 渲染", -1, -1)
+						s.jobStage(jobKey, "memory", "skipped", "章节正文不需要 PDF 论文记忆", -1, -1)
+						report(importProgress{Stage: "saving", Message: "正在解析章节结构并保存到书库", Name: file.Filename, File: index + 1, Files: len(files), JobKey: jobKey})
+						update("saving", "正在解析章节结构并保存到书库", 0, 0)
 						source := ""
 						if index < len(hints) {
 							source = hints[index].Source
@@ -981,8 +986,17 @@ func (s *Server) handlePublicationURL(w http.ResponseWriter, r *http.Request) {
 		u, _ := url.Parse(final)
 		name = filepath.Base(u.Path)
 	}
-	if !strings.HasSuffix(strings.ToLower(name), ".pdf") && !strings.HasSuffix(strings.ToLower(name), ".epub") {
-		name += ".pdf"
+	if lower := strings.ToLower(name); !strings.HasSuffix(lower, ".pdf") {
+		var known bool
+		for _, ext := range sectionFileExtensions {
+			if strings.HasSuffix(lower, ext) {
+				known = true
+				break
+			}
+		}
+		if !known && !(strings.HasSuffix(lower, ".md") || strings.HasSuffix(lower, ".markdown")) {
+			name += ".pdf"
+		}
 	}
 	if body.DownloadOnly {
 		w.Header().Set("Content-Type", "application/octet-stream")
@@ -1014,7 +1028,7 @@ func (s *Server) handlePublicationURL(w http.ResponseWriter, r *http.Request) {
 		result, err = s.importPublication(r.Context(), name, final, data)
 	}
 	if err != nil {
-		fail(422, "链接未返回可读 PDF/EPUB；可能需要登录或是网页: "+err.Error())
+		fail(422, "链接未返回可导入的文档（PDF/EPUB/TXT/MD/DOCX/FB2/MOBI）；可能需要登录或是网页: "+err.Error())
 		return
 	}
 	if stream {
@@ -1068,8 +1082,8 @@ func (s *Server) handlePublicationFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	file := doc.PDFPath
-	if doc.Format == "epub" {
-		file = filepath.Join(legacy.NewPaths(s.cfg.DataRoot).LibraryDir(), key+".epub")
+	if ext, known := sectionFileExtensions[doc.Format]; known {
+		file = filepath.Join(legacy.NewPaths(s.cfg.DataRoot).LibraryDir(), key+ext)
 	}
 	if doc.Format == "pdf" {
 		var found bool
@@ -1086,6 +1100,8 @@ func (s *Server) handlePublicationFile(w http.ResponseWriter, r *http.Request) {
 	}
 	if doc.Format == "pdf" {
 		w.Header().Set("Content-Type", "application/pdf")
+	} else if mime, known := sectionFileMimes[doc.Format]; known {
+		w.Header().Set("Content-Type", mime)
 	} else {
 		w.Header().Set("Content-Type", "application/epub+zip")
 	}
@@ -1170,11 +1186,11 @@ func (s *Server) handleLocation(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "文档不存在")
 		return
 	}
-	if (doc.Format == "pdf" && (body.Kind != "pdf" || body.Page < 1 || body.Page > 5000)) || (doc.Format == "epub" && (body.Kind != "epub" || body.Href == "" || body.Index < 1)) {
+	if (doc.Format == "pdf" && (body.Kind != "pdf" || body.Page < 1 || body.Page > 5000)) || (isSectionFormat(doc.Format) && (body.Kind != "epub" || body.Href == "" || body.Index < 1)) {
 		writeError(w, 400, "阅读位置无效")
 		return
 	}
-	if doc.Format == "epub" {
+	if isSectionFormat(doc.Format) {
 		var count int
 		if err = s.handle.QueryRowContext(r.Context(), `SELECT COUNT(*) FROM document_sections WHERE document_id=? AND ordinal=? AND href=?`, key, body.Index, body.Href).Scan(&count); err != nil || count != 1 {
 			writeError(w, 400, "阅读章节不存在")

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import JSZip from 'jszip';
 import type { DocumentSummary, LauncherOpenRequest } from '@cbct/shared';
+import { isSectionFormat } from '@cbct/shared';
 import { api, streamPresentationPlan, streamPresentationTheme, type PresentationPlanInput, type ReadingEntry, type ReadingVisualAnalysis } from '../api/client';
 import { usePDF } from './PDFView';
 import { usePaperVisuals } from '../hooks/usePaperVisuals';
@@ -202,7 +203,7 @@ export function PresentationWorkspace({ documents, onBack, launchRequest }: { do
   const followLive = useRef(true);
   const thumbnailRef = useRef<HTMLElement>(null);
   useEffect(() => () => generationAbort.current?.abort(), []);
-  const canLoadPDF = Boolean(selected && selected.format !== 'epub' && (selected.hasPdf ?? Boolean(selected.pdfPath)));
+  const canLoadPDF = Boolean(selected && !isSectionFormat(selected.format) && (selected.hasPdf ?? Boolean(selected.pdfPath)));
   const pdf = usePDF(canLoadPDF ? selected!.key : null);
   const { visuals, progress: visualProgress, error: visualError } = usePaperVisuals(pdf.document, canLoadPDF, selected?.key);
 

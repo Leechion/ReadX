@@ -149,6 +149,10 @@ export function AISettingsDialog({ onClose }: { onClose: () => void }) {
       .then((value) => {
         if (!alive) return;
         setSettings(value);
+        if (value.workbuddy?.login?.pending) {
+          setWorkBuddyLoginURL(value.workbuddy.login.url ?? '');
+          setWorkBuddyLoginPending(true);
+        }
         setProvider(value.provider);
         setBaseURL(value.baseURL);
         setModel(value.model);
@@ -330,21 +334,33 @@ export function AISettingsDialog({ onClose }: { onClose: () => void }) {
 
   useEffect(() => {
     if (!workBuddyLoginPending) return;
-    let active = true;
-    const timer = window.setInterval(() => {
-      void api.workbuddyLoginStatus().then(async (value) => {
-        if (!active) return;
-        if (value.login?.error) {
-          setNotice(value.login.error);
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let consecutiveErrors = 0;
+    const poll = async () => {
+      try {
+        const value = await api.workbuddyLoginStatus(controller.signal);
+        if (controller.signal.aborted) return;
+        consecutiveErrors = 0;
+        if (!value.login?.pending) {
+          setSettings(previous => previous ? { ...previous, workbuddy: value } : previous);
+          setWorkBuddyLoginURL('');
+          setNotice(value.login?.error ?? (value.authenticated ? 'WorkBuddy 国内版已登录。' : '登录已结束，请重新打开扫码页。'));
           setWorkBuddyLoginPending(false);
-        } else if (value.authenticated && !value.login?.pending) {
-          setWorkBuddyLoginPending(false);
-          setSettings(await api.settings());
-          setNotice('WorkBuddy 国内版已登录，正在读取模型目录…');
+          return;
         }
-      }).catch(() => {});
-    }, 1200);
-    return () => { active = false; window.clearInterval(timer); };
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        if (++consecutiveErrors >= 3) {
+          setNotice(`读取 WorkBuddy 登录状态失败：${cause instanceof Error ? cause.message : String(cause)}。请重试。`);
+          setWorkBuddyLoginPending(false);
+          return;
+        }
+      }
+      timer = window.setTimeout(() => void poll(), 1200);
+    };
+    void poll();
+    return () => { controller.abort(); window.clearTimeout(timer); };
   }, [workBuddyLoginPending]);
 
   return (

@@ -53,6 +53,9 @@ type processingAudit struct {
 }
 
 func (s *Server) recordProcessing(ctx context.Context, d processingDescription, decision string) error {
+	if s.handle == nil {
+		return nil
+	}
 	return s.appStateStore.Update(ctx, "processing.audit.v1", func(raw []byte, exists bool) ([]byte, error) {
 		rows := []processingAudit{}
 		if exists {
@@ -249,6 +252,9 @@ func processingAction(r *http.Request) string {
 	case strings.HasSuffix(p, "/comparison-experiment-job") && r.Method == http.MethodPost:
 		return "对照实验分析"
 	case strings.HasPrefix(p, "/v1/books/") || strings.HasPrefix(p, "/v1/book-sources/"):
+		if p == "/v1/book-sources/zlibrary/connection" && (r.Method == http.MethodGet || r.Method == http.MethodDelete) {
+			return ""
+		}
 		return "外部书源查询"
 	}
 	return ""
@@ -515,17 +521,21 @@ func (s *Server) processingSourceDigest(ctx context.Context, d processingDescrip
 	}
 	for _, key := range d.Documents {
 		var raw, pdf, updated string
-		_ = s.handle.QueryRowContext(ctx, `SELECT title||authors||doi||venue,pdf_path,updated_at FROM documents WHERE key=?`, key).Scan(&raw, &pdf, &updated)
+		if s.handle != nil {
+			_ = s.handle.QueryRowContext(ctx, `SELECT title||authors||doi||venue,pdf_path,updated_at FROM documents WHERE key=?`, key).Scan(&raw, &pdf, &updated)
+		}
 		fmt.Fprintf(h, "%s:%s:%s", key, raw, updated)
 		if info, e := os.Stat(pdf); e == nil {
 			fmt.Fprintf(h, "%d:%d", info.Size(), info.ModTime().UnixNano())
 		}
-		if source, e := s.sourceText(ctx, key); e == nil {
-			io.WriteString(h, source)
+		if s.handle != nil {
+			if source, e := s.sourceText(ctx, key); e == nil {
+				io.WriteString(h, source)
+			}
+			var reading string
+			_ = s.handle.QueryRowContext(ctx, `SELECT value_json FROM readings WHERE document_id=(SELECT id FROM documents WHERE key=?)`, key).Scan(&reading)
+			io.WriteString(h, reading)
 		}
-		var reading string
-		_ = s.handle.QueryRowContext(ctx, `SELECT value_json FROM readings WHERE document_id=(SELECT id FROM documents WHERE key=?)`, key).Scan(&reading)
-		io.WriteString(h, reading)
 	}
 	for _, id := range d.Projects {
 		source, _, err := s.latexProjectSourceContext(ctx, id, "", "")
@@ -578,7 +588,7 @@ func (s *Server) enforceProcessing(next http.HandlerFunc) http.HandlerFunc {
 			next(w, r)
 			return
 		}
-		if r.URL.Path == "/v1/sync" {
+		if r.URL.Path == "/v1/sync" && s.handle != nil {
 			rows, e := s.handle.QueryContext(r.Context(), `SELECT key FROM documents ORDER BY key`)
 			if e != nil {
 				writeError(w, 500, e.Error())
@@ -615,7 +625,9 @@ func (s *Server) enforceProcessing(next http.HandlerFunc) http.HandlerFunc {
 		d.Destinations = append(d.Destinations, s.processingDestinations(r)...)
 		for _, key := range d.Documents {
 			var title string
-			_ = s.handle.QueryRowContext(r.Context(), `SELECT title FROM documents WHERE key=?`, key).Scan(&title)
+			if s.handle != nil {
+				_ = s.handle.QueryRowContext(r.Context(), `SELECT title FROM documents WHERE key=?`, key).Scan(&title)
+			}
 			if title == "" {
 				title = "待导入文档"
 			}

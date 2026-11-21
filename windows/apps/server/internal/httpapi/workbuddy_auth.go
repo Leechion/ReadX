@@ -20,43 +20,64 @@ type workBuddyLoginStatus struct {
 	Error   string `json:"error,omitempty"`
 }
 
-func (s *Server) workBuddyStatus(cfg ai.Config) map[string]any {
+func (s *Server) workBuddyAuthPath() string {
+	return ai.WorkBuddyCredentialPath(legacy.NewPaths(s.cfg.DataRoot).ConfigFile())
+}
+
+func (s *Server) workBuddyStatus() map[string]any {
 	s.workBuddyLoginMu.Lock()
+	defer s.workBuddyLoginMu.Unlock()
 	login := s.workBuddyLogin
-	s.workBuddyLoginMu.Unlock()
+	// The account can be signed in before a provider and model are saved.
+	credential, err := ai.LoadWorkBuddyCredential(s.workBuddyAuthPath())
+	if err != nil && !login.Pending && login.Error == "" {
+		login.Error = "无法读取 WorkBuddy 登录凭据，请重新登录"
+	}
 	return map[string]any{
-		"authenticated": strings.TrimSpace(cfg.WorkBuddyAuth.AccessToken) != "",
-		"nickname":      cfg.WorkBuddyAuth.Nickname,
-		"expiresAt":     cfg.WorkBuddyAuth.ExpiresAt,
+		"authenticated": strings.TrimSpace(credential.AccessToken) != "",
+		"nickname":      credential.Nickname,
+		"expiresAt":     credential.ExpiresAt,
 		"login":         login,
 	}
 }
 
 func (s *Server) handleWorkBuddyLogin(w http.ResponseWriter, r *http.Request) {
+	s.workBuddyLoginMu.Lock()
+	current := s.workBuddyLogin
+	s.workBuddyLoginMu.Unlock()
+	if current.Pending {
+		writeJSON(w, http.StatusOK, current)
+		return
+	}
 	login, err := ai.BeginWorkBuddyLogin(r.Context())
 	if err != nil {
 		writeError(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	s.workBuddyLoginMu.Lock()
-	if s.workBuddyLogin.Pending {
-		s.workBuddyLoginMu.Unlock()
-		writeError(w, http.StatusConflict, "WorkBuddy 登录已在等待中")
-		return
+	started := !s.workBuddyLogin.Pending
+	if started {
+		s.workBuddyLogin = workBuddyLoginStatus{State: login.State, URL: login.URL, Pending: true}
 	}
-	s.workBuddyLogin = workBuddyLoginStatus{State: login.State, URL: login.URL, Pending: true}
+	current = s.workBuddyLogin
 	s.workBuddyLoginMu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]any{"state": login.State, "url": login.URL, "pending": true})
-	go s.completeWorkBuddyLogin(login.State)
+	writeJSON(w, http.StatusOK, current)
+	if started {
+		go s.completeWorkBuddyLogin(login.State)
+	}
 }
 
 func (s *Server) completeWorkBuddyLogin(state string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute+10*time.Second)
 	defer cancel()
 	credential, err := ai.WaitWorkBuddyLogin(ctx, state)
+	s.workBuddyLoginMu.Lock()
+	defer s.workBuddyLoginMu.Unlock()
+	if s.workBuddyLogin.State != state {
+		return
+	}
 	if err == nil {
-		configPath := legacy.NewPaths(s.cfg.DataRoot).ConfigFile()
-		authPath := filepath.Join(filepath.Dir(configPath), "workbuddy-auth.json")
+		authPath := s.workBuddyAuthPath()
 		err = ai.SaveWorkBuddyCredential(authPath, credential)
 		if err == nil {
 			err = securefile.RestrictToCurrentUser(filepath.Dir(authPath))
@@ -65,12 +86,8 @@ func (s *Server) completeWorkBuddyLogin(state string) {
 			err = securefile.RestrictToCurrentUser(authPath)
 		}
 	}
-	s.workBuddyLoginMu.Lock()
-	defer s.workBuddyLoginMu.Unlock()
-	if s.workBuddyLogin.State != state {
-		return
-	}
 	s.workBuddyLogin.Pending = false
+	s.workBuddyLogin.URL = ""
 	if err != nil {
 		s.workBuddyLogin.Error = err.Error()
 	} else {
@@ -79,23 +96,17 @@ func (s *Server) completeWorkBuddyLogin(state string) {
 }
 
 func (s *Server) handleWorkBuddyLoginStatus(w http.ResponseWriter, r *http.Request) {
-	cfg, err := s.aiConfig()
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(w, http.StatusOK, s.workBuddyStatus(cfg))
+	writeJSON(w, http.StatusOK, s.workBuddyStatus())
 }
 
 func (s *Server) handleWorkBuddyLogout(w http.ResponseWriter, r *http.Request) {
-	configPath := legacy.NewPaths(s.cfg.DataRoot).ConfigFile()
-	authPath := filepath.Join(filepath.Dir(configPath), "workbuddy-auth.json")
+	s.workBuddyLoginMu.Lock()
+	defer s.workBuddyLoginMu.Unlock()
+	authPath := s.workBuddyAuthPath()
 	if err := ai.DeleteWorkBuddyCredential(authPath); err != nil && !os.IsNotExist(err) {
 		writeError(w, http.StatusInternalServerError, "清除 WorkBuddy 登录失败")
 		return
 	}
-	s.workBuddyLoginMu.Lock()
 	s.workBuddyLogin = workBuddyLoginStatus{}
-	s.workBuddyLoginMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{"authenticated": false})
 }

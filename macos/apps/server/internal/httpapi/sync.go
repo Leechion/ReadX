@@ -277,7 +277,7 @@ func (s *Server) handleSyncNow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if nutstore != nil {
-		if err := nutstore.uploadSyncFiles(r.Context(), state.FolderPath); err != nil {
+		if err := nutstore.uploadSyncFiles(r.Context(), state.FolderPath, state.DeviceID); err != nil {
 			writeError(w, http.StatusBadGateway, "写入坚果云失败："+err.Error())
 			return
 		}

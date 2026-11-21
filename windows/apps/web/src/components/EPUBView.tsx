@@ -134,7 +134,7 @@ export function EPUBView({
           if (event.key === 'Shift') select();
         }}
       >
-        <article className={`epub-chapter${paragraphMode ? ' paragraph-mode' : ''}`} onClick={(event) => {
+        <article className={`epub-chapter${paragraphMode ? ' paragraph-mode' : ''}`} data-listening-page={section.index} onClick={(event) => {
           if (!paragraphMode || event.detail > 1) return;
           const selection = window.getSelection();
           if (selection && !selection.isCollapsed && selection.rangeCount && event.currentTarget.contains(selection.getRangeAt(0).commonAncestorContainer)) return;

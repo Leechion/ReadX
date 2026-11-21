@@ -1167,7 +1167,7 @@ export const api = {
   listModels: (body: { provider: string; baseURL: string; apiKey?: string; refresh?: boolean }) =>
     request<{ models: string[]; catalog?: CodexModel[]; source?: string; notice?: string }>('/v1/ai/models', { method: 'POST', body }),
   workbuddyLogin: () => request<{ state: string; url: string; pending: boolean }>('/v1/ai/workbuddy/login', { method: 'POST', body: {} }),
-  workbuddyLoginStatus: () => request<{ authenticated: boolean; nickname?: string; expiresAt?: number; login?: { state?: string; url?: string; pending: boolean; error?: string } }>('/v1/ai/workbuddy/login'),
+  workbuddyLoginStatus: (signal?: AbortSignal) => request<NonNullable<AISettings['workbuddy']>>('/v1/ai/workbuddy/login', { signal }),
   workbuddyLogout: () => request<{ authenticated: boolean }>('/v1/ai/workbuddy/login', { method: 'DELETE' }),
   upload: uploadPublications,
   dailyRecommendations: (rules: DailyRecommendationRules, signal?: AbortSignal) => {

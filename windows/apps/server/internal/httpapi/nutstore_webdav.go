@@ -278,7 +278,7 @@ func (d *nutstoreWebDAV) downloadTo(ctx context.Context, remote, local, expected
 	return nil
 }
 
-func (d *nutstoreWebDAV) uploadSyncFiles(ctx context.Context, folder string) error {
+func (d *nutstoreWebDAV) uploadSyncFiles(ctx context.Context, folder, deviceID string) error {
 	if err := d.ensureCollection(ctx, "readx-sync/blobs"); err != nil {
 		return err
 	}
@@ -296,26 +296,13 @@ func (d *nutstoreWebDAV) uploadSyncFiles(ctx context.Context, folder string) err
 		}
 	}
 	localPeerNames := map[string]struct{}{}
-	peerDir := filepath.Join(folder, "readx-sync", "peers")
-	peerEntries, err := os.ReadDir(peerDir)
+	peerEntries, err := os.ReadDir(filepath.Join(folder, "readx-sync", "peers"))
 	if err != nil {
 		return err
 	}
-	deviceID := ""
 	for _, entry := range peerEntries {
-		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
-			continue
-		}
-		localPeerNames["readx-sync/peers/"+entry.Name()] = struct{}{}
-		if deviceID == "" {
-			body, readErr := os.ReadFile(filepath.Join(peerDir, entry.Name()))
-			if readErr != nil {
-				return readErr
-			}
-			var state syncmerge.FolderState
-			if json.Unmarshal(body, &state) == nil {
-				deviceID = state.DeviceID
-			}
+		if !entry.IsDir() && filepath.Ext(entry.Name()) == ".json" {
+			localPeerNames["readx-sync/peers/"+entry.Name()] = struct{}{}
 		}
 	}
 	for _, relativeDir := range []string{"readx-sync/peers", "readx-sync/blobs"} {

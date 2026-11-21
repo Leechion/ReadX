@@ -3,13 +3,13 @@ package httpapi
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"cbctv2/server/internal/ai"
+	"cbctv2/server/internal/appstate"
 	"cbctv2/server/internal/translate"
 )
 
@@ -37,34 +37,27 @@ type dbTermPrescanStore struct {
 }
 
 func (store dbTermPrescanStore) LoadBatch(ctx context.Context, batchID, fingerprint string) ([]translate.PrescanTerm, bool, error) {
-	var encoded string
-	err := store.server.handle.QueryRowContext(ctx, `SELECT value_json FROM app_state WHERE key = ?`, store.key+":"+batchID).Scan(&encoded)
-	if err == sql.ErrNoRows {
-		return nil, false, nil
-	}
-	if err != nil {
-		return nil, false, err
-	}
-	var cached struct {
+	cached, exists, err := appstate.Load[struct {
 		Fingerprint string                  `json:"fingerprint"`
 		Terms       []translate.PrescanTerm `json:"terms"`
-	}
-	if json.Unmarshal([]byte(encoded), &cached) != nil || cached.Fingerprint != fingerprint {
-		return nil, false, nil
+	}](ctx, store.server.appStateStore, store.key+":"+batchID)
+	if err != nil || !exists || cached.Fingerprint != fingerprint {
+		return nil, false, err
 	}
 	return cached.Terms, true, nil
 }
 
 func (store dbTermPrescanStore) SaveBatch(ctx context.Context, batchID, fingerprint string, terms []translate.PrescanTerm) error {
-	body, err := json.Marshal(struct {
+	return appstate.Save(ctx, store.server.appStateStore, store.key+":"+batchID, struct {
 		Fingerprint string                  `json:"fingerprint"`
 		Terms       []translate.PrescanTerm `json:"terms"`
 	}{fingerprint, terms})
-	if err != nil {
-		return err
-	}
-	_, err = store.server.handle.ExecContext(ctx, `INSERT INTO app_state(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`, store.key+":"+batchID, string(body), nowStamp())
-	return err
+}
+
+func preparationFingerprint(payload any) string {
+	identity, _ := json.Marshal(payload)
+	sum := sha256.Sum256(identity)
+	return hex.EncodeToString(sum[:])
 }
 
 // documentTermPrescan keeps the LeePDF preparation mode opt-in (default
@@ -90,7 +83,11 @@ func (s *Server) documentTermPrescan(ctx context.Context, key string, cfg ai.Con
 			}
 		}
 	}
-	identity, _ := json.Marshal(struct {
+	termReview := ""
+	if cfg.TranslationPreparation == "editorial" {
+		termReview = translate.TermReviewPromptVersion
+	}
+	fingerprint := preparationFingerprint(struct {
 		Schema           string                  `json:"schema"`
 		ArtifactRevision string                  `json:"artifactRevision"`
 		Prompt           string                  `json:"promptVersion"`
@@ -106,35 +103,25 @@ func (s *Server) documentTermPrescan(ctx context.Context, key string, cfg ai.Con
 		Domain           translate.DomainContext `json:"domain"`
 		Items            []translate.Item        `json:"items"`
 		Locked           []translate.Term        `json:"locked"`
-	}{"term_base_v1", translationPreparationArtifactRevision, translate.PrescanPromptVersion, translate.PrescanSegmentationVersion, translate.PrescanBatchMaxTokens, translate.PrescanBatchMaxSegments, cfg.ProviderName(), cfg.ModelName(), cfg.PublicBaseURL(), cfg.ReasoningEffort, "zh-CN", func() string {
-		if cfg.TranslationPreparation == "editorial" {
-			return translate.TermReviewPromptVersion
-		}
-		return ""
-	}(), domain, items, locked})
-	sum := sha256.Sum256(identity)
-	fingerprint := hex.EncodeToString(sum[:])
+	}{"term_base_v1", translationPreparationArtifactRevision, translate.PrescanPromptVersion, translate.PrescanSegmentationVersion, translate.PrescanBatchMaxTokens, translate.PrescanBatchMaxSegments, cfg.ProviderName(), cfg.ModelName(), cfg.PublicBaseURL(), cfg.ReasoningEffort, "zh-CN", termReview, domain, items, locked})
+
 	stateKey := "translation-term-base:" + key
-	var encoded string
-	err := s.handle.QueryRowContext(ctx, `SELECT value_json FROM app_state WHERE key = ?`, stateKey).Scan(&encoded)
-	if err == nil {
-		var artifact termPrescanArtifact
-		if json.Unmarshal([]byte(encoded), &artifact) == nil && artifact.Fingerprint == fingerprint && (cfg.TranslationPreparation != "editorial" || artifact.ReviewStatus == "completed") {
-			return artifact.Terms, nil
-		}
-	} else if err != sql.ErrNoRows {
+	artifact, exists, err := appstate.Load[termPrescanArtifact](ctx, s.appStateStore, stateKey)
+	if err != nil {
 		return nil, fmt.Errorf("读取译前术语库缓存失败: %w", err)
 	}
+	if exists && artifact.Fingerprint == fingerprint && (cfg.TranslationPreparation != "editorial" || artifact.ReviewStatus == "completed") {
+		return artifact.Terms, nil
+	}
+
 	batchDocument := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		batchDocument = append(batchDocument, map[string]any{"itemID": item.ItemID, "pageIndex": item.PageIndex, "source": item.Source, "blockType": item.BlockType, "semanticRole": item.SemanticRole, "structureRole": item.StructureRole, "layoutRole": item.LayoutRole, "policyTranslate": item.PolicyTranslate})
 	}
-	batchIdentity, _ := json.Marshal(struct {
+	requestIdentity := preparationFingerprint(struct {
 		Provider, Model, BaseURL, Reasoning string
 		Document                            []map[string]any
 	}{cfg.ProviderName(), cfg.ModelName(), cfg.PublicBaseURL(), cfg.ReasoningEffort, batchDocument})
-	batchSum := sha256.Sum256(batchIdentity)
-	requestIdentity := hex.EncodeToString(batchSum[:])
 	terms, prescanErr := translate.PrepareDocumentTermsWithStore(ctx, ai.NewClient(cfg), items, locked, "简体中文", domain.Domain, requestIdentity, dbTermPrescanStore{server: s, key: "translation-term-batches:" + key})
 	reviewStatus := ""
 	if cfg.TranslationPreparation == "editorial" {
@@ -151,11 +138,7 @@ func (s *Server) documentTermPrescan(ctx context.Context, key string, cfg ai.Con
 		}
 	}
 	if prescanErr == nil {
-		body, marshalErr := json.Marshal(termPrescanArtifact{Fingerprint: fingerprint, Terms: terms, ReviewStatus: reviewStatus})
-		if marshalErr != nil {
-			return terms, marshalErr
-		}
-		if _, err = s.handle.ExecContext(ctx, `INSERT INTO app_state(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`, stateKey, string(body), nowStamp()); err != nil {
+		if err = appstate.Save(ctx, s.appStateStore, stateKey, termPrescanArtifact{Fingerprint: fingerprint, Terms: terms, ReviewStatus: reviewStatus}); err != nil {
 			return terms, fmt.Errorf("保存译前术语库缓存失败: %w", err)
 		}
 	}
@@ -163,7 +146,11 @@ func (s *Server) documentTermPrescan(ctx context.Context, key string, cfg ai.Con
 }
 
 func (s *Server) documentStyleGuide(ctx context.Context, key string, cfg ai.Config, items []translate.Item, terms []translate.Term, domain translate.DomainContext, userGlossary ...[]translate.Term) (string, error) {
-	identity, _ := json.Marshal(struct {
+	var glossary []translate.Term
+	if len(userGlossary) > 0 {
+		glossary = userGlossary[0]
+	}
+	fingerprint := preparationFingerprint(struct {
 		Prompt           string                  `json:"prompt"`
 		ArtifactRevision string                  `json:"artifactRevision"`
 		Provider         string                  `json:"provider"`
@@ -174,32 +161,19 @@ func (s *Server) documentStyleGuide(ctx context.Context, key string, cfg ai.Conf
 		Terms            []translate.Term        `json:"terms"`
 		UserGlossary     []translate.Term        `json:"userGlossary,omitempty"`
 		Domain           translate.DomainContext `json:"domain"`
-	}{translate.StyleGuidePromptVersion, translationPreparationArtifactRevision, cfg.ProviderName(), cfg.ModelName(), cfg.PublicBaseURL(), cfg.ReasoningEffort, items, terms, func() []translate.Term {
-		if len(userGlossary) > 0 {
-			return userGlossary[0]
-		}
-		return nil
-	}(), domain})
-	sum := sha256.Sum256(identity)
-	fingerprint := hex.EncodeToString(sum[:])
+	}{translate.StyleGuidePromptVersion, translationPreparationArtifactRevision, cfg.ProviderName(), cfg.ModelName(), cfg.PublicBaseURL(), cfg.ReasoningEffort, items, terms, glossary, domain})
+
 	stateKey := "translation-style-guide:" + key
-	var encoded string
-	err := s.handle.QueryRowContext(ctx, `SELECT value_json FROM app_state WHERE key = ?`, stateKey).Scan(&encoded)
-	if err == nil {
-		var artifact styleGuideArtifact
-		if json.Unmarshal([]byte(encoded), &artifact) == nil && artifact.Fingerprint == fingerprint {
-			return artifact.Guidance, nil
-		}
-	} else if err != sql.ErrNoRows {
+	artifact, exists, err := appstate.Load[styleGuideArtifact](ctx, s.appStateStore, stateKey)
+	if err != nil {
 		return "", fmt.Errorf("读取译前风格指南缓存失败: %w", err)
+	}
+	if exists && artifact.Fingerprint == fingerprint {
+		return artifact.Guidance, nil
 	}
 	guidance, generationErr := translate.GenerateDocumentStyle(ctx, ai.NewClient(cfg), items, terms, domain, userGlossary...)
 	if generationErr == nil {
-		body, marshalErr := json.Marshal(styleGuideArtifact{Fingerprint: fingerprint, Guidance: guidance})
-		if marshalErr != nil {
-			return guidance, marshalErr
-		}
-		if _, err = s.handle.ExecContext(ctx, `INSERT INTO app_state(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`, stateKey, string(body), nowStamp()); err != nil {
+		if err = appstate.Save(ctx, s.appStateStore, stateKey, styleGuideArtifact{Fingerprint: fingerprint, Guidance: guidance}); err != nil {
 			return guidance, fmt.Errorf("保存译前风格指南缓存失败: %w", err)
 		}
 	}
@@ -225,27 +199,18 @@ func (s *Server) documentDomainContext(ctx context.Context, key string, cfg ai.C
 	if previewText == "" {
 		return translate.DomainContext{}, nil
 	}
-	identity, _ := json.Marshal(struct{ Prompt, Revision, Provider, Model, BaseURL, Reasoning, Preview string }{translate.DomainContextPromptVersion, translationPreparationArtifactRevision, cfg.ProviderName(), cfg.ModelName(), cfg.PublicBaseURL(), cfg.ReasoningEffort, previewText})
-	sum := sha256.Sum256(identity)
-	fingerprint := hex.EncodeToString(sum[:])
+	fingerprint := preparationFingerprint(struct{ Prompt, Revision, Provider, Model, BaseURL, Reasoning, Preview string }{translate.DomainContextPromptVersion, translationPreparationArtifactRevision, cfg.ProviderName(), cfg.ModelName(), cfg.PublicBaseURL(), cfg.ReasoningEffort, previewText})
 	stateKey := "translation-domain-context:" + key
-	var encoded string
-	err := s.handle.QueryRowContext(ctx, `SELECT value_json FROM app_state WHERE key = ?`, stateKey).Scan(&encoded)
-	if err == nil {
-		var artifact domainContextArtifact
-		if json.Unmarshal([]byte(encoded), &artifact) == nil && artifact.Fingerprint == fingerprint {
-			return artifact.Domain, nil
-		}
-	} else if err != sql.ErrNoRows {
+	artifact, exists, err := appstate.Load[domainContextArtifact](ctx, s.appStateStore, stateKey)
+	if err != nil {
 		return translate.DomainContext{}, fmt.Errorf("读取领域识别缓存失败: %w", err)
+	}
+	if exists && artifact.Fingerprint == fingerprint {
+		return artifact.Domain, nil
 	}
 	domain, generationErr := translate.InferDocumentDomain(ctx, ai.NewClient(cfg), previewText)
 	if generationErr == nil {
-		body, marshalErr := json.Marshal(domainContextArtifact{Fingerprint: fingerprint, Domain: domain})
-		if marshalErr != nil {
-			return domain, marshalErr
-		}
-		if _, err = s.handle.ExecContext(ctx, `INSERT INTO app_state(key,value_json,updated_at) VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at`, stateKey, string(body), nowStamp()); err != nil {
+		if err = appstate.Save(ctx, s.appStateStore, stateKey, domainContextArtifact{Fingerprint: fingerprint, Domain: domain}); err != nil {
 			return domain, fmt.Errorf("保存领域识别缓存失败: %w", err)
 		}
 	}

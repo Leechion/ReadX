@@ -482,15 +482,6 @@ func cleanPrescanTerm(value string) string {
 func isASCIIAlphaNumeric(value byte) bool {
 	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9'
 }
-func mostFrequent(m map[string]int) string {
-	out := ""
-	for k, n := range m {
-		if n > m[out] || out == "" || n == m[out] && k < out {
-			out = k
-		}
-	}
-	return out
-}
 
 func mostFrequentInOrder(counts, first map[string]int) string {
 	out := ""
@@ -555,14 +546,4 @@ func allUpperOrDigit(s string) bool {
 		}
 	}
 	return has
-}
-func stripJSONFence(s string) string {
-	s = strings.TrimSpace(s)
-	if strings.HasPrefix(s, "```") {
-		if n := strings.IndexByte(s, '\n'); n >= 0 {
-			s = s[n+1:]
-		}
-		s = strings.TrimSuffix(strings.TrimSpace(s), "```")
-	}
-	return strings.TrimSpace(s)
 }

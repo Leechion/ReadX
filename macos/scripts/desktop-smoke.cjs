@@ -61,7 +61,91 @@ app.on('browser-window-created', (_event, window) => {
       await waitFor(window, '!!document.querySelector(".book-cover")');
       await window.webContents.executeJavaScript('document.querySelector(".book-cover").click()');
       await waitFor(window, '!!document.querySelector(".pdf-reader canvas")');
-      await waitFor(window, 'document.body.textContent.includes("精读五重奏")');
+      stage = 'reader toolbar menus';
+      const clickTool = async (selector, label) => {
+        const clicked = await window.webContents.executeJavaScript(`(() => {
+          const button = [...document.querySelectorAll(${JSON.stringify(selector)})]
+            .find(item => item.firstElementChild?.textContent === ${JSON.stringify(label)});
+          if (!button || button.disabled) return false;
+          button.click();
+          return true;
+        })()`);
+        assert(clicked, `Reader tool unavailable: ${label}`);
+      };
+      const category = label => clickTool('.reader-tool-trigger', label);
+      const menuItem = label => clickTool('.reader-tool-item', label);
+      await waitFor(window, 'document.querySelectorAll(".reader-tool-trigger:not(:disabled)").length === 3');
+      assert.equal(await window.webContents.executeJavaScript('document.querySelectorAll(".reader-tool-menu").length'), 0);
+      await category('阅读');
+      await waitFor(window, 'document.querySelector(".reader-tool-menu [aria-checked=true]")?.firstElementChild.textContent === "仅原文"');
+      await menuItem('原文译文');
+      await waitFor(window, '!!document.querySelector(".translation-divider") && !document.querySelector(".reader-tool-menu")');
+      await category('阅读');
+      await menuItem('仅原文');
+      await waitFor(window, '!document.querySelector(".translation-divider")');
+      await category('文献工具');
+      await waitFor(window, '!!document.querySelector(".reader-tool-menu")');
+      await menuItem('查找');
+      await waitFor(window, 'document.activeElement?.getAttribute("aria-label") === "查找内容"');
+      await window.webContents.executeJavaScript('document.querySelector("button[aria-label=关闭查找]").click()');
+      await category('阅读辅助');
+      await waitFor(window, 'document.querySelector(".reader-tool-menu")?.textContent.includes("精读五重奏")');
+      await window.webContents.executeJavaScript('document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }))');
+      await waitFor(window, '!document.querySelector(".reader-tool-menu") && document.activeElement?.firstElementChild?.textContent === "阅读辅助"');
+      stage = 'read-aloud player and sentence tracking';
+      await window.webContents.executeJavaScript(`(() => {
+        window.readAloudUtterances = [];
+        window.speechSynthesis.speak = utterance => { window.readAloudUtterances.push(utterance); };
+        window.speechSynthesis.pause = () => {};
+        window.speechSynthesis.resume = () => {};
+      })()`);
+      const clickListening = label => window.webContents.executeJavaScript(`[...document.querySelectorAll('.listening-dialog button, .listening-player button')]
+        .find(button => button.textContent === ${JSON.stringify(label)} || button.getAttribute('aria-label') === ${JSON.stringify(label)}).click()`);
+      const speechEvent = (index, event) => window.webContents.executeJavaScript(`window.readAloudUtterances[${index}].dispatchEvent(new Event(${JSON.stringify(event)}))`);
+      const hasSentence = sentence => `[...(CSS.highlights.get('readx-speaking-sentence') ?? [])][0]?.toString() === ${JSON.stringify(sentence)}`;
+      await category('阅读辅助');
+      await menuItem('语音速听');
+      await waitFor(window, '!!document.querySelector(".listening-dialog[open]")');
+      await clickListening('开始朗读');
+      await waitFor(window, '!!document.querySelector(".listening-player") && !document.querySelector(".listening-dialog[open]") && window.readAloudUtterances.length === 1');
+      await speechEvent(0, 'start');
+      await waitFor(window, hasSentence('Research paper.'));
+      await clickListening('暂停');
+      await waitFor(window, `document.querySelector('.listening-player [role=status]').textContent.includes('已暂停') && (${hasSentence('Research paper.')})`);
+      await clickListening('继续');
+      await speechEvent(0, 'end');
+      await waitFor(window, 'window.readAloudUtterances.length === 2');
+      await speechEvent(1, 'start');
+      await waitFor(window, hasSentence('Introduction.'));
+      await clickListening('停止');
+      await waitFor(window, '!CSS.highlights.has("readx-speaking-sentence")');
+      await clickListening('关闭播放器');
+      stage = 'read aloud a repeated selected sentence';
+      const selectedSentence = await window.webContents.executeJavaScript(`(() => {
+        const layer = document.querySelector('[data-rendered-page="1"] .textLayer');
+        const text = layer.querySelector('span').firstChild;
+        const start = text.data.lastIndexOf('Research paper.');
+        const range = document.createRange();
+        range.setStart(text, start);
+        range.setEnd(text, start + 'Research paper.'.length);
+        const selection = window.getSelection();
+        selection.removeAllRanges();
+        selection.addRange(range);
+        layer.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        return selection.toString();
+      })()`);
+      assert.equal(selectedSentence, 'Research paper.');
+      await waitFor(window, '!![...document.querySelectorAll("button")].find(button => button.textContent === "朗读选区")');
+      await window.webContents.executeJavaScript('[...document.querySelectorAll("button")].find(button => button.textContent === "朗读选区").click()');
+      await waitFor(window, 'document.querySelector(".listening-dialog select")?.value === "selection"');
+      await clickListening('开始朗读');
+      await waitFor(window, 'window.readAloudUtterances.length === 3');
+      await speechEvent(2, 'start');
+      await waitFor(window, `(${hasSentence('Research paper.')}) &&
+        [...CSS.highlights.get('readx-speaking-sentence')][0].startOffset > 0`);
+      await speechEvent(2, 'end');
+      await waitFor(window, '!CSS.highlights.has("readx-speaking-sentence") && document.querySelector(".listening-player [role=status]").textContent === "朗读结束"');
+      await clickListening('关闭播放器');
       stage = 'page text and next-page navigation';
       const source = await api(window, '/v1/documents/mac-smoke/pages/1');
       assert.match(JSON.stringify(source), /Research paper/);
@@ -100,7 +184,7 @@ app.on('browser-window-created', (_event, window) => {
       await waitFor(window, '!!window.__CBCT_V2__ && !!document.querySelector(".library-sidebar, .pdf-reader")');
       assert(!window.isMinimized(), 'Activation must restore the main window');
       assert.equal((await api(window, '/v1/documents')).total, 1);
-      console.log('Desktop smoke OK: real main/preload, auth, SQLite import, PDF reader, render resources, update bridge, reading location, backend crash recovery and Dock activation.');
+      console.log('Desktop smoke OK: real main/preload, auth, SQLite import, PDF reader, sentence tracking, render resources, update bridge, reading location, backend crash recovery and Dock activation.');
       console.log(`Evidence: ${path.join(workspace, 'reader.png')}`);
       clearTimeout(timeout);
       app.quit();
@@ -120,7 +204,7 @@ app.on('browser-window-created', (_event, window) => {
   fs.writeFileSync(path.join(workspace, 'queue.json'), JSON.stringify({ papers: [{ id: 'mac-smoke', title: 'ReadX macOS parity smoke', authors: ['ReadX test fixture'] }] }));
   const pdf = await PDFDocument.create();
   const font = await pdf.embedFont(StandardFonts.Helvetica);
-  for (const text of ['Research paper. Introduction. A generated PDF for local testing.', 'Methods and results. No remote services are used.']) {
+  for (const text of ['Research paper. Introduction. Research paper. A generated PDF for local testing.', 'Methods and results. No remote services are used.']) {
     pdf.addPage([595, 842]).drawText(text, { x: 35, y: 760, size: 12, font });
   }
   fs.writeFileSync(path.join(workspace, 'library', 'mac-smoke.pdf'), await pdf.save());

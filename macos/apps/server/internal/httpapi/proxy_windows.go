@@ -48,15 +48,6 @@ func sourceProxyForURL(target *url.URL) (*url.URL, bool) {
 	return parsed, true
 }
 
-func sourceSystemProxyConfigured() bool {
-	for _, scheme := range []string{"https", "http"} {
-		if _, ok := sourceProxyForURL(&url.URL{Scheme: scheme}); ok {
-			return true
-		}
-	}
-	return false
-}
-
 func sourceProxyFromEnvironment(request *http.Request) (*url.URL, error) {
 	// ProxyFromEnvironment also reads process environment variables, not request
 	// headers. If the caller explicitly configured one, preserve Go's NO_PROXY rules.

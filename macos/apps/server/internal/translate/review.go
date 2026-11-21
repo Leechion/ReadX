@@ -574,15 +574,6 @@ func looksLikeProtocolShell(target string) bool {
 		strings.HasPrefix(target, "```JSON")
 }
 
-func hasRetryable(issues []Issue) bool {
-	for _, issue := range issues {
-		if issue.Retryable {
-			return true
-		}
-	}
-	return false
-}
-
 func issueScore(issues []Issue) int {
 	score := 0
 	for _, issue := range issues {

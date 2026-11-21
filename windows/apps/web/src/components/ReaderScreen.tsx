@@ -1,12 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentSummary, PDFLayout } from '@cbct/shared';
 import { isSectionFormat, pageParagraphs, segmentParagraph, statusLabel } from '@cbct/shared';
-import { api, type Annotation, type DocumentJob, type EPUBSection, type NewAnnotation, type TranslationPreview } from '../api/client';
+import { api, ApiError, type Annotation, type DocumentJob, type EPUBSection, type NewAnnotation, type TranslationPreview } from '../api/client';
 import { useFullscreen } from '../hooks/useFullscreen';
+import { useListeningHighlight, type ReaderSpeakingPosition } from '../hooks/useListeningHighlight';
 import type { DocumentPhase } from '../hooks/useDocument';
 import { AssistantSidebar, type AssistantTab } from './AssistantPanels';
 import type { useAnnotations } from '../hooks/useAnnotations';
-import { PDFDocumentView, usePDF, usePDFData, type PDFFindReport, type PDFFindState, type PendingSelection } from './PDFView';
+import { PDFDocumentView, textFromPDF, usePDF, usePDFData, type PDFFindReport, type PDFFindState, type PendingSelection } from './PDFView';
 import { loadPDFParagraphLayout } from '../api/pdfParagraphs';
 import { ResizeHandle } from './ResizeHandle';
 import { EPUBView } from './EPUBView';
@@ -16,10 +17,15 @@ import { CitationExportDialog } from './CitationExportDialog';
 import { CitationNetworkDialog } from './CitationNetworkDialog';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { STORAGE_KEYS } from '../lib/storage';
+import { listeningMatchChar, type ListeningBlock, type ListeningPane, type ListeningSource } from '../lib/listening';
 import { AppDialog } from './AppDialog';
 import { initialMarginRect } from './MarginNote';
+import { ListeningDialog } from './ListeningDialog';
+import { ReaderToolbarMenus, type ReaderToolGroup } from './ReaderToolbarMenus';
 
 type ReadingMode = 'source' | 'parallel' | 'translation';
+const modeLabels: Record<ReadingMode, string> = { source: '仅原文', parallel: '原文译文', translation: '仅译文' };
+const readingModes = ['source', 'parallel', 'translation'] as const;
 
 interface Props {
   detail: DocumentPhase;
@@ -62,8 +68,7 @@ export function ReaderScreen({
   const [marginError, setMarginError] = useState('');
   const pdf = usePDF(!epub ? documentKey : null);
   const translatedPDF = usePDF(!epub ? documentKey : null, true);
-  const [liveRenderedPage, setLiveRenderedPage] = useState<ArrayBuffer | null>(null);
-  const liveRenderedPDF = usePDFData(liveRenderedPage);
+  const [liveRenderedPage, setLiveRenderedPage] = useState<{ key: string; page: number; bytes: ArrayBuffer } | null>(null);
   const [liveTranslationPreview, setLiveTranslationPreview] = useState<TranslationPreview | null>(null);
   const [liveTranslationProgress, setLiveTranslationProgress] = useState('等待本页译文…');
   const [mode, setMode] = useState<ReadingMode>('source');
@@ -94,7 +99,7 @@ export function ReaderScreen({
   }, []);
   useEffect(() => {
     // 每次打开论文都从原文开始：不因「已有整本译文」自动切到仅译文
-    //（想看译文用顶栏模式胶囊切换，本次会话内保持选择）。
+    //（想看译文用顶栏「阅读」菜单切换，本次会话内保持选择）。
     setMode('source');
     setMarginDraft(null);
   }, [documentKey]);
@@ -184,6 +189,22 @@ export function ReaderScreen({
   const findInput = useRef<HTMLInputElement>(null);
   const [citationOpen, setCitationOpen] = useState(false);
   const [networkOpen, setNetworkOpen] = useState(false);
+  const [listening, setListening] = useState<{
+    id: number;
+    key: string;
+    page: number;
+    selection: ListeningBlock;
+    selectionPage: number;
+    selectionPane: ListeningPane;
+    source: ListeningSource;
+    sync?: { source: ListeningSource; nonce: number };
+  } | null>(null);
+  const [speaking, setSpeaking] = useState<ReaderSpeakingPosition | null>(null);
+  const listeningRequest = useRef(0);
+  const listeningSync = useRef(0);
+  const selectionPane = useRef<ListeningPane>('original');
+  const lastPaneRef = useRef<ListeningPane>('original');
+  useEffect(() => { setListening(null); setSpeaking(null); lastPaneRef.current = 'original'; }, [documentKey]);
   // 由外部出处（图谱证据 / 批注）驱动跳转时置位：不让「恢复上次阅读位置」抢走目标页。
   const citeTakeover = useRef(false);
   const [locationReady, setLocationReady] = useState(false);
@@ -195,6 +216,96 @@ export function ReaderScreen({
     ? sections.length
     : (pdf.document?.numPages ?? cachedPages.length);
   const current = Math.max(1, Math.min(page ?? 1, count || 1));
+  const currentRef = useRef(current);
+  currentRef.current = current;
+  const readingPageRef = useRef(current);
+  const liveRenderedPDF = usePDFData(liveRenderedPage?.key === documentKey && liveRenderedPage.page === current ? liveRenderedPage.bytes : null);
+  const activeListening = listening?.key === documentKey ? listening : null;
+  useListeningHighlight(panes, activeListening ? speaking : null);
+  const openListening = (quote?: string) => {
+    if (!documentKey) return;
+    const selection = window.getSelection();
+    const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
+    const start = range && (range.startContainer instanceof Element ? range.startContainer : range.startContainer.parentElement);
+    const origin = start?.closest<HTMLElement>('[data-listening-pane]');
+    const withinReader = Boolean(origin && panes.current?.contains(origin));
+    const domText = withinReader ? selection?.toString().trim() : '';
+    const pendingVisible = Boolean(pending && (mode === 'parallel' || (mode === 'translation' ? selectionPane.current === 'translation' : selectionPane.current === 'original')));
+    const snippet = (quote || (pendingVisible ? pending?.annotation.quote : '') || domText || '').trim();
+    const pane = withinReader ? (origin?.dataset.listeningPane === 'translation' ? 'translation' : 'original') : selectionPane.current;
+    const scope = withinReader ? start?.closest<HTMLElement>('.textLayer, .epub-chapter, .live-translation-preview') : null;
+    let startOffset: number | undefined;
+    if (snippet && domText === snippet && scope && range) {
+      const preceding = document.createRange();
+      preceding.selectNodeContents(scope);
+      preceding.setEnd(range.startContainer, range.startOffset);
+      startOffset = Array.from(preceding.toString(), listeningMatchChar).join('').length;
+    }
+    const pdfPage = Number(scope?.closest<HTMLElement>('.pdf-paper')?.dataset.renderedPage);
+    const selectedPage = Number(origin?.dataset.listeningSinglePage ?? scope?.dataset.listeningPage) ||
+      (pane === 'translation' && liveRenderedPDF.document && !translatedPDF.document ? current : pending?.annotation.page) ||
+      pdfPage || current;
+    if (snippet) {
+      setPending(null);
+      selection?.removeAllRanges();
+    }
+    setSpeaking(null);
+    const defaultSource: ListeningSource = snippet
+      ? 'selection'
+      : !epub && (mode === 'translation' || (mode === 'parallel' && lastPaneRef.current === 'translation'))
+        ? 'translation'
+        : 'original';
+    setListening({
+      id: ++listeningRequest.current, key: documentKey, page: current,
+      selection: { text: snippet, startOffset }, selectionPage: selectedPage, selectionPane: pane,
+      source: defaultSource,
+    });
+  };
+  const readAloudText = async (source: ListeningSource, signal: AbortSignal): Promise<ListeningBlock[]> => {
+    if (!activeListening) return [];
+    const { key } = activeListening;
+    const readingPage = source === 'selection' ? activeListening.selectionPage : currentRef.current;
+    readingPageRef.current = readingPage;
+    const extract = async (document: PDFDocumentProxy, number: number) => {
+      const pdfPage = await document.getPage(number);
+      signal.throwIfAborted();
+      return textFromPDF(await pdfPage.getTextContent());
+    };
+    if (epub) {
+      const chapter = section?.index === readingPage ? section : await api.section(key, readingPage, signal);
+      const blocks = chapter.blocks.flatMap(({ text }, block) => text?.trim() ? [{ text, block }] : []);
+      return blocks.length ? blocks : [{ text: chapter.text }];
+    }
+    if (source === 'translation') {
+      if (translatedPDF.document && readingPage <= translatedPDF.document.numPages) {
+        const text = await extract(translatedPDF.document, readingPage);
+        if (text) return [{ text }];
+      }
+      if (liveRenderedPDF.document && liveRenderedPage?.page === readingPage) {
+        const text = await extract(liveRenderedPDF.document, 1);
+        if (text) return [{ text }];
+      }
+      const preview = liveTranslationPreview?.page === readingPage && liveTranslationPreview.blocks.length
+        ? liveTranslationPreview : await api.translationPreview(key, readingPage, signal);
+      return preview.blocks.flatMap(({ target }, block) => target.trim() ? [{ text: target, block }] : []);
+    }
+    const paragraphs = await api.paragraphs(key, readingPage, signal);
+    const { width, height } = paragraphs;
+    const retained = paragraphs.blocks?.flatMap(({ text, box: [left, top, right, bottom] }, block) => {
+      if (!text.trim()) return [];
+      const box = width > 0 && height > 0 && right > left && bottom > top
+        ? { x: left / width, y: top / height, width: (right - left) / width, height: (bottom - top) / height }
+        : undefined;
+      return [{ text, block: box ? block : undefined, box }];
+    });
+    if (retained?.length) return retained;
+    if (pdf.document) {
+      const text = await extract(pdf.document, readingPage);
+      if (text) return [{ text }];
+    }
+    try { return [{ text: (await api.page(key, readingPage, signal)).text }]; }
+    catch (error) { if (error instanceof ApiError && error.status === 404) return []; throw error; }
+  };
   const [pageDraft, setPageDraft] = useState(String(current));
   useEffect(() => setPageDraft(String(current)), [current]);
   useEffect(() => {
@@ -257,7 +368,7 @@ export function ReaderScreen({
       while (!controller.signal.aborted) {
         try {
           const data = await api.translatedRenderFile(documentKey, current, controller.signal);
-          if (!controller.signal.aborted) setLiveRenderedPage(data);
+          if (!controller.signal.aborted) setLiveRenderedPage({ key: documentKey, page: current, bytes: data });
           return;
         } catch {
           if (controller.signal.aborted) return;
@@ -526,7 +637,7 @@ export function ReaderScreen({
   }, [documentKey, current, epub, pdf.document]);
   useEffect(() => {
     const escape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
+      if (event.key === 'Escape' && !event.defaultPrevented) {
         if (findOpen) { setFindOpen(false); return; }
         if (focusMode && !pending && !selectedParagraph && !document.querySelector('dialog[open]')) leaveFocus();
         setPending(null);
@@ -550,14 +661,17 @@ export function ReaderScreen({
   useEffect(() => {
     if (!pending) return;
     const dismiss = (event: PointerEvent) => {
-      if (!(event.target instanceof Node) || selectionToolbar.current?.contains(event.target)) return;
+      const target = event.target;
+      if (!(target instanceof Node) || selectionToolbar.current?.contains(target) ||
+        (target instanceof Element && target.closest('[data-keep-reader-selection]') && readerToolbar.current?.contains(target))) return;
       setPending(null);
       window.getSelection()?.removeAllRanges();
     };
     document.addEventListener('pointerdown', dismiss, true);
     return () => document.removeEventListener('pointerdown', dismiss, true);
   }, [pending]);
-  const select = (value: PendingSelection) => {
+  const select = (value: PendingSelection, pane: ListeningPane = 'original') => {
+    selectionPane.current = pane;
     setSelectedParagraph(null);
     setPending(value);
     setNote('');
@@ -715,6 +829,8 @@ export function ReaderScreen({
   const source = (
     <div
       className="publication-pane"
+      data-listening-pane="original"
+      onPointerDownCapture={() => { lastPaneRef.current = 'original'; }}
       style={{ flex: mode === 'parallel' ? `0 0 calc((100% - 1px) * ${divider / 100})` : 1 }}
     >
       {epub ? (
@@ -779,6 +895,9 @@ export function ReaderScreen({
   const translated = (
     <div
       className="publication-pane"
+      data-listening-pane="translation"
+      data-listening-single-page={!translatedPDF.document && liveRenderedPDF.document ? liveRenderedPage?.page : undefined}
+      onPointerDownCapture={() => { lastPaneRef.current = 'translation'; }}
       style={{ flex: mode === 'parallel' ? `0 0 calc((100% - 1px) * ${(100 - divider) / 100})` : 1 }}
     >
       {epub ? (
@@ -795,7 +914,7 @@ export function ReaderScreen({
           navigationRequest={translationNavigationRequest}
           annotations={annotations.items}
           focusedId={focusedAnnotationId}
-          onSelect={select}
+          onSelect={(value) => select(value, 'translation')}
           onText={() => undefined}
           onAnnotationClick={openHighlightedTextActions}
           find={findScope === 'translated' ? findState : null}
@@ -811,14 +930,14 @@ export function ReaderScreen({
           navigationRequest={{ page: 1, nonce: current }}
           annotations={[]}
           focusedId={null}
-          onSelect={select}
+          onSelect={(value) => select(value, 'translation')}
           onText={() => undefined}
           onAnnotationClick={openHighlightedTextActions}
         />
       ) : liveTranslationPreview?.blocks.length ? (
-        <div className="translation-document live-translation-preview" aria-live="polite">
+        <div className="translation-document live-translation-preview" data-listening-page={liveTranslationPreview.page} aria-live="polite">
           {liveTranslationPreview.blocks.map((block, index) => (
-            <p className="live-translation-block" key={`${index}-${block.source.slice(0, 32)}`}>{block.target}</p>
+            <p className="live-translation-block" data-listening-block={index} key={`${index}-${block.source.slice(0, 32)}`}>{block.target}</p>
           ))}
         </div>
       ) : (
@@ -828,6 +947,86 @@ export function ReaderScreen({
       )}
     </div>
   );
+  const toggleAssistant = (next: AssistantTab) => {
+    const shouldOpen = !rightOpen || tab !== next;
+    setTab(next);
+    if (focusMode) setFocusEdge('right');
+    else {
+      setRightOpen(shouldOpen);
+      if (shouldOpen && window.innerWidth < 1000) setLeftOpen(false);
+    }
+  };
+  const switchMode = (next: ReadingMode) => {
+    setMode(next);
+    navigatePage(current);
+    const targetPane: ListeningPane | null = next === 'translation' && !epub ? 'translation' : next === 'source' ? 'original' : null;
+    if (!targetPane) return;
+    lastPaneRef.current = targetPane;
+    if (selectionPane.current !== targetPane) {
+      setPending(null);
+      window.getSelection()?.removeAllRanges();
+    }
+    if (activeListening && activeListening.source !== targetPane && !(activeListening.source === 'selection' && activeListening.selectionPane === targetPane)) {
+      setSpeaking(null);
+      const nonce = ++listeningSync.current;
+      setListening((prev) => prev && prev.id === activeListening.id ? {
+        ...prev,
+        page: current,
+        selection: prev.selectionPane !== targetPane ? { text: '' } : prev.selection,
+        source: targetPane,
+        sync: { source: targetPane, nonce },
+      } : prev);
+    }
+  };
+  const toolGroups: ReaderToolGroup[] = [{
+    id: 'reading', label: '阅读', summary: modeLabels[mode],
+    sections: [
+      {
+        label: '显示模式',
+        tools: readingModes.map(item => ({
+          id: item, label: modeLabels[item], checked: mode === item, radio: true,
+          onSelect: () => switchMode(item),
+        })),
+      },
+      {
+        tools: [
+          {
+            id: 'toc', label: '目录', checked: actualLeftOpen,
+            onSelect: () => {
+              if (focusMode) { setFocusEdge('left'); return; }
+              setLeftOpen(value => !value);
+              if (window.innerWidth < 1000) setRightOpen(false);
+            },
+          },
+          { id: 'focus', label: focusMode ? '退出专注' : '专注', shortcut: 'Ctrl+Shift+Enter', onSelect: toggleFocus },
+          { id: 'popout', label: '弹出阅读窗口', title: '在独立窗口中打开当前文档', disabled: !selected, onSelect: onPopout },
+        ],
+      },
+    ],
+  }];
+  if (!epub) {
+    toolGroups.push({
+      id: 'document', label: '文献工具',
+      sections: [{
+        tools: [
+          { id: 'find', label: '查找', shortcut: 'Ctrl+F', checked: findOpen, disabled: !pdf.document, onSelect: () => setFindOpen(value => !value) },
+          { id: 'citation', label: '引用', title: '导出这篇论文的 BibTeX / RIS 条目', disabled: !pdf.document || !documentKey, onSelect: () => setCitationOpen(true) },
+          { id: 'network', label: '引用网络', title: '查看这篇论文与本库其它论文的引用关系', disabled: !pdf.document || !documentKey, onSelect: () => setNetworkOpen(true) },
+          { id: 'export', label: '导出译文 PDF', title: '交给 LeePDF 重新生成整本译文 PDF', disabled: !pdf.document || !documentKey, onSelect: () => setExportOpen(true) },
+        ],
+      }],
+    });
+  }
+  const assistantTools: ReaderToolGroup['sections'][number]['tools'] = [
+    { id: 'listening', label: '语音速听', disabled: !documentKey || !count, onSelect: () => openListening() },
+    { id: 'chat', label: 'AI 助教', checked: actualRightOpen && tab === 'chat', onSelect: () => toggleAssistant('chat') },
+  ];
+  if (!epub) assistantTools.push({
+    id: 'close-reading', label: '精读五重奏', checked: actualRightOpen && tab === 'reading',
+    onSelect: () => toggleAssistant('reading'),
+  });
+  toolGroups.push({ id: 'assistant', label: '阅读辅助', sections: [{ tools: assistantTools }] });
+
   return (
     <div
       ref={readerRoot}
@@ -835,6 +1034,7 @@ export function ReaderScreen({
       data-focus-edge={focusEdge ?? ''}
       onPointerMove={(event) => {
         if (!focusMode || event.pointerType === 'touch') return;
+        if (focusEdge === 'top' && readerToolbar.current?.querySelector('.reader-tool-menu')) return;
         const bounds = event.currentTarget.getBoundingClientRect();
         const x = event.clientX - bounds.left, y = event.clientY - bounds.top;
         if (y <= 10) setFocusEdge('top');
@@ -853,93 +1053,12 @@ export function ReaderScreen({
       </div> : null}
       <header className="reader-toolbar" ref={readerToolbar}>
         <div className="reader-title-group">
-          <button onClick={onBack}>← 书库</button>
-          <button
-            aria-pressed={actualLeftOpen}
-            onClick={() => {
-              if (focusMode) { setFocusEdge('left'); return; }
-              setLeftOpen((value) => !value);
-              if (window.innerWidth < 1000) setRightOpen(false);
-            }}
-          >
-            目录
-          </button>
+          <button type="button" onClick={onBack}>← 书库</button>
           <span className="reader-title" title={[selected?.title, selected?.translatedTitle].filter(Boolean).join('\n')}>
             {selected?.title ?? '未选择文档'}
           </span>
-          <button type="button" onClick={onPopout} disabled={!selected} title="在独立窗口中打开当前论文">弹出阅读窗口</button>
         </div>
-        <div className="toolbar-actions">
-          <button type="button" aria-pressed={focusMode} onClick={toggleFocus} title="专注阅读（Ctrl+Shift+Enter）">{focusMode ? '退出专注' : '专注'}</button>
-          <span className="mode-pills">
-            {(['source', 'parallel', 'translation'] as const).map((item) => (
-              <button
-                key={item}
-                className="mode-pill"
-                aria-pressed={mode === item}
-                onClick={() => { setMode(item); navigatePage(current); }}
-              >
-                {
-                  {
-                    source: '仅原文',
-                    parallel: '原文译文',
-                    translation: '仅译文',
-                  }[item]
-                }
-              </button>
-            ))}
-          </span>
-          {!epub && pdf.document ? (
-          <button
-            aria-pressed={findOpen}
-            onClick={() => setFindOpen((value) => !value)}
-            title="在文档中查找（Ctrl+F）"
-          >
-            查找
-          </button>
-          ) : null}
-          {!epub && pdf.document && documentKey ? (
-          <button onClick={() => setCitationOpen(true)} title="导出这篇论文的 BibTeX / RIS 条目">
-            引用
-          </button>
-          ) : null}
-          {!epub && pdf.document && documentKey ? (
-          <button onClick={() => setNetworkOpen(true)} title="看这篇论文与本库其它论文的引用关系">
-            引用网络
-          </button>
-          ) : null}
-          {!epub && pdf.document && documentKey ? (
-          <button onClick={() => setExportOpen(true)} title="交给 LeePDF 重新生成整本译文 PDF">
-              导出译文 PDF
-            </button>
-          ) : null}
-          <button
-            aria-pressed={actualRightOpen && tab === 'chat'}
-            onClick={() => {
-              const shouldOpen = !rightOpen || tab !== 'chat';
-              setTab('chat');
-              if (focusMode) setFocusEdge('right');
-              else setRightOpen(shouldOpen);
-              if (!focusMode && shouldOpen && window.innerWidth < 1000) setLeftOpen(false);
-            }}
-          >
-            AI 助教
-          </button>
-          {!epub && (
-            <button
-              aria-pressed={actualRightOpen && tab === 'reading'}
-              onClick={() => {
-                const shouldOpen = !rightOpen || tab !== 'reading';
-                setTab('reading');
-                if (focusMode) setFocusEdge('right');
-                else setRightOpen(shouldOpen);
-                if (!focusMode && shouldOpen && window.innerWidth < 1000) setLeftOpen(false);
-              }}
-            >
-              精读五重奏
-            </button>
-          )}
-        </div>
+        <ReaderToolbarMenus groups={toolGroups} />
       </header>
       <div className="reader-panels" ref={panelRoot}>
         <aside className="reader-sidebar" data-open={actualLeftOpen} aria-hidden={!actualLeftOpen} inert={!actualLeftOpen} style={{ width: focusMode ? actualLeftOpen ? focusLeftWidth : 0 : visibleLeft, flexBasis: visibleLeft }}>
@@ -1079,6 +1198,28 @@ export function ReaderScreen({
           />
         </aside>
       </div>
+      {activeListening && <ListeningDialog
+        key={activeListening.id}
+        sourceLabel={epub ? '本章' : '本页'}
+        selection={activeListening.selection}
+        hasTranslation={!epub}
+        initialSource={activeListening.source}
+        syncSource={activeListening.sync}
+        readText={readAloudText}
+        onStart={source => {
+          const nextPage = currentRef.current;
+          readingPageRef.current = nextPage;
+          setListening(prev => prev && prev.id === activeListening.id ? { ...prev, page: nextPage, source } : prev);
+          const pane = source === 'selection' ? activeListening.selectionPane : source;
+          if (mode !== 'parallel') setMode(pane === 'translation' ? 'translation' : 'source');
+        }}
+        onCue={(source, cue) => setSpeaking(cue ? {
+          cue,
+          page: source === 'selection' ? activeListening.selectionPage : readingPageRef.current,
+          pane: source === 'selection' ? activeListening.selectionPane : source,
+        } : null)}
+        onClose={() => { setSpeaking(null); setListening(null); }}
+      />}
       <footer className="reader-statusbar" aria-label="阅读状态">
         <div className="reader-statusbar__pages">
           <button type="button" aria-label={epub ? '上一章' : '上一页'} title={epub ? '上一章' : '上一页'} disabled={current <= 1 || !count} onClick={() => navigatePage(current - 1)}>‹</button>
@@ -1181,6 +1322,7 @@ export function ReaderScreen({
             ))}
           </select>
           <div className="selection-actions">
+            <button type="button" onClick={() => openListening(pending.annotation.quote)}>朗读选区</button>
             {(['highlight', 'underline', 'question'] as const).map((kind) => (
               <button
                 key={kind}

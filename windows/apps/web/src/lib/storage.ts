@@ -25,6 +25,7 @@ export const STORAGE_KEYS = {
   presentationTemplate: 'readx.presentation.active-template',
   readerPanels: 'cbct.reader.panels',
   readerLayout: 'cbct.reader.layout',
+  listeningVoice: 'readx-listening-voice',
   latexTreeWidth: 'readx-latex-tree-width',
   latexDiagnosticsHidden: 'readx-latex-diagnostics-hidden',
   novelPrefs: 'readx-slack-novel-prefs',

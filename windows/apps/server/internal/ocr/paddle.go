@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -22,7 +21,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 )
 
 const (
@@ -34,11 +32,8 @@ const (
 	MaxPDFBytes = 50 << 20
 	MaxPDFPages = 1000
 
-	submitPath              = "/api/v2/ocr/jobs"
-	pollEvery               = 3 * time.Second
-	approxTextCharWidthPt   = 5.2
-	minPseudoLinePitchPt    = 11.0
-	targetPseudoLinePitchPt = 12.0
+	submitPath = "/api/v2/ocr/jobs"
+	pollEvery  = 3 * time.Second
 )
 
 var (
@@ -478,224 +473,6 @@ func MapLayoutsContext(ctx context.Context, raw []json.RawMessage, sizes []Size)
 	return projectLeeDocument(document)
 }
 
-func cloneSegments(in []Segment) []Segment {
-	out := make([]Segment, len(in))
-	copy(out, in)
-	return out
-}
-
-func rawMessageText(value json.RawMessage) string {
-	if len(value) == 0 || string(value) == "null" {
-		return ""
-	}
-	var text string
-	if json.Unmarshal(value, &text) == nil {
-		return strings.TrimSpace(text)
-	}
-	return strings.TrimSpace(string(value))
-}
-
-func parseRawOrder(value json.RawMessage) (int, bool) {
-	if len(value) == 0 || string(value) == "null" {
-		return 0, false
-	}
-	var integer int
-	if json.Unmarshal(value, &integer) == nil {
-		return integer, true
-	}
-	text := rawMessageText(value)
-	parsed, err := strconv.Atoi(text)
-	return parsed, err == nil
-}
-
-func emptySegmentBox(box [4]float64) bool {
-	return box == [4]float64{}
-}
-
-func inheritSegmentBoxes(blockBox [4]float64, segments []Segment) {
-	for index := range segments {
-		if emptySegmentBox(segments[index].Box) {
-			segments[index].Box = blockBox
-			segments[index].BoxPrecision = "block"
-		}
-	}
-}
-
-func buildLineRecords(box, rawBox [4]float64, text, rawLabel string, segments []Segment, layoutBoxes []struct {
-	Label      string    `json:"label"`
-	Coordinate []float64 `json:"coordinate"`
-	Score      *float64  `json:"score"`
-}, scaleX, scaleY float64) ([]Line, []string) {
-	chunks := []string{}
-	for _, line := range strings.Split(text, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			chunks = append(chunks, line)
-		}
-	}
-	if len(chunks) < 2 {
-		if kind := KindForLabel(rawLabel); kind == "body" || kind == "heading" {
-			chunks = pseudoLineTexts(box, text, kind)
-		}
-	}
-	if len(chunks) < 2 {
-		lineSpans := cloneSegments(segments)
-		for index := range lineSpans {
-			if emptySegmentBox(lineSpans[index].Box) || lineSpans[index].BoxPrecision == "block" || lineSpans[index].BoxPrecision == "line" {
-				lineSpans[index].Box = box
-				lineSpans[index].BoxPrecision = "line"
-			}
-		}
-		return []Line{{Box: box, Precision: "block_fallback", Spans: lineSpans}}, []string{text}
-	}
-	lines := make([]Line, 0, len(chunks))
-	lineTexts := make([]string, 0, len(chunks))
-	lineHeight := (box[3] - box[1]) / float64(len(chunks))
-	rawLineHeight := (rawBox[3] - rawBox[1]) / float64(len(chunks))
-	precision := "synthetic_newline"
-	if !strings.Contains(text, "\n") {
-		precision = "synthetic_wrap"
-	}
-	for index, chunk := range chunks {
-		lineBox := [4]float64{box[0], box[1] + float64(index)*lineHeight, box[2], box[1] + float64(index+1)*lineHeight}
-		rawLineBox := [4]float64{rawBox[0], rawBox[1] + float64(index)*rawLineHeight, rawBox[2], rawBox[1] + float64(index+1)*rawLineHeight}
-		lineSegments := BuildTextSegments(chunk, rawLabel)
-		assignInlineFormulaBoxes(lineSegments, rawLineBox, layoutBoxes, scaleX, scaleY)
-		inheritSegmentBoxes(lineBox, lineSegments)
-		for spanIndex := range lineSegments {
-			if lineSegments[spanIndex].BoxPrecision == "block" || lineSegments[spanIndex].BoxPrecision == "line" {
-				lineSegments[spanIndex].Box = lineBox
-				lineSegments[spanIndex].BoxPrecision = "line"
-			}
-		}
-		lines = append(lines, Line{Box: lineBox, Precision: precision, Spans: lineSegments})
-		lineTexts = append(lineTexts, chunk)
-	}
-	return lines, lineTexts
-}
-
-func tightenPseudoTextBox(box [4]float64, text string, kind string) [4]float64 {
-	lineCount := pseudoLineCount(box, text, kind)
-	if lineCount <= 1 {
-		return box
-	}
-	originalHeight := box[3] - box[1]
-	targetHeight := math.Min(originalHeight, math.Max(targetPseudoLinePitchPt*2, float64(lineCount)*targetPseudoLinePitchPt*1.08))
-	box[3] = math.Min(box[3], box[1]+targetHeight)
-	return box
-}
-
-func pseudoLineCount(box [4]float64, text, kind string) int {
-	if kind != "body" && kind != "heading" {
-		return 0
-	}
-	width, height := box[2]-box[0], box[3]-box[1]
-	textLength := compactTextLength(text)
-	if width <= 0 || height <= 0 || textLength < 72 || height < minPseudoLinePitchPt*1.8 {
-		return 0
-	}
-	charsPerLine := max(12, int(width/approxTextCharWidthPt))
-	fitsOnOneLine := textLength <= charsPerLine
-	if height < minPseudoLinePitchPt*2.2 && fitsOnOneLine {
-		return 0
-	}
-	predictedByWidth := max(2, (textLength+charsPerLine-1)/charsPerLine)
-	maxLinesByHeight := max(2, int(height/minPseudoLinePitchPt))
-	desiredByHeight := max(2, int(math.Floor(height/targetPseudoLinePitchPt+0.5)))
-	return min(maxLinesByHeight, max(predictedByWidth, desiredByHeight))
-}
-
-func compactTextLength(text string) int {
-	count := 0
-	for _, char := range text {
-		if !unicode.IsSpace(char) {
-			count++
-		}
-	}
-	return count
-}
-
-func pseudoLineTexts(box [4]float64, text, kind string) []string {
-	lineCount := pseudoLineCount(box, text, kind)
-	if lineCount <= 1 {
-		return nil
-	}
-	words := strings.Fields(text)
-	if len(words) == 0 {
-		return nil
-	}
-	if len(words) == 1 {
-		return nil
-	}
-	charsPerLine := max(12, int((box[2]-box[0])/approxTextCharWidthPt))
-	targetCharsPerLine := max(10, (compactTextLength(text)+lineCount-1)/lineCount)
-	breakThreshold := min(charsPerLine, max(targetCharsPerLine, int(float64(charsPerLine)*0.58)))
-	chunks := []string{}
-	current := []string{}
-	currentLength, remainingLines := 0, max(1, lineCount)
-	for wordIndex, word := range words {
-		remainingWords := len(words) - wordIndex - 1
-		projected := currentLength + len(word)
-		if len(current) > 0 {
-			projected++
-		}
-		forceBreak := len(current) > 0 && currentLength >= breakThreshold && remainingLines > 1 && remainingWords >= remainingLines-1
-		if forceBreak {
-			chunks = append(chunks, strings.Join(current, " "))
-			current = []string{word}
-			currentLength = len(word)
-			remainingLines--
-			continue
-		}
-		current = append(current, word)
-		currentLength = projected
-	}
-	if len(current) > 0 {
-		chunks = append(chunks, strings.Join(current, " "))
-	}
-	return chunks
-}
-
-func assignInlineFormulaBoxes(segments []Segment, blockBox [4]float64, boxes []struct {
-	Label      string    `json:"label"`
-	Coordinate []float64 `json:"coordinate"`
-	Score      *float64  `json:"score"`
-}, scaleX, scaleY float64) {
-	formulaIndexes := make([]int, 0)
-	candidates := make([]int, 0)
-	for index, segment := range segments {
-		if segment.Type == "inline_formula" {
-			formulaIndexes = append(formulaIndexes, index)
-		}
-	}
-	for index, box := range boxes {
-		if strings.ToLower(strings.TrimSpace(box.Label)) != "inline_formula" || len(box.Coordinate) != 4 {
-			continue
-		}
-		coordinate := box.Coordinate
-		if coordinate[2] <= coordinate[0] || coordinate[3] <= coordinate[1] || coordinate[0] < blockBox[0] || coordinate[1] < blockBox[1] || coordinate[2] > blockBox[2] || coordinate[3] > blockBox[3] {
-			continue
-		}
-		candidates = append(candidates, index)
-	}
-	if len(formulaIndexes) == 0 || len(formulaIndexes) != len(candidates) {
-		return
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		a, b := boxes[candidates[i]].Coordinate, boxes[candidates[j]].Coordinate
-		if a[1] != b[1] {
-			return a[1] < b[1]
-		}
-		return a[0] < b[0]
-	})
-	for index, segmentIndex := range formulaIndexes {
-		box := boxes[candidates[index]]
-		segment := &segments[segmentIndex]
-		segment.Box = [4]float64{box.Coordinate[0] * scaleX, box.Coordinate[1] * scaleY, box.Coordinate[2] * scaleX, box.Coordinate[3] * scaleY}
-		segment.BoxPrecision = "provider_layout"
-		segment.Score = box.Score
-	}
-}
-
 func BuildTextSegments(text, rawLabel string) []Segment {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -827,104 +604,6 @@ func appendTextSegment(segments *[]Segment, text, rawLabel string) {
 	text = strings.TrimSpace(text)
 	if text != "" {
 		*segments = append(*segments, Segment{Type: "text", RawType: rawLabel, Text: text})
-	}
-}
-
-func layoutRoleFor(label string) string {
-	switch label {
-	case "doc_title":
-		return "title"
-	case "paragraph_title":
-		return "heading"
-	case "figure_title", "table_title", "table_caption":
-		return "caption"
-	case "content":
-		return "toc"
-	case "header":
-		return "header"
-	case "footer":
-		return "footer"
-	case "number":
-		return "page_number"
-	case "footnote", "vision_footnote", "table_footnote", "image_footnote":
-		return "footnote"
-	case "text", "vertical_text", "abstract":
-		return "paragraph"
-	default:
-		return "unknown"
-	}
-}
-
-func semanticRoleFor(label string) string {
-	switch label {
-	case "abstract":
-		return "abstract"
-	case "content":
-		return "table_of_contents"
-	case "reference", "reference_content":
-		return "reference"
-	case "header", "footer", "number", "metadata", "formula_number":
-		return "metadata"
-	case "text", "vertical_text":
-		return "body"
-	default:
-		return "unknown"
-	}
-}
-
-func structureRoleFor(label string) string {
-	switch label {
-	case "doc_title":
-		return "document_title"
-	case "paragraph_title":
-		return "heading"
-	case "figure_title":
-		return "figure_caption"
-	case "table_title", "table_caption":
-		return "table_caption"
-	case "content":
-		return "table_of_contents"
-	case "reference_content":
-		return "reference_entry"
-	case "formula_number":
-		return "formula_number"
-	case "footnote", "vision_footnote", "table_footnote", "image_footnote":
-		return "footnote"
-	case "abstract", "text", "vertical_text":
-		return "body"
-	default:
-		return ""
-	}
-}
-
-func translationPolicyReason(label, kind string) string {
-	if !translatable(label) {
-		switch kind {
-		case "formula", "table", "image", "code":
-			return "provider_non_text:" + kind
-		}
-		if kind != "" {
-			return "provider_non_body:" + kind
-		}
-		return "provider_non_body:unknown"
-	}
-	switch label {
-	case "doc_title":
-		return "provider_title_candidate"
-	case "paragraph_title":
-		return "provider_heading_candidate"
-	case "content":
-		return "provider_toc_whitelist:content"
-	case "figure_title":
-		return "provider_caption_whitelist:figure_caption"
-	case "table_title", "table_caption":
-		return "provider_caption_whitelist:table_caption"
-	case "vision_footnote", "table_footnote", "image_footnote":
-		return "provider_footnote_whitelist:vision_footnote"
-	case "abstract":
-		return "provider_body_whitelist:abstract"
-	default:
-		return "provider_body_whitelist:body"
 	}
 }
 

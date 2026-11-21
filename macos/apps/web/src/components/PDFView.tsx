@@ -159,12 +159,12 @@ function applyFindMarks(
 }
 
 export function usePDFData(data: ArrayBuffer | null) {
-  const [document, setDocument] = useState<PDFDocumentProxy | null>(null);
+  const [loaded, setLoaded] = useState<{ input: ArrayBuffer; document: PDFDocumentProxy } | null>(null);
   const [error, setError] = useState('');
   useEffect(() => {
     let task: ReturnType<typeof getDocument> | undefined;
     let cancelled = false;
-    setDocument(null);
+    setLoaded(null);
     setError('');
     if (!data) return;
     task = getDocument({
@@ -174,9 +174,9 @@ export function usePDFData(data: ArrayBuffer | null) {
       cMapPacked: true,
       standardFontDataUrl: '/pdfjs/standard_fonts/',
     });
-    void task.promise.then((loaded) => {
+    void task.promise.then((document) => {
       if (cancelled) return;
-      setDocument(loaded);
+      setLoaded({ input: data, document });
     }).catch((cause: unknown) => {
       if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause));
     });
@@ -185,7 +185,7 @@ export function usePDFData(data: ArrayBuffer | null) {
       void task?.destroy();
     };
   }, [data]);
-  return { document, error };
+  return { document: loaded?.input === data ? loaded.document : null, error };
 }
 
 type PDFMarkRect = { x: number; y: number; width: number; height: number };

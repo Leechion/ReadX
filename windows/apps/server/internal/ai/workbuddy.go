@@ -23,6 +23,8 @@ const (
 	workBuddyClientVersion = "1.106.1"
 )
 
+var workBuddyHTTPClient = &http.Client{Timeout: 25 * time.Second}
+
 // WorkBuddyCredential stores the session tokens returned by WorkBuddy's desktop
 // login flow. It is kept in a private sidecar and never returned to the renderer.
 type WorkBuddyCredential struct {
@@ -32,6 +34,10 @@ type WorkBuddyCredential struct {
 	RefreshExpiresAt int64  `json:"refresh_expires_at"`
 	Domain           string `json:"domain,omitempty"`
 	Nickname         string `json:"nickname,omitempty"`
+}
+
+func WorkBuddyCredentialPath(configPath string) string {
+	return filepath.Join(filepath.Dir(configPath), "workbuddy-auth.json")
 }
 
 func LoadWorkBuddyCredential(path string) (WorkBuddyCredential, error) {
@@ -101,7 +107,7 @@ func BeginWorkBuddyLogin(ctx context.Context) (WorkBuddyLogin, error) {
 	req.Header.Set("X-No-User-Id", "true")
 	req.Header.Set("X-No-Enterprise-Id", "true")
 	req.Header.Set("X-No-Department-Info", "true")
-	res, err := (&http.Client{}).Do(req)
+	res, err := workBuddyHTTPClient.Do(req)
 	if err != nil {
 		return WorkBuddyLogin{}, fmt.Errorf("连接 WorkBuddy 登录服务失败: %w", err)
 	}
@@ -147,7 +153,7 @@ func WaitWorkBuddyLogin(ctx context.Context, state string) (WorkBuddyCredential,
 		}
 		setWorkBuddyBaseHeaders(req, "")
 		req.Header.Set("X-No-Authorization", "true")
-		res, err := (&http.Client{Timeout: 25 * time.Second}).Do(req)
+		res, err := workBuddyHTTPClient.Do(req)
 		if err != nil {
 			continue
 		}
@@ -190,11 +196,15 @@ func WaitWorkBuddyLogin(ctx context.Context, state string) (WorkBuddyCredential,
 	return WorkBuddyCredential{}, fmt.Errorf("WorkBuddy 登录等待超时，请重新登录")
 }
 
-func WorkBuddyModels(ctx context.Context, cfg Config) ([]string, error) {
-	if cfg.WorkBuddyAuth.AccessToken == "" {
+func WorkBuddyModels(ctx context.Context, authPath string) ([]string, error) {
+	credential, err := LoadWorkBuddyCredential(authPath)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(credential.AccessToken) == "" {
 		return nil, fmt.Errorf("请先登录 WorkBuddy")
 	}
-	credential, err := refreshWorkBuddyIfNeeded(ctx, cfg)
+	credential, err = refreshWorkBuddyIfNeeded(ctx, Config{WorkBuddyAuth: credential, workBuddyAuthPath: authPath})
 	if err != nil {
 		return nil, err
 	}
@@ -221,7 +231,7 @@ func fetchWorkBuddyModelEndpoint(ctx context.Context, endpoint string, headers h
 			req.Header.Add(key, value)
 		}
 	}
-	res, err := (&http.Client{}).Do(req)
+	res, err := workBuddyHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +321,7 @@ func refreshWorkBuddyIfNeeded(ctx context.Context, cfg Config) (WorkBuddyCredent
 	setWorkBuddyBaseHeaders(req, credential.AccessToken)
 	req.Header.Set("X-Refresh-Token", credential.RefreshToken)
 	req.Header.Set("X-Auth-Refresh-Source", "ide-main")
-	res, err := (&http.Client{}).Do(req)
+	res, err := workBuddyHTTPClient.Do(req)
 	if err != nil {
 		return credential, fmt.Errorf("WorkBuddy 登录续期失败: %w", err)
 	}

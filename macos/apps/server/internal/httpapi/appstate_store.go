@@ -14,6 +14,9 @@ type sqlAppStateKV struct{ handle *sql.DB }
 // The conditional write is atomic even against writers using raw SQL. Keep
 // callbacks outside a transaction: idea validation queries this same database.
 func (kv sqlAppStateKV) Update(ctx context.Context, key string, fn func([]byte, bool) ([]byte, error)) error {
+	if kv.handle == nil {
+		return errors.New("数据库未初始化")
+	}
 	for attempt := 0; attempt < 16; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -47,6 +50,9 @@ func (kv sqlAppStateKV) Update(ctx context.Context, key string, fn func([]byte, 
 }
 
 func (kv sqlAppStateKV) Get(ctx context.Context, key string) ([]byte, bool, error) {
+	if kv.handle == nil {
+		return nil, false, nil
+	}
 	var body string
 	err := kv.handle.QueryRowContext(ctx, `SELECT value_json FROM app_state WHERE key = ?`, key).Scan(&body)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -59,6 +65,9 @@ func (kv sqlAppStateKV) Get(ctx context.Context, key string) ([]byte, bool, erro
 }
 
 func (kv sqlAppStateKV) Put(ctx context.Context, key string, data []byte) error {
+	if kv.handle == nil {
+		return errors.New("数据库未初始化")
+	}
 	_, err := kv.handle.ExecContext(ctx,
 		`INSERT INTO app_state(key, value_json, updated_at) VALUES(?,?,?)
 		 ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`,

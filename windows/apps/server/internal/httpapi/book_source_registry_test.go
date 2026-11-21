@@ -9,7 +9,27 @@ import (
 	"testing"
 
 	"cbctv2/server/internal/booksources"
+	"cbctv2/server/internal/db"
 )
+
+func newAllowedBookSourceServer(t *testing.T) *Server {
+	t.Helper()
+	cfg := defaultTestConfig(t.TempDir())
+	handle, err := db.Open(context.Background(), cfg.DBPath())
+	if err != nil {
+		t.Fatalf("打开测试库失败: %v", err)
+	}
+	if _, err := handle.Exec(`INSERT OR IGNORE INTO app_state(key,value_json,updated_at) VALUES('processing.policy.v1','{"revision":1,"library":"allow","documents":{},"projects":{}}','')`); err != nil {
+		_ = handle.Close()
+		t.Fatal(err)
+	}
+	s := New(cfg, handle)
+	t.Cleanup(func() {
+		s.comparisonJobs.Close()
+		_ = handle.Close()
+	})
+	return s
+}
 
 type deniedBookSource struct{}
 
@@ -26,7 +46,7 @@ func (deniedBookSource) Download(context.Context, string, string, booksources.Pr
 	panic("rights bypass")
 }
 func TestBookSourceRoutesAuthAndRights(t *testing.T) {
-	s := New(defaultTestConfig(t.TempDir()), nil)
+	s := newAllowedBookSourceServer(t)
 	s.bookSourcesOnce.Do(func() {
 		s.bookSources = booksources.New(t.TempDir(), append(booksources.DefaultProviders(nil), deniedBookSource{})...)
 	})
@@ -73,7 +93,7 @@ func TestBookSourceRoutesAuthAndRights(t *testing.T) {
 }
 
 func TestZLibraryConnectionRoutesDoNotExposeCredentials(t *testing.T) {
-	s := New(defaultTestConfig(t.TempDir()), nil)
+	s := newAllowedBookSourceServer(t)
 	handler := s.Handler()
 	run := func(method, path, body string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest(method, "http://127.0.0.1"+path, strings.NewReader(body))
@@ -106,6 +126,27 @@ func TestZLibraryConnectionRoutesDoNotExposeCredentials(t *testing.T) {
 		}
 		if strings.Contains(w.Body.String(), "userKey") || strings.Contains(w.Body.String(), "password") {
 			t.Fatal("credential fields exposed")
+		}
+	}
+}
+
+func TestNilDBDoesNotPanicUnderProcessingMiddleware(t *testing.T) {
+	s := New(defaultTestConfig(t.TempDir()), nil)
+	handler := s.Handler()
+	for _, tc := range []struct {
+		method, path string
+		expected     int
+	}{
+		{"GET", "/v1/book-sources", 200},
+		{"GET", "/v1/book-sources/zlibrary/connection", 200},
+		{"GET", "/v1/book-sources/zlibrary/search?q=test", 428},
+	} {
+		r := httptest.NewRequest(tc.method, "http://127.0.0.1"+tc.path, nil)
+		r.Header.Set("Authorization", "Bearer "+testToken)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != tc.expected {
+			t.Fatalf("%s %s: got %d, want %d (%s)", tc.method, tc.path, w.Code, tc.expected, w.Body.String())
 		}
 	}
 }

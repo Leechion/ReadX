@@ -73,6 +73,9 @@
         "zip"
       ],
       "hardenedRuntime": true,
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "ReadX 仅在你主动录制个人朗读音色时访问麦克风。"
+      },
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist"
     },

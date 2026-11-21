@@ -1,0 +1,235 @@
+.app-dialog.listening-dialog {
+  width: min(560px, calc(100vw - 32px));
+}
+.listening-selection {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 100px;
+  gap: 12px;
+}
+.listening-selection label { margin-top: 0; }
+.listening-dialog button {
+  min-height: 34px;
+  padding: 6px 12px;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+}
+.listening-dialog button:hover:not(:disabled) { border-color: var(--color-accent); }
+.listening-dialog button.listening-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-on-accent);
+}
+.listening-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.listening-dialog small { margin-top: 8px; }
+.listening-dialog .listening-error { color: var(--color-danger, #a82f25); }
+.listening-dialog .listening-error,
+.listening-progress { margin: 12px 0 0; overflow-wrap: anywhere; }
+.listening-record h3 { font-size: 16px; margin: 0 0 4px; }
+.listening-record textarea {
+  width: 100%;
+  margin-top: 6px;
+  padding: 9px;
+  resize: vertical;
+  border: 1px solid var(--color-line);
+  border-radius: 8px;
+  background: var(--color-surface);
+}
+.listening-record audio { margin-top: 12px; width: 100%; }
+
+.listening-player {
+  display: flex;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  padding: 5px 12px;
+  border-top: 1px solid var(--color-line);
+  background: var(--color-surface);
+  font-size: 12px;
+}
+.listening-player-text {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  min-width: 0;
+  color: var(--color-ink-soft);
+}
+.listening-player-text [role="status"] { font-variant-numeric: tabular-nums; }
+.listening-player-text [role="alert"] { color: var(--color-danger, #a82f25); overflow-wrap: anywhere; }
+.listening-source-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+  flex: none;
+}
+.listening-player-line {
+  flex: 1 1 12em;
+  overflow: hidden;
+  color: var(--color-ink);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.listening-player-actions { display: flex; flex: none; align-items: center; gap: 2px; }
+.listening-player-actions button { min-height: 26px; padding: 3px 7px; border-radius: 6px; white-space: nowrap; }
+.listening-player-actions button:hover:not(:disabled) { background: var(--color-accent-soft); color: var(--color-accent); }
+
+.listening-wave {
+  display: inline-flex;
+  align-items: center;
+  align-self: center;
+  gap: 2px;
+  height: 12px;
+  margin-right: 2px;
+  flex: none;
+}
+.listening-wave i {
+  display: block;
+  width: 2.5px;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--color-accent);
+  transform-origin: center bottom;
+  transform: scaleY(0.35);
+  opacity: 0.45;
+  transition: transform 180ms ease, opacity 180ms ease;
+}
+.listening-wave[data-active="true"] i {
+  opacity: 0.95;
+  animation: listening-wave-bar 0.95s ease-in-out infinite;
+}
+.listening-wave[data-active="true"] i:nth-child(2) {
+  animation-delay: 0.18s;
+}
+.listening-wave[data-active="true"] i:nth-child(3) {
+  animation-delay: 0.36s;
+}
+
+.epub-chapter,
+.live-translation-preview {
+  position: relative;
+  isolation: isolate;
+}
+
+::highlight(readx-speaking-sentence) {
+  background-color: transparent;
+}
+
+.listening-highlight-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  overflow: visible;
+}
+.pdf-paper .listening-highlight-layer {
+  mix-blend-mode: multiply;
+}
+.listening-highlight-layer--prose {
+  z-index: -1;
+}
+
+.listening-highlight-line {
+  position: absolute;
+  border-radius: 5px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-accent) 22%, transparent),
+    color-mix(in srgb, var(--color-accent) 13%, transparent) 55%,
+    color-mix(in srgb, var(--color-accent) 19%, transparent)
+  );
+  box-shadow:
+    inset 0 -1.5px 0 color-mix(in srgb, var(--color-accent) 46%, transparent),
+    0 1px 6px color-mix(in srgb, var(--color-accent) 10%, transparent);
+  transform-origin: left center;
+  animation: listening-line-in 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation-delay: calc(var(--listening-line-index, 0) * 18ms);
+}
+
+.listening-highlight-pin {
+  position: absolute;
+  width: 3px;
+  margin-left: -6px;
+  border-radius: 999px;
+  background: var(--color-accent);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--color-accent) 55%, transparent);
+  animation:
+    listening-line-in 180ms cubic-bezier(0.22, 1, 0.36, 1) both,
+    listening-pin-pulse 2s ease-in-out infinite;
+}
+
+[data-listening-block-focused] {
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-accent) 4.5%, transparent);
+  box-shadow: -8px 0 0 -4px color-mix(in srgb, var(--color-accent) 30%, transparent);
+  transition: background-color 220ms ease, box-shadow 220ms ease;
+}
+
+.pdf-paper[data-listening-block-active]::after {
+  content: '';
+  position: absolute;
+  z-index: 3;
+  top: var(--listening-block-y);
+  left: var(--listening-block-x);
+  width: var(--listening-block-width);
+  height: var(--listening-block-height);
+  border: 1px solid color-mix(in srgb, var(--color-accent) 42%, transparent);
+  border-left: 3.5px solid var(--color-accent);
+  border-radius: 6px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--color-accent) 15%, transparent),
+    color-mix(in srgb, var(--color-accent) 7%, transparent)
+  );
+  box-shadow: 0 2px 14px color-mix(in srgb, var(--color-accent) 16%, transparent);
+  pointer-events: none;
+  animation: listening-pin-pulse 2.4s ease-in-out infinite;
+}
+
+@keyframes listening-line-in {
+  from {
+    opacity: 0;
+    transform: scaleX(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: scaleX(1);
+  }
+}
+
+@keyframes listening-pin-pulse {
+  0%, 100% {
+    opacity: 0.96;
+  }
+  50% {
+    opacity: 0.62;
+  }
+}
+
+@keyframes listening-wave-bar {
+  0%, 100% {
+    transform: scaleY(0.35);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .listening-wave[data-active="true"] i,
+  .listening-highlight-line,
+  .listening-highlight-pin,
+  .pdf-paper[data-listening-block-active]::after {
+    animation: none;
+  }
+  .listening-wave[data-active="true"] i {
+    transform: scaleY(0.75);
+  }
+}

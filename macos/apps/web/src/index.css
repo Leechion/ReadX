@@ -1057,6 +1057,8 @@
 }
 
 .reader-toolbar {
+  position: relative;
+  z-index: 46;
   height: var(--bar-height);
   min-height: var(--bar-height);
   flex-shrink: 0;
@@ -1067,6 +1069,7 @@
   gap: var(--space-4);
   border-bottom: 1px solid var(--color-line);
 }
+.reader-toolbar:has(.reader-tool-menu) { z-index: 91; }
 
 .reader-title-group {
   display: flex;
@@ -1079,7 +1082,6 @@
 .reader-title {
   flex: 1;
   min-width: 0;
-  max-width: 360px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1088,19 +1090,78 @@
   color: var(--color-ink);
 }
 
-.toolbar-divider {
-  height: 18px;
-  width: 1px;
-  background: var(--color-line);
-  margin: 0 2px;
-}
-
-.toolbar-actions {
+.reader-toolbar-actions {
   display: flex;
   flex-shrink: 0;
   align-items: center;
   gap: var(--space-2);
 }
+
+.reader-tool-category { position: relative; min-width: 0; }
+.reader-toolbar .reader-tool-trigger {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 5px 10px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-md);
+  color: var(--color-ink);
+  font-size: var(--type-sm);
+}
+.reader-tool-trigger small { color: var(--color-ink-soft); font-size: 0.8em; }
+.reader-tool-trigger svg { flex: none; color: var(--color-ink-soft); }
+.reader-toolbar .reader-tool-trigger[aria-expanded='true'] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent);
+}
+.reader-tool-trigger[aria-expanded='true'] svg { transform: rotate(180deg); }
+.reader-tool-menu {
+  position: absolute;
+  inset-block-start: calc(100% + 6px);
+  inset-inline-end: 0;
+  width: 240px;
+  max-width: calc(100vw - 24px);
+  max-height: min(24rem, 58dvh);
+  box-sizing: border-box;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 5px;
+  border: 1px solid var(--color-line);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface);
+  box-shadow: var(--shadow-lg);
+  color: var(--color-ink);
+}
+.reader-tool-section + .reader-tool-section {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--color-line);
+}
+.reader-tool-section-label {
+  padding: 4px 9px 2px;
+  color: var(--color-ink-soft);
+  font-size: 11px;
+}
+.reader-toolbar .reader-tool-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 9px;
+  border-radius: var(--radius-md);
+  font-size: var(--type-sm);
+  text-align: start;
+}
+.reader-tool-item > span { flex: 1; }
+.reader-tool-item > :is(svg, kbd) { flex: none; }
+.reader-tool-item kbd { color: var(--color-ink-soft); font: inherit; font-size: 0.8em; }
+.reader-toolbar .reader-tool-item[aria-checked='true'] { color: var(--color-accent); }
+.reader-toolbar .reader-tool-item:is(:hover,:focus-visible):not(:disabled) { background: var(--color-accent-soft); }
+.reader-tool-item:focus-visible,.reader-tool-trigger:focus-visible { outline: 2px solid var(--color-accent); outline-offset: -2px; }
+.reader-tool-item:disabled,.reader-tool-trigger:disabled { opacity: .5; }
 
 .reader-panels {
   flex: 1;
@@ -1181,31 +1242,6 @@
   font-size: 10px;
   opacity: 0.6;
   margin-left: auto;
-}
-
-/* 阅读模式切换（仅原文 / 原文译文 / 仅译文） */
-.mode-pills {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 999px;
-  background: var(--color-surface-sunk);
-}
-
-.mode-pill {
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 11px;
-  color: var(--color-ink-soft);
-  transition: background-color 140ms ease, color 140ms ease;
-}
-
-.mode-pill[aria-pressed='true'] {
-  background: var(--color-surface);
-  color: var(--color-ink);
-  font-weight: 500;
-  box-shadow: var(--shadow-sm);
 }
 
 /* ---- 双栏对照（translation-panes）---- */
@@ -1349,7 +1385,7 @@
 
 .reader-focus-active .app-header,.reader-focus-active .mode-pendant { display:none; }
 .workspace-reader.reader--focus { position:fixed;inset:0;z-index:100;width:100%;height:100dvh;background:var(--color-canvas); }
-.reader--focus > .reader-toolbar { position:absolute;inset:0 0 auto;z-index:40;visibility:hidden;opacity:0;box-shadow:0 8px 24px #14251d14; }
+.reader--focus > .reader-toolbar { position:absolute;inset:0 0 auto;visibility:hidden;opacity:0;box-shadow:0 8px 24px #14251d14; }
 .reader--focus .pdf-reader,.reader--focus .epub-reader { position:relative; }
 .reader--focus .pdf-reader > .reader-format-tools,.reader--focus .epub-reader > .reader-format-tools { position:absolute;top:var(--reader-toolbar-height,64px);right:0;left:0;z-index:30;visibility:hidden;opacity:0; }
 .reader--focus[data-focus-edge='top'] > .reader-toolbar,.reader--focus[data-focus-edge='top'] .reader-format-tools { visibility:visible;opacity:1; }
@@ -1631,14 +1667,25 @@ button:disabled { opacity:.5;cursor:default; }
 .reader-error { flex-shrink:0;padding:8px 16px;color:var(--color-bad);font-size:12px; }
 @media(prefers-reduced-motion:reduce) { .reader-sidebar,.assistant-sidebar { transition:none; } }
 @media(max-width:900px) {
- .reader-toolbar { height:auto;min-height:var(--bar-height);flex-wrap:wrap;padding:var(--space-2);gap:var(--space-2); }
- .reader-title-group { width:100%;gap:8px; }
- .reader-title { flex:1; }
- .toolbar-actions { flex-wrap:wrap; }
+ .reader-toolbar { padding-inline:var(--space-2);gap:var(--space-2); }
+ .reader-title-group { gap:8px; }
  .translation-pane-content,.publication-pane { overflow:auto; }
  .assistant-sidebar { width: min(320px,80vw); }
  .assistant-sidebar[data-open='false'] { margin-right:calc(-1 * min(320px,80vw)); }
  .library-sidebar { width:180px; }
+}
+@media(max-width:520px) {
+ .reader-toolbar { height:auto;flex-wrap:wrap;padding:var(--space-2); }
+ .reader-title-group { flex-basis:100%; }
+ .reader-toolbar-actions { width:100%; }
+ .reader-tool-category { flex:1; }
+ .reader-toolbar .reader-tool-trigger { width:100%; justify-content:center; padding-inline:6px; }
+ .reader-tool-trigger small { display:none; }
+ .reader-tool-category:first-child .reader-tool-menu { inset-inline:0 auto; }
+ .reader-tool-category:not(:first-child):not(:last-child) .reader-tool-menu {
+   inset-inline:50% auto;
+   transform:translateX(-50%);
+ }
 }
 
 /* Stable scroll geometry prevents fit-width/fullscreen resize feedback. */

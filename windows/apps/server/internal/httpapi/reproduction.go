@@ -271,10 +271,6 @@ func (s *Server) mutateReproduction(ctx context.Context, key string, fn func(che
 	})
 }
 
-func (s *Server) saveReproduction(ctx context.Context, key string, checklist ReproductionChecklist) error {
-	return appstate.Save(ctx, s.appStateStore, "reproduction:"+key, checklist)
-}
-
 // reproductionUnknownCount 未知项仍计入总数：未知是「待核对」，不是「已确认」。
 func reproductionUnknownCount(analysis validate.ReproductionAnalysis) int {
 	count := 0

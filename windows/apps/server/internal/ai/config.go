@@ -76,7 +76,7 @@ func LoadConfig(path string) (Config, error) {
 	// Keep request scratch files beside application data, where the local server
 	// has write access even if Windows denies access to the global temp folder.
 	cfg.tempRoot = filepath.Join(filepath.Dir(path), "data", "v2", "tmp")
-	cfg.workBuddyAuthPath = filepath.Join(filepath.Dir(path), "workbuddy-auth.json")
+	cfg.workBuddyAuthPath = WorkBuddyCredentialPath(path)
 	// A damaged WorkBuddy sidecar should require re-login without taking other
 	// providers (OpenAI, Codex, etc.) offline.
 	cfg.WorkBuddyAuth, _ = LoadWorkBuddyCredential(cfg.workBuddyAuthPath)

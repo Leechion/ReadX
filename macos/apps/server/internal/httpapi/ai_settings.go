@@ -6,6 +6,7 @@ import (
 	"cbctv2/server/internal/securefile"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -73,7 +74,9 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) {
 		previousURL, _ := raw["baseURL"].(string)
 		previousModel, _ := raw["model"].(string)
 		previousKey, _ := raw["apiKey"].(string)
-		connections[previousProvider+"|"+strings.TrimRight(previousURL, "/")] = previousKey
+		if !body.ClearKey {
+			connections[previousProvider+"|"+strings.TrimRight(previousURL, "/")] = previousKey
+		}
 		destination := body.Provider + "|" + strings.TrimRight(strings.TrimSpace(body.BaseURL), "/")
 		savedKey, _ := connections[destination].(string)
 		if body.ClearKey {
@@ -152,7 +155,7 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg, _ := ai.LoadConfig(path)
-	writeJSON(w, 200, map[string]any{"provider": cfg.ProviderName(), "baseURL": cfg.PublicBaseURL(), "model": cfg.Model, "reasoningEffort": cfg.ReasoningEffort, "codexFastMode": cfg.CodexFastMode, "translationPreparation": cfg.TranslationPreparation, "keyConfigured": cfg.APIKey != "", "status": cfg.Redact(), "latex": s.latexAISettingsView(cfg), "cli": map[string]bool{"codex": ai.CLIAvailable("codex"), "claude": ai.CLIAvailable("claude"), "kimi": ai.CLIAvailable("kimi")}, "codex": ai.CodexStatus(r.Context()), "workbuddy": s.workBuddyStatus(cfg)})
+	writeJSON(w, 200, map[string]any{"provider": cfg.ProviderName(), "baseURL": cfg.PublicBaseURL(), "model": cfg.Model, "reasoningEffort": cfg.ReasoningEffort, "codexFastMode": cfg.CodexFastMode, "translationPreparation": cfg.TranslationPreparation, "keyConfigured": cfg.APIKey != "", "status": cfg.Redact(), "latex": s.latexAISettingsView(cfg), "cli": map[string]bool{"codex": ai.CLIAvailable("codex"), "claude": ai.CLIAvailable("claude"), "kimi": ai.CLIAvailable("kimi")}, "codex": ai.CodexStatus(r.Context()), "workbuddy": s.workBuddyStatus()})
 }
 
 // handleAIModels 读取当前地址可用的模型列表：OpenAI 兼容与 Anthropic 都提供 GET /models。
@@ -171,12 +174,7 @@ func (s *Server) handleAIModels(w http.ResponseWriter, r *http.Request) {
 	}
 	provider := strings.TrimSpace(body.Provider)
 	if provider == "workbuddy" {
-		cfg, err := s.aiConfig()
-		if err != nil {
-			writeError(w, 500, err.Error())
-			return
-		}
-		models, err := ai.WorkBuddyModels(r.Context(), cfg)
+		models, err := ai.WorkBuddyModels(r.Context(), s.workBuddyAuthPath())
 		if err != nil {
 			writeError(w, 502, err.Error())
 			return
@@ -226,20 +224,12 @@ func (s *Server) handleAIModels(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, parsed.String(), nil)
+	response, err := doAIModelGet(ctx, parsed.String(), provider, key)
 	if err != nil {
-		writeError(w, 400, "API 地址无效，请填写完整的 http/https 地址")
-		return
-	}
-	request.Header.Set("Accept", "application/json")
-	if provider == "anthropic" {
-		request.Header.Set("x-api-key", key)
-		request.Header.Set("anthropic-version", "2023-06-01")
-	} else {
-		request.Header.Set("Authorization", "Bearer "+key)
-	}
-	response, err := ai.NewHTTPClient().Do(request)
-	if err != nil {
+		if errors.Is(err, errInvalidModelURL) {
+			writeError(w, 400, "API 地址无效，请填写完整的 http/https 地址")
+			return
+		}
 		writeError(w, 502, "获取模型列表失败："+redactKey(err.Error(), key))
 		return
 	}
@@ -308,13 +298,12 @@ func modelNamesFromJSON(body []byte) []string {
 	return out
 }
 
-// fetchModelCatalog 尽力而为地取一次模型目录：超时、非 200、解析不了都只当作"没有补充"。
-func (s *Server) fetchModelCatalog(ctx context.Context, base, provider, key string) []byte {
-	catalogCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(catalogCtx, http.MethodGet, base+"/model/info", nil)
+var errInvalidModelURL = errors.New("invalid model url")
+
+func doAIModelGet(ctx context.Context, endpoint, provider, key string) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil
+		return nil, errInvalidModelURL
 	}
 	request.Header.Set("Accept", "application/json")
 	if provider == "anthropic" {
@@ -323,7 +312,14 @@ func (s *Server) fetchModelCatalog(ctx context.Context, base, provider, key stri
 	} else {
 		request.Header.Set("Authorization", "Bearer "+key)
 	}
-	response, err := ai.NewHTTPClient().Do(request)
+	return ai.NewHTTPClient().Do(request)
+}
+
+// fetchModelCatalog 尽力而为地取一次模型目录：超时、非 200、解析不了都只当作"没有补充"。
+func (s *Server) fetchModelCatalog(ctx context.Context, base, provider, key string) []byte {
+	catalogCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	response, err := doAIModelGet(catalogCtx, base+"/model/info", provider, key)
 	if err != nil {
 		return nil
 	}

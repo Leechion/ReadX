@@ -30,6 +30,7 @@ const appVersion = "0.0.0-s0"
 // inline 的 HMR 脚本，若把 CSP 塞进 HTML 会让开发态立刻白屏，而生产态才是需要加固的那一份。
 const staticCSP = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
 	"img-src 'self' data: blob: https://www.gutenberg.org; font-src 'self' data:; worker-src 'self' blob:; " +
+	"media-src 'self' blob:; " +
 	"connect-src 'self' http://127.0.0.1:* ws://127.0.0.1:*; " +
 	"object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'"
 
@@ -213,6 +214,9 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/latex/snapshots/{id}", withAuth(s.handleLatexSnapshot))
 	mux.Handle("DELETE /v1/latex/snapshots/{id}", withAuth(s.handleLatexSnapshot))
 	mux.Handle("GET /v1/ai/status", withAuth(s.handleAIStatus))
+	mux.Handle("GET /v1/voice-studio/voices", withAuth(s.handleVoiceStudioVoices))
+	mux.Handle("POST /v1/voice-studio/speech", withAuth(s.handleVoiceStudioSpeech))
+	mux.Handle("POST /v1/voice-studio/recordings", withAuth(s.handleVoiceStudioRecording))
 	mux.Handle("GET /v1/ai/settings", withAuth(s.handleAISettings))
 	mux.Handle("PUT /v1/ai/settings", withAuth(s.handleAISettings))
 	mux.Handle("POST /v1/ai/test", withAuth(s.handleAIProbe))

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from 'react';
-import type { LatexAutoFixResult, LatexDiagnostic, LatexEngine, LatexProject, LatexSnapshot } from '@cbct/shared';
+import type { DocumentSummary, LatexAutoFixResult, LatexCiteLibraryResult, LatexDiagnostic, LatexEngine, LatexProject, LatexSnapshot, SyncTeXBox } from '@cbct/shared';
 import { api, streamLatexAutoFix } from '../../api/client';
 import { useLatexBuild } from '../../hooks/useLatexBuild';
 import { useLatexProject } from '../../hooks/useLatexProject';
@@ -7,8 +7,10 @@ import { useLatexRealtime } from '../../hooks/useLatexRealtime';
 import { LatexBuildPanel } from './LatexBuildPanel';
 import { LatexAIAssistant } from './LatexAIAssistant';
 import { LatexAssetPreview } from './LatexAssetPreview';
+import { LatexCiteDialog } from './LatexCiteDialog';
 import { LatexEditor } from './LatexEditor';
 import { LatexFileTree } from './LatexFileTree';
+import { LatexGitDialog } from './LatexGitDialog';
 import { LatexPdfPreview } from './LatexPdfPreview';
 import { LatexToolbar } from './LatexToolbar';
 import { LatexRealtimePreview } from './LatexRealtimePreview';
@@ -23,11 +25,13 @@ import { STORAGE_KEYS } from '../../lib/storage';
  */
 export function LatexWorkspace({
   project,
+  documents = [],
   onClose,
   onProjectChange,
   registerBeforeLeave,
 }: {
   project: LatexProject;
+  documents?: DocumentSummary[];
   onClose: () => void;
   onProjectChange: (project: LatexProject) => void;
   registerBeforeLeave?: (guard: (() => Promise<boolean>) | null) => void;
@@ -40,6 +44,11 @@ export function LatexWorkspace({
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
   const [reveal, setReveal] = useState<{ path: string; line: number; nonce: number } | null>(null);
+  const [citeDialogOpen, setCiteDialogOpen] = useState(false);
+  const [gitDialogOpen, setGitDialogOpen] = useState(false);
+  const [pendingCiteInsert, setPendingCiteInsert] = useState<{ keys: string[]; nonce: number } | null>(null);
+  const [syncTarget, setSyncTarget] = useState<{ page: number; boxes: SyncTeXBox[]; nonce: number } | null>(null);
+  const [syncBusy, setSyncBusy] = useState(false);
   const [activeAssetPath, setActiveAssetPath] = useState<string | null>(null);
   const [assetPreview, setAssetPreview] = useState<{ path: string; url: string; contentType: string; size: number } | null>(null);
   const [assetLoading, setAssetLoading] = useState(false);
@@ -195,8 +204,10 @@ export function LatexWorkspace({
   const applyAIFix = useCallback(async (proposal: { filePath: string; original: string; content: string }, signal?: AbortSignal) => {
     const notice = await state.applyAIEdit(proposal, signal);
     void refreshSnapshots();
+    void state.refreshTree();
+    void state.refreshIndex();
     return notice;
-  }, [refreshSnapshots, state.applyAIEdit]);
+  }, [refreshSnapshots, state]);
 
   useEffect(() => {
     void refreshSnapshots();
@@ -413,6 +424,67 @@ export function LatexWorkspace({
   const current = state.project ?? project;
   const activeBuild = compiler.build;
 
+  const handleLibraryCited = useCallback(
+    async (result: LatexCiteLibraryResult) => {
+      await state.refreshTree();
+      if (state.files.some((file) => file.path === result.bibFile)) {
+        await state.reloadFile(result.bibFile).catch(() => undefined);
+      }
+      await state.refreshIndex();
+      setPendingCiteInsert((currentInsert) => ({
+        keys: result.keys,
+        nonce: (currentInsert?.nonce ?? 0) + 1,
+      }));
+      const details: string[] = [];
+      if (result.inserted.length) details.push(`已写入 ${result.inserted.length} 条到 ${result.bibFile}`);
+      if (result.alreadyPresent.length) details.push(`复用既有键 ${result.alreadyPresent.length} 条`);
+      state.setStatus(details.join('，') || `已插入 \\cite{${result.keys.join(', ')}}`);
+    },
+    [state],
+  );
+
+  const syncToPdf = useCallback(
+    async (path: string, line: number) => {
+      if (!activeBuild || !activeBuild.hasPdf) {
+        state.setError('请先编译生成 PDF，再使用 SyncTeX 定位。');
+        return;
+      }
+      if (realtimeEnabled) {
+        setRealtimeEnabled(false);
+      }
+      setSyncBusy(true);
+      try {
+        const result = await api.latexSyncTeXForward(activeBuild.id, path, line);
+        setSyncTarget({ page: result.page, boxes: result.boxes, nonce: Date.now() });
+        state.setStatus(
+          result.exact
+            ? `SyncTeX：已定位到 PDF 第 ${result.page} 页`
+            : `SyncTeX：当前行无直接排版节点，已就近定位到第 ${result.page} 页（对应第 ${result.line} 行）`,
+        );
+      } catch (cause) {
+        state.setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setSyncBusy(false);
+      }
+    },
+    [activeBuild, realtimeEnabled, state],
+  );
+
+  const reverseSync = useCallback(
+    async (page: number, x: number, y: number) => {
+      if (!activeBuild || !activeBuild.hasPdf) return;
+      try {
+        const location = await api.latexSyncTeXReverse(activeBuild.id, page, x, y);
+        await state.openFile(location.file);
+        setReveal({ path: location.file, line: location.line, nonce: Date.now() });
+        state.setStatus(`SyncTeX：已跳回 ${location.file}:${location.line}`);
+      } catch (cause) {
+        state.setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [activeBuild, state],
+  );
+
   return (
     <section className="latex-workspace">
       <LatexToolbar
@@ -431,6 +503,9 @@ export function LatexWorkspace({
         }}
         extra={
           <>
+            <button type="button" onClick={() => setGitDialogOpen(true)} title="查看 Git 版本状态、提交并同步到远程仓库">
+              Git 版本
+            </button>
             <button type="button" aria-pressed={realtimeEnabled}
               onClick={() => setRealtimeEnabled(value => !value)}
               title="使用 rtex 和 LuaLaTeX 实时更新编辑中的段落；关闭后查看普通 PDF">
@@ -529,12 +604,16 @@ export function LatexWorkspace({
               active={state.active}
               index={state.index}
               reveal={reveal}
+              pendingCiteInsert={pendingCiteInsert}
               onActivate={openTextFile}
               onClose={(path) => void state.closeFile(path)}
               onChange={state.updateContent}
               onSave={(path) => void state.saveFile(path)}
               onReload={(path) => void state.reloadFile(path)}
               onForceSave={(path) => void state.forceSave(path)}
+              onSyncToPdf={(path, line) => void syncToPdf(path, line)}
+              onOpenLibraryCite={() => setCiteDialogOpen(true)}
+              syncBusy={syncBusy}
               readOnly={autoFixRunning}
             />
           </div>
@@ -587,6 +666,8 @@ export function LatexWorkspace({
           <LatexPdfPreview
             buildId={activeBuild && activeBuild.hasPdf ? activeBuild.id : null}
             load={api.latexBuildPdf}
+            syncTarget={syncTarget}
+            onReverseSync={(pageNumber, x, y) => void reverseSync(pageNumber, x, y)}
             onError={(message) => state.setError(message)}
             onDownload={() => {
               if (!activeBuild) return;
@@ -618,6 +699,7 @@ export function LatexWorkspace({
               filePath={activeAssetPath ?? state.active?.path ?? current.mainFile}
               source={state.active?.content ?? ''}
               build={activeBuild}
+              documents={documents}
               aiAutoFix={current.aiAutoFix}
               autoFixRunning={autoFixRunning}
               autoFixStages={autoFixStages}
@@ -647,6 +729,25 @@ export function LatexWorkspace({
             <pre>{log || '（日志为空）'}</pre>
           </div>
         </div>
+      ) : null}
+      <LatexCiteDialog
+        open={citeDialogOpen}
+        projectId={current.id}
+        documents={documents}
+        nodes={state.nodes}
+        onClose={() => setCiteDialogOpen(false)}
+        onInserted={handleLibraryCited}
+      />
+      {gitDialogOpen ? (
+        <LatexGitDialog
+          open={gitDialogOpen}
+          projectId={current.id}
+          projectTitle={current.title}
+          onClose={() => setGitDialogOpen(false)}
+          onSyncComplete={() => {
+            void state.reload();
+          }}
+        />
       ) : null}
     </section>
   );

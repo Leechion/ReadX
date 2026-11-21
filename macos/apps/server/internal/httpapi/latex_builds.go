@@ -141,6 +141,61 @@ func (s *Server) handleLatexBuild(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleLatexSyncTeXForward 把源码「文件:行号」映射到编译产物 PDF 的页码与坐标框。
+func (s *Server) handleLatexSyncTeXForward(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	file := strings.TrimSpace(r.URL.Query().Get("file"))
+	if file == "" {
+		writeError(w, http.StatusBadRequest, "缺少 file 参数")
+		return
+	}
+	line, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("line")))
+	if err != nil || line < 1 {
+		writeError(w, http.StatusBadRequest, "line 必须是大于等于 1 的整数")
+		return
+	}
+	result, err := s.latexService().ForwardSync(r.Context(), id, file, line)
+	if err != nil {
+		if errors.Is(err, latex.ErrUnsafePath) || errors.Is(err, latex.ErrNotFound) {
+			writeLatexError(w, err)
+			return
+		}
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// handleLatexSyncTeXReverse 把 PDF 页码和点击坐标反查回项目内的源码文件与行号。
+func (s *Server) handleLatexSyncTeXReverse(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	page, err := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("page")))
+	if err != nil || page < 1 {
+		writeError(w, http.StatusBadRequest, "page 必须是大于等于 1 的整数")
+		return
+	}
+	x, err := strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("x")), 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "x 必须是数字")
+		return
+	}
+	y, err := strconv.ParseFloat(strings.TrimSpace(r.URL.Query().Get("y")), 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "y 必须是数字")
+		return
+	}
+	location, err := s.latexService().ReverseSync(r.Context(), id, page, x, y)
+	if err != nil {
+		if errors.Is(err, latex.ErrUnsafePath) || errors.Is(err, latex.ErrNotFound) {
+			writeLatexError(w, err)
+			return
+		}
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, location)
+}
+
 func legacySafeStem(mainFile string) string {
 	stem := strings.TrimSuffix(mainFile, ".tex")
 	stem = strings.ReplaceAll(stem, "/", "-")

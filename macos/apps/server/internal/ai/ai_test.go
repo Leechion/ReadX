@@ -355,3 +355,46 @@ func TestTrimHistoryMapsRolesAndCaps(t *testing.T) {
 		t.Fatalf("应截掉最早 4 条，实际从 %q 开始", trimmed[0].Content)
 	}
 }
+
+func TestGenerateFallsBackToStreamWhenNonStreamNotSupported(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if payload["stream"] != true {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"code":11101,"msg":"Non-stream chat request is currently not supported","requestId":"test-id"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, sseDelta("流式恢复成功"))
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	cfg := Config{BaseURL: server.URL, APIKey: "sk", Model: "stream-only-model"}
+	client := NewClient(cfg)
+	text, err := client.Generate(context.Background(), "sys", "user", 0.2)
+	if err != nil {
+		t.Fatalf("遇到 11101 非流式错误时应自动回退到流式并成功: %v", err)
+	}
+	if text != "流式恢复成功" {
+		t.Fatalf("返回文本不符: %q", text)
+	}
+	if calls != 2 {
+		t.Fatalf("首次调用应经历 1 次非流式探测 + 1 次流式重试，实际 calls=%d", calls)
+	}
+
+	// 第二次调用应命中记忆，直接发起流式请求（不再产生 400 失败探测）。
+	calls = 0
+	text2, err := client.Generate(context.Background(), "sys", "user", 0.2)
+	if err != nil {
+		t.Fatalf("后续请求应直接流式成功: %v", err)
+	}
+	if text2 != "流式恢复成功" {
+		t.Fatalf("后续请求返回文本不符: %q", text2)
+	}
+	if calls != 1 {
+		t.Fatalf("后续调用应直接发起 1 次流式，不再重复走非流式探测，实际 calls=%d", calls)
+	}
+}

@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { LatexAutoFixResult, LatexBuild, LatexSnapshot } from '@cbct/shared';
-import { api, latexAIFix, streamLatexChat, type LatexAISettings } from '../../api/client';
+import type { DocumentSummary, LatexAutoFixResult, LatexBuild, LatexSnapshot } from '@cbct/shared';
+import { api, latexAIFix, streamLatexChat, type LatexAISettings, type LatexSnapshotDiffResult } from '../../api/client';
 import { useAIPreferences } from '../../hooks/useAIPreferences';
 import { useConfirm } from '../ConfirmDialog';
 import { ChatWorkspace } from '../ChatWorkspace';
 import { runLatexChat } from '../../lib/latex/latexChatTransport';
+import { computeLineDiff } from '../../lib/latex/lineDiff';
 
 export function LatexAIAssistant({
   projectId,
@@ -12,6 +13,7 @@ export function LatexAIAssistant({
   filePath,
   source,
   build,
+  documents = [],
   aiAutoFix,
   autoFixRunning,
   autoFixStages,
@@ -31,6 +33,7 @@ export function LatexAIAssistant({
   filePath: string;
   source: string;
   build: LatexBuild | null;
+  documents?: DocumentSummary[];
   /** 「AI 直接改文件」总开关：关着就不提供直接写盘入口。 */
   aiAutoFix: boolean;
   autoFixRunning: boolean;
@@ -54,9 +57,33 @@ export function LatexAIAssistant({
   const [fixError, setFixError] = useState('');
   const [fixNotice, setFixNotice] = useState('');
   const [proposal, setProposal] = useState<{ filePath: string; original: string; content: string; summary: string } | null>(null);
-  const [showOriginal, setShowOriginal] = useState(false);
+  const [reviewMode, setReviewMode] = useState<'diff' | 'proposed' | 'original'>('diff');
+  const [snapshotDiff, setSnapshotDiff] = useState<LatexSnapshotDiffResult | null>(null);
+  const [diffLoading, setDiffLoading] = useState(false);
+  const [diffError, setDiffError] = useState('');
   const [fixPanelOpen, setFixPanelOpen] = useState(false);
   const [autoFixNote, setAutoFixNote] = useState('');
+  const [referenceKeys, setReferenceKeys] = useState<string[]>([]);
+  const [refQuery, setRefQuery] = useState('');
+
+  const filteredDocuments = useMemo(() => {
+    const needle = refQuery.trim().toLowerCase();
+    if (!needle) return documents;
+    return documents.filter((doc) =>
+      [doc.title, doc.translatedTitle ?? '', doc.authors.join(' '), doc.venue, doc.year ? String(doc.year) : '', doc.key]
+        .join(' ')
+        .toLowerCase()
+        .includes(needle),
+    );
+  }, [documents, refQuery]);
+
+  const toggleReference = (id: string) => {
+    setReferenceKeys((current) => {
+      if (current.includes(id)) return current.filter((item) => item !== id);
+      if (current.length >= 6) return current;
+      return [...current, id];
+    });
+  };
 
   useEffect(() => {
     if (proposal || autoFixRunning) setFixPanelOpen(true);
@@ -215,11 +242,20 @@ export function LatexAIAssistant({
   const transport = useCallback(
     (request: { key: string; question: string; history?: Array<{ role: string; text: string }> }, onChunk: Parameters<typeof streamLatexChat>[1], signal?: AbortSignal) =>
       runLatexChat(
-        { key: request.key, projectId, projectTitle, filePath, source, question: request.question, history: request.history },
+        {
+          key: request.key,
+          projectId,
+          projectTitle,
+          filePath,
+          source,
+          question: request.question,
+          referenceKeys: referenceKeys.length ? referenceKeys : undefined,
+          history: request.history,
+        },
         onChunk,
         signal,
       ),
-    [filePath, projectId, projectTitle, source],
+    [filePath, projectId, projectTitle, referenceKeys, source],
   );
 
   const generateFix = async () => {
@@ -523,21 +559,79 @@ export function LatexAIAssistant({
                     <span>
                       {snapshot.createdAt.replace('T', ' ').replace('Z', '')} · {snapshot.note || '快照'} · {snapshot.fileCount} 个文件
                     </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        void confirmDialog.bridge
-                          .confirm('回滚会把项目源码恢复到这份快照的状态，快照之后新增的文件会被移除。继续？')
-                          .then((ok) => {
-                            if (ok) onRollbackSnapshot(snapshot.id);
-                          });
-                      }}
-                    >
-                      回滚
-                    </button>
+                    <div className="latex-snapshot-actions">
+                      <button
+                        type="button"
+                        disabled={diffLoading}
+                        onClick={() => {
+                          if (snapshotDiff?.snapshot.id === snapshot.id) {
+                            setSnapshotDiff(null);
+                            return;
+                          }
+                          setDiffLoading(true);
+                          setDiffError('');
+                          void api.latexSnapshotDiff(snapshot.id)
+                            .then((res) => setSnapshotDiff(res))
+                            .catch((cause) => setDiffError(cause instanceof Error ? cause.message : String(cause)))
+                            .finally(() => setDiffLoading(false));
+                        }}
+                      >
+                        {snapshotDiff?.snapshot.id === snapshot.id ? '收起对比' : '对比当前'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          void confirmDialog.bridge
+                            .confirm('回滚会把项目源码恢复到这份快照的状态，快照之后新增的文件会被移除。继续？')
+                            .then((ok) => {
+                              if (ok) onRollbackSnapshot(snapshot.id);
+                            });
+                        }}
+                      >
+                        回滚
+                      </button>
+                    </div>
                   </li>
                 ))}
               </ul>
+              {diffError ? <p className="latex-ai-fix-error" role="alert">{diffError}</p> : null}
+              {snapshotDiff ? (
+                <div className="latex-snapshot-diff">
+                  <div className="latex-snapshot-diff-head">
+                    <strong>快照对比 · {snapshotDiff.snapshot.note || snapshotDiff.snapshot.id}</strong>
+                    <span>{snapshotDiff.files.length ? `${snapshotDiff.files.length} 个文件有差异` : '与当前源码完全一致'}</span>
+                  </div>
+                  {snapshotDiff.files.map((file) => {
+                    if (file.binary || file.tooBig) {
+                      return (
+                        <div key={file.path} className="latex-diff-file">
+                          <div className="latex-diff-file-title">
+                            <span>{file.path}</span>
+                            <span className="latex-diff-badge">{file.status} · {file.binary ? '二进制文件' : '文件过大'}</span>
+                          </div>
+                        </div>
+                      );
+                    }
+                    const diff = computeLineDiff(file.before || '', file.after || '');
+                    return (
+                      <div key={file.path} className="latex-diff-file">
+                        <div className="latex-diff-file-title">
+                          <span>{file.path}</span>
+                          <span className="latex-diff-badge">{file.status} (+{diff.addedCount} / -{diff.removedCount})</span>
+                        </div>
+                        <pre className="latex-diff-view">
+                          {diff.lines.map((line, index) => (
+                            <span key={index} className={`latex-diff-line ${line.kind}`}>
+                              <span className="latex-diff-sign">{line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}</span>
+                              {line.text || ' '}
+                            </span>
+                          ))}
+                        </pre>
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
               <p className="latex-ai-snapshots-hint">回滚是「回到那一刻」：之后新增的文件会被移除，之后的所有改动都会丢失。</p>
             </details>
           ) : null}
@@ -556,17 +650,77 @@ export function LatexAIAssistant({
             <div className="latex-ai-fix-summary"><strong>修改建议 · {proposal.filePath}</strong><p>{proposal.summary || 'AI 已生成当前文件的完整修改版本。'}</p></div>
             <div className="latex-ai-fix-review-actions">
               <div>
-                <button type="button" className={!showOriginal ? 'active' : ''} onClick={() => setShowOriginal(false)}>修改后</button>
-                <button type="button" className={showOriginal ? 'active' : ''} onClick={() => setShowOriginal(true)}>修改前</button>
+                <button type="button" className={reviewMode === 'diff' ? 'active' : ''} onClick={() => setReviewMode('diff')}>行级对比</button>
+                <button type="button" className={reviewMode === 'proposed' ? 'active' : ''} onClick={() => setReviewMode('proposed')}>修改后</button>
+                <button type="button" className={reviewMode === 'original' ? 'active' : ''} onClick={() => setReviewMode('original')}>修改前</button>
               </div>
               <button type="button" onClick={() => void applyProposal()} disabled={applying || proposal.content === proposal.original}>{applying ? '正在保存…' : '应用并保存'}</button>
               <button type="button" onClick={() => setProposal(null)}>丢弃</button>
             </div>
-            <pre className={showOriginal ? 'original' : 'proposed'}>{showOriginal ? proposal.original : proposal.content}</pre>
+            {reviewMode === 'diff' ? (() => {
+              const diff = computeLineDiff(proposal.original, proposal.content);
+              return (
+                <pre className="latex-diff-view">
+                  {diff.lines.map((line, index) => (
+                    <span key={index} className={`latex-diff-line ${line.kind}`}>
+                      <span className="latex-diff-sign">{line.kind === 'add' ? '+' : line.kind === 'del' ? '-' : ' '}</span>
+                      {line.text || ' '}
+                    </span>
+                  ))}
+                </pre>
+              );
+            })() : (
+              <pre className={reviewMode === 'original' ? 'original' : 'proposed'}>{reviewMode === 'original' ? proposal.original : proposal.content}</pre>
+            )}
           </div>
         ) : null}
       </section>
       </details>
+      {documents.length ? (
+        <details className="latex-ai-tools latex-ai-refs">
+          <summary>
+            关联书库文献（已选 {referenceKeys.length}/6 篇）
+          </summary>
+          <div className="latex-ai-refs-body">
+            <div className="latex-ai-refs-bar">
+              <input
+                type="search"
+                value={refQuery}
+                onChange={(event) => setRefQuery(event.target.value)}
+                placeholder="筛选书库论文（挂载其精读与批注）…"
+                aria-label="筛选参考书库论文"
+              />
+              {referenceKeys.length ? (
+                <button type="button" onClick={() => setReferenceKeys([])}>
+                  清空
+                </button>
+              ) : null}
+            </div>
+            <ul className="latex-ai-refs-list">
+              {filteredDocuments.slice(0, 30).map((doc) => {
+                const checked = referenceKeys.includes(doc.id);
+                const disabled = !checked && referenceKeys.length >= 6;
+                return (
+                  <li key={doc.id}>
+                    <label className={checked ? 'checked' : undefined}>
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={disabled}
+                        onChange={() => toggleReference(doc.id)}
+                      />
+                      <span>{doc.title || doc.key}</span>
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+            <p className="latex-ai-refs-hint">
+              已选文献的五步精读、批注和 BibTeX 键会随提问传给助手，方便起草 Related Work 或对比表。
+            </p>
+          </div>
+        </details>
+      ) : null}
       <ChatWorkspace
         documentKey={chatKey}
         title={projectTitle}
@@ -578,13 +732,25 @@ export function LatexAIAssistant({
         trackDocumentStatus={false}
         supportsImages={false}
         welcomeHeading="和 AI 一起写论文"
-        welcomeQuestions={[
-          '检查当前 LaTeX 源码中的错误，并给出修复建议。',
-          '帮我润色这一段论文文字，保留原意并返回 LaTeX。',
-          '为当前章节补充一个结构清晰的写作提纲。',
-        ]}
+        welcomeQuestions={
+          referenceKeys.length
+            ? [
+                '基于已选书库文献的精读与批注，为当前章节起草一段 Related Work 并插入 \\cite{}。',
+                '把已选书库文献的方法与实验配置整理成一张 LaTeX booktabs 对比表。',
+                '检查当前 LaTeX 源码中的错误，并给出修复建议。',
+              ]
+            : [
+                '检查当前 LaTeX 源码中的错误，并给出修复建议。',
+                '帮我润色这一段论文文字，保留原意并返回 LaTeX。',
+                '为当前章节补充一个结构清晰的写作提纲。',
+              ]
+        }
         onApplyEdit={onApplyFix}
-        composerHint="发送修改要求，确认对话中的卡片后保存"
+        composerHint={
+          referenceKeys.length
+            ? `已挂载 ${referenceKeys.length} 篇书库精读资料；确认修改卡片后保存`
+            : '发送修改要求，确认对话中的卡片后保存'
+        }
       />
       {confirmDialog.node}
     </aside>

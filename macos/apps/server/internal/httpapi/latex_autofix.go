@@ -77,6 +77,17 @@ func (s *Server) handleLatexSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleLatexSnapshotDiff 返回快照与当前项目源码的逐文件对比。
+func (s *Server) handleLatexSnapshotDiff(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	result, err := s.latexService().DiffSnapshot(r.Context(), id)
+	if err != nil {
+		writeLatexError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 type latexAutoFixRequest struct {
 	ProjectID    string `json:"projectId"`
 	ProjectTitle string `json:"projectTitle"`

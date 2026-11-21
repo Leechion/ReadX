@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { GlobalWorkerOptions, getDocument, type PDFDocumentProxy } from 'pdfjs-dist';
 import workerURL from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import type { TextContent } from 'pdfjs-dist/types/src/display/api';
+import type { SyncTeXBox } from '@cbct/shared';
 
 // 与阅读器用同一个 pdfjs-dist 与同一个 worker 资源：
 // 复用「渲染并查找 PDF」这项能力，但不把阅读器的标注/译文状态带进 LaTeX 工作区。
@@ -24,6 +25,8 @@ export interface LatexPdfPreviewProps {
   buildId: string | null;
   /** 取字节流的函数（带认证）。 */
   load: (buildId: string) => Promise<ArrayBuffer>;
+  syncTarget?: { page: number; boxes: SyncTeXBox[]; nonce: number } | null;
+  onReverseSync?: (page: number, x: number, y: number) => void;
   onDownload: () => void;
   onError: (message: string) => void;
 }
@@ -86,7 +89,7 @@ function findHitsInPage(content: TextContent, needle: string, pageNumber: number
  *   - **加载中/失败都有明确状态**，不留空白让人以为没产物；
  *   - **查找如实报数**：扫描进度、扫不出来的页数都显示出来，不把「没扫到」说成「没有」。
  */
-export function LatexPdfPreview({ buildId, load, onDownload, onError }: LatexPdfPreviewProps) {
+export function LatexPdfPreview({ buildId, load, syncTarget = null, onReverseSync, onDownload, onError }: LatexPdfPreviewProps) {
   const stage = useRef<HTMLDivElement>(null);
   const pageElements = useRef(new Map<number, HTMLDivElement>());
   const document_ = useRef<PDFDocumentProxy | null>(null);
@@ -234,6 +237,13 @@ export function LatexPdfPreview({ buildId, load, onDownload, onError }: LatexPdf
     if (status === 'ready') handleScroll();
   }, [handleScroll, pages, status, zoom]);
 
+  useEffect(() => {
+    if (!syncTarget || status !== 'ready') return;
+    const targetPage = Math.min(Math.max(syncTarget.page, 1), Math.max(pages, 1));
+    setPage(targetPage);
+    pageElements.current.get(targetPage)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  }, [pages, status, syncTarget]);
+
   const hitLabel = useMemo(() => {
     if (scan) return `扫描 ${scan.done}/${scan.total} 页…`;
     if (!query.trim()) return '';
@@ -301,6 +311,7 @@ export function LatexPdfPreview({ buildId, load, onDownload, onError }: LatexPdf
         <button type="button" onClick={onDownload} title="下载 PDF">
           下载
         </button>
+        {onReverseSync ? <span className="latex-preview-sync-hint">双击页面跳回源码</span> : null}
       </div>
       <div className="latex-preview-stage" ref={stage} onScroll={handleScroll}>
         {status === 'loading' ? <p className="latex-preview-note">正在载入 PDF…</p> : null}
@@ -317,6 +328,8 @@ export function LatexPdfPreview({ buildId, load, onDownload, onError }: LatexPdf
                   zoom={zoom}
                   hits={hitsByPage.get(pageNumber) ?? EMPTY_HITS}
                   activeHit={activeHit?.page === pageNumber ? activeHit : undefined}
+                  syncBoxes={syncTarget?.page === pageNumber ? syncTarget.boxes : EMPTY_SYNC_BOXES}
+                  onReverseSync={onReverseSync}
                   register={(element) => {
                     if (element) pageElements.current.set(pageNumber, element);
                     else pageElements.current.delete(pageNumber);
@@ -332,6 +345,7 @@ export function LatexPdfPreview({ buildId, load, onDownload, onError }: LatexPdf
 }
 
 const EMPTY_HITS: Hit[] = [];
+const EMPTY_SYNC_BOXES: SyncTeXBox[] = [];
 
 function LatexPdfPage({
   pdf,
@@ -340,6 +354,8 @@ function LatexPdfPage({
   zoom,
   hits,
   activeHit,
+  syncBoxes,
+  onReverseSync,
   register,
   onError,
 }: {
@@ -349,11 +365,14 @@ function LatexPdfPage({
   zoom: number;
   hits: Hit[];
   activeHit?: Hit;
+  syncBoxes: SyncTeXBox[];
+  onReverseSync?: (page: number, x: number, y: number) => void;
   register: (element: HTMLDivElement | null) => void;
   onError: (message: string) => void;
 }) {
   const slot = useRef<HTMLDivElement>(null);
   const canvasHost = useRef<HTMLDivElement>(null);
+  const baseSize = useRef<{ width: number; height: number } | null>(null);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
   const [nearViewport, setNearViewport] = useState(false);
@@ -383,6 +402,7 @@ function LatexPdfPage({
         const target = await pdf.getPage(page);
         if (cancelled) return;
         const base = target.getViewport({ scale: 1 });
+        baseSize.current = { width: base.width, height: base.height };
         setRatio(base.height / base.width);
         const scale = (width / base.width) * zoom;
         const viewport = target.getViewport({ scale });
@@ -407,6 +427,21 @@ function LatexPdfPage({
             );
           }
         }
+        if (syncBoxes.length) {
+          context.save();
+          context.fillStyle = 'rgba(47, 111, 89, 0.24)';
+          context.strokeStyle = 'rgba(47, 111, 89, 0.85)';
+          context.lineWidth = Math.max(1.5, scaleRatio * 1.1);
+          for (const box of syncBoxes) {
+            const bx = box.x * scaleRatio;
+            const by = box.y * scaleRatio;
+            const bw = Math.max(box.width * scaleRatio, 10);
+            const bh = Math.max(box.height * scaleRatio, 8);
+            context.fillRect(bx, by, bw, bh);
+            context.strokeRect(bx, by, bw, bh);
+          }
+          context.restore();
+        }
         host.replaceChildren(canvas);
       } catch (cause) {
         const name = cause instanceof Error ? cause.name : '';
@@ -419,7 +454,7 @@ function LatexPdfPage({
       cancelled = true;
       task?.cancel();
     };
-  }, [activeHit, hits, nearViewport, page, pdf, width, zoom]);
+  }, [activeHit, hits, nearViewport, page, pdf, syncBoxes, width, zoom]);
 
   const displayWidth = width * zoom;
   return (
@@ -432,6 +467,15 @@ function LatexPdfPage({
       }}
       style={{ width: displayWidth, aspectRatio: `1 / ${ratio}` }}
       aria-label={`第 ${page} 页`}
+      onDoubleClick={(event) => {
+        const canvas = canvasHost.current?.querySelector('canvas');
+        if (!canvas || !baseSize.current || !onReverseSync) return;
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return;
+        const x = ((event.clientX - rect.left) / rect.width) * baseSize.current.width;
+        const y = ((event.clientY - rect.top) / rect.height) * baseSize.current.height;
+        onReverseSync(page, x, y);
+      }}
     >
       <div className="latex-pdf-page-canvas" ref={canvasHost} />
     </div>

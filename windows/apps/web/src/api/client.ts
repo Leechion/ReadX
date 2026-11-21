@@ -7,6 +7,7 @@ import type {
   LatexBuild,
   LatexAutoFixEvent,
   LatexBuildsResponse,
+  LatexCiteLibraryResult,
   LatexDiagnostic,
   LatexFileContent,
   LatexFileOp,
@@ -23,6 +24,8 @@ import type {
   MetaResponse,
   PageListResponse,
   PageText,
+  SyncTeXForwardResult,
+  SyncTeXLocation,
   WireStatus,
 } from '@cbct/shared';
 import { isApiFailure } from '@cbct/shared';
@@ -349,7 +352,7 @@ export async function streamLatexRealtime(
 }
 
 export function streamLatexChat(
-  request: { key: string; projectId: string; projectTitle: string; filePath: string; source: string; question: string; history?: Array<{ role: string; text: string }> },
+  request: { key: string; projectId: string; projectTitle: string; filePath: string; source: string; question: string; referenceKeys?: string[]; history?: Array<{ role: string; text: string }> },
   onChunk: (chunk: ChatChunk) => void,
   signal?: AbortSignal,
 ): Promise<void> {
@@ -424,6 +427,63 @@ export async function streamPresentationPlan(input: PresentationPlanInput, onChu
     onChunk(chunk);
     return terminal;
   }, 'baoyu-slide-deck 页面规划连接中断。');
+}
+
+export async function streamPresentationComparePlan(
+  paperKeys: string[],
+  templateContext: string | undefined,
+  onChunk: (chunk: ChatChunk) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetchSSE('/v1/ai/presentation-compare-plan', { paperKeys, templateContext }, signal);
+  await consumeSSE<ChatChunk>(response, '多篇对比 PPT 没有返回页面规划。', (chunk) => {
+    const terminal = Boolean(chunk.done || chunk.error);
+    onChunk(chunk);
+    return terminal;
+  }, '多篇对比 PPT 页面规划连接中断。');
+}
+
+export interface LibraryChatSource {
+  key: string;
+  title: string;
+  year?: number;
+  pages: number[];
+}
+
+export interface LibraryChatChunk {
+  meta?: {
+    scope: string;
+    sources: LibraryChatSource[];
+    coverage: SearchCoverage;
+    provider?: string;
+    model?: string;
+    reasoningEffort?: string;
+  };
+  delta?: string;
+  done?: boolean;
+  text?: string;
+  sources?: LibraryChatSource[];
+  error?: string;
+  partial?: string;
+}
+
+export async function streamLibraryChat(
+  requestBody: {
+    question: string;
+    scope?: 'all' | 'category' | 'keys';
+    category?: string;
+    keys?: string[];
+    history?: Array<{ role: string; text: string }>;
+  },
+  onChunk: (chunk: LibraryChatChunk) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetchSSE('/v1/ai/library-chat', requestBody, signal);
+  await consumeSSE<LibraryChatChunk>(response, '跨文献问答没有返回数据。', (chunk) => {
+    const terminal = Boolean(chunk.done || chunk.error);
+    onChunk(chunk);
+    return terminal;
+  }, '跨文献问答连接中断。');
 }
 
 export interface Annotation {
@@ -694,6 +754,8 @@ export interface KnowledgeGraphResponse {
 }
 
 export interface AnnotationRect { x: number; y: number; width: number; height: number }
+export interface AnnotationPoint { x: number; y: number }
+export interface AnnotationStroke { points: AnnotationPoint[]; width?: number }
 export interface AnnotationLocator {
   kind: 'pdf' | 'epub';
   href?: string;
@@ -703,6 +765,126 @@ export interface AnnotationLocator {
   endOffset?: number;
   rects?: AnnotationRect[];
   noteRect?: AnnotationRect;
+  strokes?: AnnotationStroke[];
+}
+
+export interface FlashcardSchedule {
+  repetitions: number;
+  intervalDays: number;
+  easeFactor: number;
+  dueAt: string;
+  lastReviewedAt: string;
+}
+
+export interface Flashcard {
+  id: string;
+  source: 'glossary' | 'reading' | 'annotation';
+  documentKey?: string;
+  documentTitle?: string;
+  page?: number;
+  front: string;
+  back: string;
+  tags: string[];
+  due: boolean;
+  schedule?: FlashcardSchedule;
+}
+
+export interface FlashcardsResponse {
+  cards: Flashcard[];
+  total: number;
+  dueCount: number;
+}
+
+export interface OCRRegionResult {
+  detectedKind: 'formula' | 'table' | 'text' | string;
+  latex: string;
+  markdown: string;
+}
+
+export interface PodcastSegment {
+  heading: string;
+  text: string;
+}
+
+export interface PodcastScriptResponse {
+  key: string;
+  title: string;
+  segments: PodcastSegment[];
+}
+
+export interface LatexSnapshotFileDiff {
+  path: string;
+  status: 'modified' | 'added' | 'deleted';
+  before?: string;
+  after?: string;
+  binary?: boolean;
+  tooBig?: boolean;
+}
+
+export interface LatexSnapshotDiffResult {
+  snapshot: LatexSnapshot;
+  files: LatexSnapshotFileDiff[];
+}
+
+export interface LatexGitFileChange {
+  path: string;
+  indexStatus: string;
+  worktreeStatus: string;
+  summary: string;
+}
+
+export interface LatexGitStatus {
+  available: boolean;
+  initialized: boolean;
+  branch: string;
+  remoteUrl: string;
+  clean: boolean;
+  ahead: number;
+  behind: number;
+  lastCommit: string;
+  changes: LatexGitFileChange[];
+  message?: string;
+}
+
+export interface LatexGitSyncResult {
+  committed: boolean;
+  pulled: boolean;
+  pushed: boolean;
+  branch: string;
+  output: string;
+  status: LatexGitStatus;
+}
+
+export interface SyncConflictNoteSnapshot {
+  id: string;
+  documentKey: string;
+  page: number | null;
+  kind: string;
+  quote: string;
+  note: string;
+  color: string;
+  tags: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SyncConflictPair {
+  conflictId: string;
+  originalId: string;
+  documentKey: string;
+  documentTitle: string;
+  conflict: SyncConflictNoteSnapshot;
+  original: SyncConflictNoteSnapshot | null;
+}
+
+export interface LANShareStatus {
+  active: boolean;
+  port?: number;
+  token?: string;
+  urls?: string[];
+  docCount?: number;
+  startedAt?: string;
+  expiresAt?: string;
 }
 export interface EPUBSection {
   index: number;
@@ -992,6 +1174,8 @@ export interface SearchCoverage {
 
 export interface SearchResponse {
   query: string;
+  mode?: 'phrase' | 'terms';
+  engine?: 'fts5' | 'exact';
   hits: SearchHit[];
   matches: number;
   documents: number;
@@ -1355,11 +1539,15 @@ export const api = {
       `/v1/citations/preview${citationQuery(params)}`,
       { signal },
     ),
-  /** 全库全文检索：逐字匹配逐页正文，覆盖度随结果一起返回。 */
-  search: (query: string, signal?: AbortSignal) =>
-    request<SearchResponse>(`/v1/search?q=${encodeURIComponent(query)}`, {
+  /** 全库全文检索：支持短语/多词模式与按书架过滤，覆盖度随结果一起返回。 */
+  search: (query: string, signal?: AbortSignal, options?: { mode?: 'phrase' | 'terms'; category?: string }) => {
+    const params = new URLSearchParams({ q: query });
+    if (options?.mode) params.set('mode', options.mode);
+    if (options?.category) params.set('category', options.category);
+    return request<SearchResponse>(`/v1/search?${params.toString()}`, {
       signal,
-    }),
+    });
+  },
   /** 下载书目文件（BibTeX / RIS）。跳过与导出的篇数从响应头读，界面如实提示。 */
   exportCitations: async (params: {
     format: CitationFormat;
@@ -1762,4 +1950,129 @@ export const api = {
     const blob = await response.blob();
     downloadBlob(blob, filename);
   },
+
+  /** 从书库文献生成 BibTeX 并写入项目 .bib 文件。 */
+  latexCiteLibrary: (projectId: string, keys: string[], bibFile?: string) =>
+    request<LatexCiteLibraryResult>(`/v1/latex/projects/${encodeURIComponent(projectId)}/cite-library`, {
+      method: 'POST',
+      body: bibFile ? { keys, bibFile } : { keys },
+    }),
+
+  /** SyncTeX 正向跳转：源码 file:line -> PDF 页与高亮矩形框。 */
+  latexSyncTeXForward: (buildId: string, file: string, line: number) =>
+    request<SyncTeXForwardResult>(
+      `/v1/latex/builds/${encodeURIComponent(buildId)}/synctex/forward?file=${encodeURIComponent(file)}&line=${encodeURIComponent(String(line))}`,
+    ),
+
+  /** SyncTeX 反向跳转：PDF 页与坐标 -> 源码 file:line。 */
+  latexSyncTeXReverse: (buildId: string, page: number, x: number, y: number) =>
+    request<SyncTeXLocation>(
+      `/v1/latex/builds/${encodeURIComponent(buildId)}/synctex/reverse?page=${encodeURIComponent(String(page))}&x=${encodeURIComponent(x.toFixed(2))}&y=${encodeURIComponent(y.toFixed(2))}`,
+    ),
+
+  /** PDF 截图局部区域识别为 LaTeX 公式 / 表格 / Markdown。 */
+  ocrRegion: (imageBase64: string, target: 'auto' | 'formula' | 'table' = 'auto') =>
+    request<OCRRegionResult>('/v1/ai/ocr-region', {
+      method: 'POST',
+      body: { imageBase64, target },
+    }),
+
+  /** 记忆闪卡列表（术语表 + 精读 + 批注）。 */
+  flashcards: (scope: 'all' | 'due' = 'all', key?: string) => {
+    const params = new URLSearchParams({ scope });
+    if (key) params.set('key', key);
+    return request<FlashcardsResponse>(`/v1/flashcards?${params.toString()}`);
+  },
+
+  /** 提交一次闪卡复习评分（SM-2）。 */
+  reviewFlashcard: (cardId: string, quality: 0 | 1 | 2 | 3) =>
+    request<{ cardId: string; schedule: FlashcardSchedule }>('/v1/flashcards/review', {
+      method: 'POST',
+      body: { cardId, quality },
+    }),
+
+  /** 导出 Anki TSV 或 Markdown 闪卡文件。 */
+  exportFlashcards: async (format: 'anki' | 'markdown', key?: string): Promise<void> => {
+    const params = new URLSearchParams({ format });
+    if (key) params.set('key', key);
+    const response = await authenticatedFetch(`/v1/flashcards/export?${params.toString()}`);
+    const blob = await response.blob();
+    downloadBlob(blob, format === 'anki' ? 'readx-flashcards-anki.tsv' : 'readx-flashcards.md');
+  },
+
+  /** 生成 2 分钟口语化论文速听播客讲稿。 */
+  podcastScript: (key: string) =>
+    request<PodcastScriptResponse>('/v1/ai/podcast-script', {
+      method: 'POST',
+      body: { key },
+    }),
+
+  /** 对比 LaTeX 快照与当前工作区源码差异。 */
+  latexSnapshotDiff: (snapshotId: string) =>
+    request<LatexSnapshotDiffResult>(`/v1/latex/snapshots/${encodeURIComponent(snapshotId)}/diff`),
+
+  /** LaTeX 项目 Git 版本管理。 */
+  latexGitStatus: (projectId: string) =>
+    request<LatexGitStatus>(`/v1/latex/projects/${encodeURIComponent(projectId)}/git/status`),
+  latexGitInit: (projectId: string, branch = 'main') =>
+    request<LatexGitStatus>(`/v1/latex/projects/${encodeURIComponent(projectId)}/git/init`, {
+      method: 'POST',
+      body: { branch },
+    }),
+  latexGitCommit: (projectId: string, message: string) =>
+    request<LatexGitStatus>(`/v1/latex/projects/${encodeURIComponent(projectId)}/git/commit`, {
+      method: 'POST',
+      body: { message },
+    }),
+  latexGitSetRemote: (projectId: string, remoteUrl: string) =>
+    request<LatexGitStatus>(`/v1/latex/projects/${encodeURIComponent(projectId)}/git/remote`, {
+      method: 'POST',
+      body: { remoteUrl },
+    }),
+  latexGitSync: (projectId: string, mode: 'pull' | 'push' | 'both' = 'both', commitMessage?: string) =>
+    request<LatexGitSyncResult>(`/v1/latex/projects/${encodeURIComponent(projectId)}/git/sync`, {
+      method: 'POST',
+      body: { mode, commitMessage: commitMessage || '' },
+    }),
+
+  /** 导出 Obsidian / Notion 兼容的双向链接 Markdown 知识库 ZIP。 */
+  exportMarkdownVault: async (opts?: { keys?: string[]; category?: string }): Promise<void> => {
+    const params = new URLSearchParams();
+    if (opts?.keys?.length) params.set('keys', opts.keys.join(','));
+    else if (opts?.category) params.set('category', opts.category);
+    const qs = params.toString();
+    const response = await authenticatedFetch(`/v1/export/markdown-vault${qs ? `?${qs}` : ''}`);
+    const blob = await response.blob();
+    downloadBlob(blob, opts?.category ? `ReadX-${opts.category}-vault.zip` : 'ReadX-obsidian-vault.zip');
+  },
+
+  /** 列出并解决跨设备同步产生的批注冲突。 */
+  syncConflicts: () => request<{ conflicts: SyncConflictPair[]; total: number }>('/v1/sync/conflicts'),
+  resolveSyncConflict: (payload: {
+    conflictId: string;
+    originalId: string;
+    decision: 'keep_original' | 'keep_conflict' | 'keep_both' | 'custom';
+    mergedNote?: string;
+    mergedColor?: string;
+  }) =>
+    request<{ resolved: boolean; decision: string }>('/v1/sync/conflicts/resolve', {
+      method: 'POST',
+      body: payload,
+    }),
+
+  /** 局域网平板/手机伴侣只读服务控制。 */
+  lanShareStatus: () => request<LANShareStatus>('/v1/shares/lan'),
+  startLANShare: (payload: {
+    keys: string[];
+    includeOriginal: boolean;
+    includeNotes: boolean;
+    includeReadings: boolean;
+    includeIdeas: boolean;
+    includeComparisons: boolean;
+  }) =>
+    request<LANShareStatus>('/v1/shares/lan', {
+      method: 'POST',
+      body: payload,
+    }),
+  stopLANShare: () => request<LANShareStatus>('/v1/shares/lan', { method: 'DELETE' }),
 };

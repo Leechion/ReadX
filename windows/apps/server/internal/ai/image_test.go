@@ -262,3 +262,51 @@ func TestGenerateWithImageReportsTimeout(t *testing.T) {
 		t.Fatalf("超时应给出可重试的提示，实际 %v", err)
 	}
 }
+
+func TestGenerateWithImageFallsBackToStreamWhenNonStreamNotSupported(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if r.URL.Path != "/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&payload)
+		if payload["stream"] != true {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprint(w, `{"code":11101,"msg":"Non-stream chat request is currently not supported","requestId":"test-ocr-req"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: "+`{"choices":[{"delta":{"content":"{\"detectedKind\":\"formula\",\"latex\":\"E=mc^2\",\"markdown\":\"$$E=mc^2$$\"}"}}]}`+"\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := Config{BaseURL: server.URL, APIKey: "sk-test", Model: "stream-vision-model"}
+	client := NewClient(cfg)
+	res, err := client.GenerateWithImage(context.Background(), "SYS", "识别公式", visionImage(), 0, 5*time.Second)
+	if err != nil {
+		t.Fatalf("遇到 11101 非流式错误时 GenerateWithImage 应自动流式重试并成功: %v", err)
+	}
+	if !strings.Contains(res, "E=mc^2") {
+		t.Fatalf("返回内容不符: %q", res)
+	}
+	if calls != 2 {
+		t.Fatalf("首次调用应经历 1 次非流式探测 + 1 次流式重试，实际 calls=%d", calls)
+	}
+
+	// 第二次调用直接命中流式
+	calls = 0
+	res2, err := client.GenerateWithImage(context.Background(), "SYS", "识别公式2", visionImage(), 0, 5*time.Second)
+	if err != nil {
+		t.Fatalf("后续请求应直接成功: %v", err)
+	}
+	if !strings.Contains(res2, "E=mc^2") {
+		t.Fatalf("后续请求返回内容不符: %q", res2)
+	}
+	if calls != 1 {
+		t.Fatalf("后续调用应直接发起 1 次流式，不再产生非流式失败探测，实际 calls=%d", calls)
+	}
+}

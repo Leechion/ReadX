@@ -241,3 +241,38 @@ export interface LatexAutoFixEvent {
   done?: boolean;
   result?: LatexAutoFixResult;
 }
+
+/** SyncTeX 正向跳转返回的 PDF 区域（PDF pt，左上角原点）。 */
+export interface SyncTeXBox {
+  page: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SyncTeXForwardResult {
+  file: string;
+  line: number;
+  page: number;
+  exact: boolean;
+  boxes: SyncTeXBox[];
+}
+
+export interface SyncTeXLocation {
+  file: string;
+  line: number;
+  column: number;
+  page: number;
+}
+
+/** 从 ReadX 书库批量写入项目 .bib 文件的结果。 */
+export interface LatexCiteLibraryResult {
+  bibFile: string;
+  keys: string[];
+  inserted: string[];
+  alreadyPresent: string[];
+  skipped: number;
+  revision: string;
+  bibTeX: string;
+}

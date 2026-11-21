@@ -52,10 +52,12 @@ type chatRequest struct {
 type chatChoice struct {
 	FinishReason string `json:"finish_reason"`
 	Delta        struct {
-		Content string `json:"content"`
+		Content          string `json:"content"`
+		ReasoningContent string `json:"reasoning_content"`
 	} `json:"delta"`
 	Message struct {
-		Content string `json:"content"`
+		Content          string `json:"content"`
+		ReasoningContent string `json:"reasoning_content"`
 	} `json:"message"`
 }
 
@@ -293,16 +295,59 @@ func (c *Client) GenerateStructuredWithTimeout(ctx context.Context, system, user
 	return c.generateWithTimeout(ctx, system, user, temperature, timeout, responseFormat)
 }
 
+var streamingRequiredModels sync.Map // key: strings.ToLower(baseURL + "#" + model) -> bool
+
+func (c *Client) streamCacheKey() string {
+	return strings.ToLower(strings.TrimSpace(c.cfg.BaseURL) + "#" + strings.TrimSpace(c.cfg.ModelName()))
+}
+
+func (c *Client) requiresStreaming() bool {
+	key := c.streamCacheKey()
+	if val, ok := streamingRequiredModels.Load(key); ok && val == true {
+		return true
+	}
+	base := strings.ToLower(c.cfg.BaseURL)
+	if strings.Contains(base, "moonshot.cn") {
+		model := strings.ToLower(c.cfg.ModelName())
+		if strings.Contains(model, "kimi-k1.5") || strings.Contains(model, "vision") || strings.Contains(model, "kimi-latest") {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *Client) markRequiresStreaming() {
+	key := c.streamCacheKey()
+	streamingRequiredModels.Store(key, true)
+}
+
+func isNonStreamUnsupportedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "11101") {
+		return true
+	}
+	if strings.Contains(msg, "non-stream") && (strings.Contains(msg, "not supported") || strings.Contains(msg, "unsupported") || strings.Contains(msg, "disabled") || strings.Contains(msg, "disallowed")) {
+		return true
+	}
+	if strings.Contains(msg, "stream") && (strings.Contains(msg, "only") || strings.Contains(msg, "required") || strings.Contains(msg, "must be true") || strings.Contains(msg, "is not supported")) {
+		return true
+	}
+	return false
+}
+
 func (c *Client) generateWithTimeout(ctx context.Context, system, user string, temperature float64, timeout time.Duration, responseFormat any) (string, error) {
 	if timeout <= 0 {
 		timeout = RequestTimeout
 	}
 	timeout = c.operationTimeout(timeout)
+	if c.cfg.ProviderName() != "openai" || c.requiresStreaming() {
+		return c.StreamWithTimeout(ctx, []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}, temperature, nil, timeout)
+	}
 	requestCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	if c.cfg.ProviderName() != "openai" {
-		return c.StreamWithTimeout(requestCtx, []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}, temperature, nil, timeout)
-	}
 	payload := chatRequest{
 		Model: c.cfg.ModelName(),
 		Messages: []Message{
@@ -314,6 +359,10 @@ func (c *Client) generateWithTimeout(ctx context.Context, system, user string, t
 	}
 	response, err := c.post(requestCtx, payload, timeout)
 	if err != nil {
+		if isNonStreamUnsupportedError(err) {
+			c.markRequiresStreaming()
+			return c.StreamWithTimeout(ctx, []Message{{Role: "system", Content: system}, {Role: "user", Content: user}}, temperature, nil, timeout)
+		}
 		return "", err
 	}
 	defer response.Body.Close()
@@ -343,7 +392,7 @@ func (c *Client) generateWithTimeout(ctx context.Context, system, user string, t
 
 // Stream 流式对话：onDelta 收到每个增量，返回完整文本。
 //
-// 与旧版一致的两条硬约束：finish_reason 不是 stop 视为失败；流中断时不返回成功——
+// 与旧版一致的两条硬约束：finish_reason 不是 stop/eos 视为失败；流中断时不返回成功——
 // 半个回答比没有回答更危险。
 func (c *Client) Stream(ctx context.Context, messages []Message, temperature float64, onDelta func(string)) (string, error) {
 	return c.StreamWithTimeout(ctx, messages, temperature, onDelta, RequestTimeout)
@@ -364,20 +413,28 @@ func (c *Client) StreamWithTimeout(ctx context.Context, messages []Message, temp
 	if c.cfg.ProviderName() == "anthropic" {
 		return c.streamAnthropic(ctx, messages, temperature, onDelta)
 	}
-	response, err := c.post(ctx, chatRequest{
+	return c.streamRawOpenAI(ctx, chatRequest{
 		Model:       c.cfg.ModelName(),
 		Messages:    messages,
 		Stream:      true,
 		Temperature: temperature,
-	}, timeout)
+	}, timeout, onDelta)
+}
+
+func (c *Client) streamRawOpenAI(ctx context.Context, payload any, timeout time.Duration, onDelta func(string)) (string, error) {
+	response, err := c.postRaw(ctx, payload, timeout)
 	if err != nil {
 		return "", err
 	}
 	defer response.Body.Close()
+	return c.readOpenAISSE(ctx, response.Body, onDelta)
+}
 
+func (c *Client) readOpenAISSE(ctx context.Context, r io.Reader, onDelta func(string)) (string, error) {
 	var full strings.Builder
+	var reasoningBuilder strings.Builder
 	completed := false
-	scanner := bufio.NewScanner(response.Body)
+	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -389,6 +446,14 @@ func (c *Client) StreamWithTimeout(ctx context.Context, messages []Message, temp
 			completed = true
 			break
 		}
+		var errPayload struct {
+			Error struct {
+				Message string `json:"message"`
+			} `json:"error"`
+		}
+		if json.Unmarshal([]byte(payload), &errPayload) == nil && errPayload.Error.Message != "" {
+			return full.String(), fmt.Errorf("接口返回错误：%s", errPayload.Error.Message)
+		}
 		var chunk chatChunk
 		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
 			continue
@@ -398,17 +463,26 @@ func (c *Client) StreamWithTimeout(ctx context.Context, messages []Message, temp
 		}
 		choice := chunk.Choices[0]
 		if choice.FinishReason != "" {
-			if choice.FinishReason == "stop" {
+			switch choice.FinishReason {
+			case "stop", "eos", "end_turn", "stop_sequence":
 				completed = true
-			} else {
+			default:
 				return full.String(), fmt.Errorf("生成未完成（%s），未保存，请重试。", choice.FinishReason)
 			}
 		}
-		if choice.Delta.Content != "" {
-			full.WriteString(choice.Delta.Content)
+		content := choice.Delta.Content
+		if content == "" {
+			content = choice.Message.Content
+		}
+		if content != "" {
+			full.WriteString(content)
 			if onDelta != nil {
-				onDelta(choice.Delta.Content)
+				onDelta(content)
 			}
+		} else if choice.Delta.ReasoningContent != "" {
+			reasoningBuilder.WriteString(choice.Delta.ReasoningContent)
+		} else if choice.Message.ReasoningContent != "" {
+			reasoningBuilder.WriteString(choice.Message.ReasoningContent)
 		}
 		if completed {
 			break
@@ -416,6 +490,9 @@ func (c *Client) StreamWithTimeout(ctx context.Context, messages []Message, temp
 	}
 	if err := scanner.Err(); err != nil && ctx.Err() == nil {
 		return full.String(), &transportError{err: fmt.Errorf("请求失败：%s", err.Error())}
+	}
+	if full.Len() == 0 && reasoningBuilder.Len() > 0 {
+		full.WriteString(reasoningBuilder.String())
 	}
 	if full.Len() == 0 {
 		return "", fmt.Errorf("（助教没有返回内容，检查 config.json 里的模型名是否正确）")

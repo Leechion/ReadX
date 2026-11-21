@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { api } from '../api/client';
+import { useCallback, useEffect, useState } from 'react';
+import { api, type SyncConflictPair } from '../api/client';
 import { AppDialog } from './AppDialog';
 import { captureBrowserBackup } from '../lib/browserBackup';
 
@@ -13,6 +13,18 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
   const [lastSync, setLastSync] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [conflicts, setConflicts] = useState<SyncConflictPair[]>([]);
+  const [customDrafts, setCustomDrafts] = useState<Record<string, string>>({});
+  const [resolvingId, setResolvingId] = useState('');
+
+  const refreshConflicts = useCallback(async () => {
+    try {
+      const data = await api.syncConflicts();
+      setConflicts(data.conflicts ?? []);
+    } catch {
+      // Ignore conflict fetch failure when settings dialog initializes
+    }
+  }, []);
   const backup = async (action: 'create' | 'restore') => {
     if (busy || !window.__READX_BACKUP__) return;
     setBusy(true);
@@ -42,8 +54,9 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
     }).catch((cause) => {
       if (active) setNotice(cause instanceof Error ? cause.message : String(cause));
     });
+    void refreshConflicts();
     return () => { active = false; };
-  }, []);
+  }, [refreshConflicts]);
 
   const chooseFolder = async () => {
     try {
@@ -113,6 +126,7 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
       if (provider === 'jianguoyun') await window.__READX_SYNC__?.setNutstorePassword(password);
       setLastSync(result.lastSync);
       setNotice(`同步完成：${result.documents} 篇文档、${result.readingPositions} 条阅读位置、${result.annotations} 条笔记。`);
+      await refreshConflicts();
       window.dispatchEvent(new Event('readx-sync-complete'));
       onSyncComplete();
     } catch (cause) {
@@ -174,6 +188,69 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
           {lastSync ? <p className="ai-hint">上次同步：{new Date(lastSync).toLocaleString()}</p> : null}
           {notice ? <p role="status" className={`ai-result${notice.includes('完成') || notice.includes('连接') ? ' ok' : ''}`}>{notice}</p> : null}
         </section>
+        {conflicts.length > 0 ? (
+          <section className="ai-card sync-conflicts-card">
+            <header>待合并的跨设备批注冲突（{conflicts.length}）</header>
+            <p className="ai-hint">多台设备同时修改同一条批注时会自动保留冲突副本；请对比两侧内容并选择保留策略或手动合并。</p>
+            <div className="sync-conflict-list">
+              {conflicts.map((pair) => {
+                const draft = customDrafts[pair.conflictId] ?? [pair.original?.note, pair.conflict.note].filter(Boolean).join('\n---\n');
+                const resolving = resolvingId === pair.conflictId;
+                const resolveWith = async (decision: 'keep_original' | 'keep_conflict' | 'keep_both' | 'custom') => {
+                  setResolvingId(pair.conflictId);
+                  try {
+                    await api.resolveSyncConflict({
+                      conflictId: pair.conflictId,
+                      originalId: pair.originalId,
+                      decision,
+                      ...(decision === 'custom' ? { mergedNote: draft } : {}),
+                    });
+                    await refreshConflicts();
+                    onSyncComplete();
+                  } catch (cause) {
+                    setNotice(cause instanceof Error ? cause.message : String(cause));
+                  } finally {
+                    setResolvingId('');
+                  }
+                };
+                return (
+                  <article key={pair.conflictId} className="sync-conflict-item">
+                    <div className="sync-conflict-head">
+                      <strong>{pair.documentTitle || pair.documentKey}</strong>
+                      <span>{pair.conflict.page ? `第 ${pair.conflict.page} 页` : '文档批注'}</span>
+                    </div>
+                    {pair.conflict.quote ? <blockquote className="sync-conflict-quote">{pair.conflict.quote}</blockquote> : null}
+                    <div className="sync-conflict-columns">
+                      <div>
+                        <span className="sync-conflict-label">原版本 {pair.original ? `(${new Date(pair.original.updatedAt).toLocaleString()})` : '（已删除）'}</span>
+                        <p>{pair.original?.note || '（无文字内容）'}</p>
+                      </div>
+                      <div>
+                        <span className="sync-conflict-label">冲突副本 ({new Date(pair.conflict.updatedAt).toLocaleString()})</span>
+                        <p>{pair.conflict.note || '（无文字内容）'}</p>
+                      </div>
+                    </div>
+                    <textarea
+                      rows={3}
+                      value={draft}
+                      disabled={resolving || busy}
+                      onChange={(e) => setCustomDrafts((prev) => ({ ...prev, [pair.conflictId]: e.target.value }))}
+                      aria-label="自定义合并批注内容"
+                    />
+                    <div className="sync-conflict-actions">
+                      {pair.original ? (
+                        <button type="button" disabled={resolving || busy} onClick={() => void resolveWith('keep_original')}>仅保留原版</button>
+                      ) : null}
+                      <button type="button" disabled={resolving || busy} onClick={() => void resolveWith('keep_conflict')}>采用冲突副本</button>
+                      <button type="button" disabled={resolving || busy} onClick={() => void resolveWith('keep_both')}>两条都保留</button>
+                      <button type="button" className="ai-save-button" disabled={resolving || busy} onClick={() => void resolveWith('custom')}>保存合并文本</button>
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          </section>
+        ) : null}
       </div>
       <footer className="ai-settings-foot">
         <button type="button" className="ai-save-button" disabled={busy} onClick={onClose}>完成</button>

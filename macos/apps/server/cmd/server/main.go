@@ -134,6 +134,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	apiServer := httpapi.New(cfg, handle)
 	defer apiServer.CloseRealtime()
+	defer apiServer.CloseCompanion()
 	httpServer := &http.Server{
 		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -205,6 +206,7 @@ func run(args []string, stdin io.Reader, stdout io.Writer) error {
 
 	shutdownStart := time.Now()
 	apiServer.CloseRealtime()
+	apiServer.CloseCompanion()
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {

@@ -16,7 +16,7 @@ import { api, type Annotation, type NewAnnotation } from '../api/client';
 import { findMatchRanges, normalizeFindTextWithOffsets } from '../lib/findMatches';
 import { pdfPageLinks, pdfReferenceTargets, resolvePDFDestination, textCitationLinks, type PDFLinkTarget, type PDFLocation, type PDFSourceLink } from '../lib/pdfReferences';
 import { MarginNote } from './MarginNote';
-import type { AnnotationRect } from '../api/client';
+import type { AnnotationRect, AnnotationStroke } from '../api/client';
 
 GlobalWorkerOptions.workerSrc = workerURL;
 export type PDFOutline = PaperHeading;
@@ -408,6 +408,10 @@ export function PDFDocumentView({
   onZoomChange,
   onMarginNoteEdit,
   onMarginNoteGeometry,
+  toolMode = 'select',
+  inkColor = 'rose',
+  onRegionSnip,
+  onInkCommit,
 }: {
   document: PDFDocumentProxy;
   documentKey?: string;
@@ -429,6 +433,10 @@ export function PDFDocumentView({
   onZoomChange: (zoom: number) => void;
   onMarginNoteEdit?: (annotation: Annotation) => void;
   onMarginNoteGeometry?: (annotation: Annotation, rect: AnnotationRect) => Promise<void>;
+  toolMode?: 'select' | 'snip' | 'ink';
+  inkColor?: string;
+  onRegionSnip?: (data: { page: number; imageBase64: string }) => void;
+  onInkCommit?: (data: { page: number; strokes: AnnotationStroke[] }) => Promise<void> | void;
 }) {
   const root = useRef<HTMLDivElement>(null);
   const slots = useRef(new Map<number, HTMLDivElement>());
@@ -682,6 +690,10 @@ export function PDFDocumentView({
                   onAnnotationClick={onAnnotationClick}
                   onMarginNoteEdit={onMarginNoteEdit}
                   onMarginNoteGeometry={onMarginNoteGeometry}
+                  toolMode={toolMode}
+                  inkColor={inkColor}
+                  onRegionSnip={onRegionSnip}
+                  onInkCommit={onInkCommit}
                   continuousPage
                   scrollRoot={scrollRoot}
                   zoomLevel={zoom}
@@ -726,6 +738,10 @@ export function PDFPage({
   onSourceLink,
   onMarginNoteEdit,
   onMarginNoteGeometry,
+  toolMode = 'select',
+  inkColor = 'rose',
+  onRegionSnip,
+  onInkCommit,
 }: {
   document: PDFDocumentProxy;
   documentKey?: string;
@@ -745,6 +761,10 @@ export function PDFPage({
   onSourceLink?: (target: PDFLinkTarget) => void;
   onMarginNoteEdit?: (annotation: Annotation) => void;
   onMarginNoteGeometry?: (annotation: Annotation, rect: AnnotationRect) => Promise<void>;
+  toolMode?: 'select' | 'snip' | 'ink';
+  inkColor?: string;
+  onRegionSnip?: (data: { page: number; imageBase64: string }) => void;
+  onInkCommit?: (data: { page: number; strokes: AnnotationStroke[] }) => Promise<void> | void;
 }) {
   const [loadedParagraphLayout, setLoadedParagraphLayout] = useState<{ document: PDFDocumentProxy; page: number; layout: PDFLayout | null } | null>(null);
   const paragraphLayout = documentKey
@@ -763,6 +783,19 @@ export function PDFPage({
   const [renderedPage, setRenderedPage] = useState<number | null>(null);
   const [renderNonce, setRenderNonce] = useState(0);
   const [sourceLinks, setSourceLinks] = useState<PDFSourceLink[]>([]);
+  const [snipBox, setSnipBox] = useState<{ startX: number; startY: number; curX: number; curY: number } | null>(null);
+  const [inkDraft, setInkDraft] = useState<AnnotationStroke[]>([]);
+  const [activeStroke, setActiveStroke] = useState<AnnotationStroke | null>(null);
+  const [savingInk, setSavingInk] = useState(false);
+
+  useEffect(() => {
+    if (toolMode !== 'ink') {
+      setActiveStroke(null);
+    }
+    if (toolMode !== 'snip') {
+      setSnipBox(null);
+    }
+  }, [toolMode]);
   const [rendering, setRendering] = useState(true);
   const [error, setError] = useState('');
   const [hoveredRegion, setHoveredRegion] = useState<{ kind: 'paragraph' | 'visual'; index: number } | null>(null);
@@ -1096,7 +1129,29 @@ export function PDFPage({
                   );
                 })}
                 {pageAnnotations
-                  .filter((annotation) => annotation.kind !== 'highlight' && annotation.kind !== 'margin')
+                  .filter((annotation) => annotation.kind === 'ink' && annotation.locator?.strokes?.length)
+                  .map((annotation) => (
+                    <svg
+                      key={`ink-${annotation.id}`}
+                      data-annotation-id={annotation.id}
+                      className={`pdf-mark pdf-mark-ink ann-ink-${annotation.color}${focusedId === annotation.id ? ' ann-focused' : ''}`}
+                      viewBox="0 0 1 1"
+                      preserveAspectRatio="none"
+                    >
+                      {(annotation.locator?.strokes ?? []).map((stroke, sIdx) => (
+                        <polyline
+                          key={sIdx}
+                          fill="none"
+                          strokeWidth={stroke.width ?? 0.003}
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          points={stroke.points.map((pt) => `${pt.x},${pt.y}`).join(' ')}
+                        />
+                      ))}
+                    </svg>
+                  ))}
+                {pageAnnotations
+                  .filter((annotation) => annotation.kind !== 'highlight' && annotation.kind !== 'margin' && annotation.kind !== 'ink')
                   .flatMap((a) => mergePDFMarkRects(a.locator?.rects ?? []).map((rect, index) => (
                   <span
                     key={`${a.id}-${index}`}
@@ -1114,6 +1169,149 @@ export function PDFPage({
               </>;
             })()}
           </div>
+          {toolMode === 'snip' && onRegionSnip ? (
+            <div
+              className="pdf-snip-layer"
+              onPointerDown={(event) => {
+                event.stopPropagation();
+                const bounds = paper.current?.getBoundingClientRect();
+                if (!bounds) return;
+                event.currentTarget.setPointerCapture(event.pointerId);
+                const x = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
+                const y = Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height));
+                setSnipBox({ startX: x, startY: y, curX: x, curY: y });
+              }}
+              onPointerMove={(event) => {
+                if (!snipBox) return;
+                const bounds = paper.current?.getBoundingClientRect();
+                if (!bounds) return;
+                const x = Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width));
+                const y = Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height));
+                setSnipBox((cur) => (cur ? { ...cur, curX: x, curY: y } : null));
+              }}
+              onPointerUp={(event) => {
+                event.stopPropagation();
+                if (!snipBox) return;
+                const x = Math.min(snipBox.startX, snipBox.curX);
+                const y = Math.min(snipBox.startY, snipBox.curY);
+                const w = Math.abs(snipBox.curX - snipBox.startX);
+                const h = Math.abs(snipBox.curY - snipBox.startY);
+                setSnipBox(null);
+                if (w < 0.015 || h < 0.015 || !canvas.current) return;
+                const src = canvas.current;
+                const sx = Math.max(0, Math.floor(x * src.width));
+                const sy = Math.max(0, Math.floor(y * src.height));
+                const sw = Math.max(8, Math.min(src.width - sx, Math.ceil(w * src.width)));
+                const sh = Math.max(8, Math.min(src.height - sy, Math.ceil(h * src.height)));
+                const crop = window.document.createElement('canvas');
+                crop.width = sw;
+                crop.height = sh;
+                const ctx = crop.getContext('2d');
+                if (!ctx) return;
+                ctx.fillStyle = '#ffffff';
+                ctx.fillRect(0, 0, sw, sh);
+                ctx.drawImage(src, sx, sy, sw, sh, 0, 0, sw, sh);
+                onRegionSnip({ page, imageBase64: crop.toDataURL('image/png') });
+              }}
+            >
+              {snipBox ? (
+                <div
+                  className="pdf-snip-rect"
+                  style={{
+                    left: `${Math.min(snipBox.startX, snipBox.curX) * 100}%`,
+                    top: `${Math.min(snipBox.startY, snipBox.curY) * 100}%`,
+                    width: `${Math.abs(snipBox.curX - snipBox.startX) * 100}%`,
+                    height: `${Math.abs(snipBox.curY - snipBox.startY) * 100}%`,
+                  }}
+                />
+              ) : null}
+            </div>
+          ) : null}
+          {toolMode === 'ink' && onInkCommit ? (
+            <>
+              <svg
+                className={`pdf-ink-layer ann-ink-${inkColor}`}
+                viewBox="0 0 1 1"
+                preserveAspectRatio="none"
+                onPointerDown={(event) => {
+                  event.stopPropagation();
+                  const bounds = paper.current?.getBoundingClientRect();
+                  if (!bounds) return;
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  const x = Number(Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)).toFixed(4));
+                  const y = Number(Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height)).toFixed(4));
+                  setActiveStroke({ width: 0.0032, points: [{ x, y }, { x, y }] });
+                }}
+                onPointerMove={(event) => {
+                  if (!activeStroke) return;
+                  const bounds = paper.current?.getBoundingClientRect();
+                  if (!bounds) return;
+                  const x = Number(Math.min(1, Math.max(0, (event.clientX - bounds.left) / bounds.width)).toFixed(4));
+                  const y = Number(Math.min(1, Math.max(0, (event.clientY - bounds.top) / bounds.height)).toFixed(4));
+                  setActiveStroke((cur) => {
+                    if (!cur) return null;
+                    const last = cur.points[cur.points.length - 1];
+                    if (last && Math.hypot(x - last.x, y - last.y) < 0.0025) return cur;
+                    if (cur.points.length >= 480) return cur;
+                    return { ...cur, points: [...cur.points, { x, y }] };
+                  });
+                }}
+                onPointerUp={(event) => {
+                  event.stopPropagation();
+                  if (!activeStroke) return;
+                  const finalized = activeStroke;
+                  setActiveStroke(null);
+                  if (finalized.points.length >= 2) {
+                    setInkDraft((cur) => [...cur.slice(-79), finalized]);
+                  }
+                }}
+              >
+                {inkDraft.map((stroke, idx) => (
+                  <polyline
+                    key={idx}
+                    fill="none"
+                    strokeWidth={stroke.width ?? 0.0032}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    points={stroke.points.map((pt) => `${pt.x},${pt.y}`).join(' ')}
+                  />
+                ))}
+                {activeStroke ? (
+                  <polyline
+                    fill="none"
+                    strokeWidth={activeStroke.width ?? 0.0032}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    points={activeStroke.points.map((pt) => `${pt.x},${pt.y}`).join(' ')}
+                  />
+                ) : null}
+              </svg>
+              {inkDraft.length ? (
+                <div className="pdf-ink-actions" onMouseUp={(event) => event.stopPropagation()}>
+                  <span>第 {page} 页 · {inkDraft.length} 笔</span>
+                  <button type="button" disabled={savingInk} onClick={() => setInkDraft((cur) => cur.slice(0, -1))}>
+                    撤销
+                  </button>
+                  <button type="button" disabled={savingInk} onClick={() => setInkDraft([])}>
+                    清空
+                  </button>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={savingInk}
+                    onClick={() => {
+                      setSavingInk(true);
+                      void Promise.resolve(onInkCommit({ page, strokes: inkDraft }))
+                        .then(() => setInkDraft([]))
+                        .finally(() => setSavingInk(false));
+                    }}
+                  >
+                    {savingInk ? '保存中…' : '保存手写'}
+                  </button>
+                </div>
+              ) : null}
+            </>
+          ) : null}
           {onMarginNoteEdit && onMarginNoteGeometry && annotations.filter((item) => item.page === page && item.kind === 'margin' && item.locator?.kind === 'pdf' && item.locator.rects?.length).map((item) => <MarginNote key={item.id} item={item} focused={focusedId === item.id} fontSize={width * activeZoom * 0.022} pageAspect={paper.current?.clientHeight ? paper.current.clientWidth / paper.current.clientHeight : undefined} onEdit={onMarginNoteEdit} onGeometry={onMarginNoteGeometry} />)}
         </div>
       </div>

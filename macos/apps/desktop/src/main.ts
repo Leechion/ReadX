@@ -156,7 +156,17 @@ async function bootstrap(): Promise<void> {
 
   createWindow();
   void receiveBrowserCaptures();
-  setupLauncher();
+  // Defer the secondary Alt-wheel window & global hook until the main window is shown
+  // so two renderer processes do not compete for CPU/disk/IPC during cold start.
+  const initLauncherOnce = () => {
+    if (!stopping && !stopRequested && !launcher) setupLauncher();
+  };
+  if (mainWindow) {
+    mainWindow.once('ready-to-show', () => setTimeout(initLauncherOnce, 80));
+    setTimeout(initLauncherOnce, 400);
+  } else {
+    setupLauncher();
+  }
 
   app.on('window-all-closed', () => {
     if (process.platform !== 'darwin') app.quit();
@@ -187,7 +197,14 @@ function restoreMainWindow(): void {
   if (!mainWindow) return;
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
-  mainWindow.focus();
+  if (process.platform === 'win32') {
+    app.focus({ steal: true });
+    mainWindow.setAlwaysOnTop(true);
+    mainWindow.focus();
+    mainWindow.setAlwaysOnTop(false);
+  } else {
+    mainWindow.focus();
+  }
 }
 
 function setupLauncher(): void {
@@ -691,7 +708,7 @@ function scheduleWindowStateSave(window: BrowserWindow | null): void {
 function saveWindowState(window: BrowserWindow | null): void {
   if (!window || window.isDestroyed()) return;
   try {
-    const bounds = window.isMaximized() ? window.getNormalBounds() : window.getBounds();
+    const bounds = window.isMaximized() || window.isMinimized() ? window.getNormalBounds() : window.getBounds();
     const value: SavedWindowState = {
       bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
       maximized: window.isMaximized(),
@@ -770,10 +787,34 @@ function serverBinary(): string {
 
 function prepareServerRuntime(source: string): string {
   if (process.platform !== 'win32') return source;
+  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  const runtimeRoot = path.join(local, 'CBCTReading', 'runtime');
+  const cacheMetaPath = path.join(runtimeRoot, 'latest-runtime.json');
+  const stat = fs.statSync(source);
+  try {
+    const cached = JSON.parse(fs.readFileSync(cacheMetaPath, 'utf8')) as {
+      source?: string;
+      size?: number;
+      mtimeMs?: number;
+      target?: string;
+    };
+    if (
+      cached &&
+      cached.source === source &&
+      cached.size === stat.size &&
+      cached.mtimeMs === stat.mtimeMs &&
+      typeof cached.target === 'string' &&
+      fs.existsSync(cached.target)
+    ) {
+      return cached.target;
+    }
+  } catch {
+    // Recompute content hash on cache miss.
+  }
+
   const body = fs.readFileSync(source);
   const hash = createHash('sha256').update(body).digest('hex');
-  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
-  const dir = path.join(local, 'CBCTReading', 'runtime', hash);
+  const dir = path.join(runtimeRoot, hash);
   const target = path.join(dir, 'server.exe');
   fs.mkdirSync(dir, { recursive: true });
   if (!fs.existsSync(target)) {
@@ -784,6 +825,15 @@ function prepareServerRuntime(source: string): string {
     } finally {
       if (fs.existsSync(staging)) fs.unlinkSync(staging);
     }
+  }
+  try {
+    fs.writeFileSync(
+      cacheMetaPath,
+      JSON.stringify({ source, size: stat.size, mtimeMs: stat.mtimeMs, target }),
+      'utf8',
+    );
+  } catch {
+    // Cache metadata is optional.
   }
   return target;
 }

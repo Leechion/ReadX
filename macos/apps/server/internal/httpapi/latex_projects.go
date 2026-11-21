@@ -37,6 +37,10 @@ func writeLatexError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusRequestEntityTooLarge, err.Error())
 	case errors.Is(err, latex.ErrBinaryFile):
 		writeError(w, http.StatusUnsupportedMediaType, err.Error())
+	case errors.Is(err, latex.ErrGitInvalidInput):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case errors.Is(err, latex.ErrGitUnavailable):
+		writeError(w, http.StatusServiceUnavailable, err.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}

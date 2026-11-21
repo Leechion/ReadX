@@ -411,7 +411,7 @@ export default function App() {
           onOpenDocument={openDocument}
         />
       ) : screen === 'latex' ? (
-        <LatexStudio registerBeforeLeave={registerLatexBeforeLeave} launchRequest={launcherRequest?.workspace === 'latex' ? launcherRequest : null} />
+        <LatexStudio documents={launcherDocuments} registerBeforeLeave={registerLatexBeforeLeave} launchRequest={launcherRequest?.workspace === 'latex' ? launcherRequest : null} />
       ) : screen === 'reader' ? (
         <ReaderScreen
           key={selected?.id ?? 'empty'}

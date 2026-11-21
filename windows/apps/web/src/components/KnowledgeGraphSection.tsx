@@ -19,7 +19,7 @@ const KIND_META: Record<string, { label: string; tone: string; hex: string }> = 
 
 const KIND_ORDER = ['concept', 'method', 'conclusion'] as const;
 
-type ViewId = 'cloud' | 'matrix' | 'network' | 'conclusions';
+type ViewId = 'cloud' | 'matrix' | 'network' | 'conclusions' | 'timeline';
 
 function shortLabel(value: string, max = 26): string {
   const clean = value.replace(/\s+/g, ' ').trim();
@@ -39,7 +39,7 @@ interface Props {
   onBack?: () => void;
   /** 点某条关系的原文依据时跳到阅读器对应页（App 里的 cite 通路）。 */
   onCite: (target: { key: string; page: number }) => void;
-  documents: { id: string; key: string; title: string }[];
+  documents: { id: string; key: string; title: string; year?: number | null }[];
 }
 
 /**
@@ -239,6 +239,7 @@ export function KnowledgeGraphSection({ phase, onBack, onCite, documents }: Prop
                 { id: 'matrix', label: '对照表' },
                 { id: 'network', label: '关系网络' },
                 { id: 'conclusions', label: '结论' },
+                { id: 'timeline', label: '脉络与空白' },
               ] as const
             ).map((item) => (
               <button
@@ -343,6 +344,19 @@ export function KnowledgeGraphSection({ phase, onBack, onCite, documents }: Prop
               crossPaperEdges={crossPaperEdges}
               nodeById={nodeById}
               selectedEntity={selectedEntity}
+              onPick={pickEntity}
+              onPickEdge={(edgeId) => {
+                setSelectedEdge(edgeId);
+                setSelectedEntity(null);
+              }}
+            />
+          ) : view === 'timeline' ? (
+            <TimelineAndGapsView
+              papers={papers}
+              documents={documents}
+              nodes={filteredNodes}
+              edges={filteredEdges}
+              titleByKey={titleByKey}
               onPick={pickEntity}
               onPickEdge={(edgeId) => {
                 setSelectedEdge(edgeId);
@@ -930,6 +944,176 @@ function ConclusionsView({
           </section>
         );
       })}
+    </div>
+  );
+}
+
+/* ---------------- 时间脉络与交叉研究空白 ---------------- */
+
+function TimelineAndGapsView({
+  papers,
+  documents,
+  nodes,
+  edges,
+  titleByKey,
+  onPick,
+  onPickEdge,
+}: {
+  papers: GraphPaper[];
+  documents: { id: string; key: string; title: string; year?: number | null }[];
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+  titleByKey: Map<string, string>;
+  onPick: (id: string, paperKey: string | null) => void;
+  onPickEdge: (edgeId: string) => void;
+}) {
+  const yearByKey = useMemo(
+    () => new Map(documents.map((doc) => [doc.key, doc.year ?? null] as const)),
+    [documents],
+  );
+
+  const yearGroups = useMemo(() => {
+    const groups = new Map<number, GraphPaper[]>();
+    for (const paper of papers) {
+      const year = yearByKey.get(paper.key) ?? 0;
+      const list = groups.get(year) ?? [];
+      list.push(paper);
+      groups.set(year, list);
+    }
+    return [...groups.entries()].sort(([a], [b]) => {
+      if (a === 0) return 1;
+      if (b === 0) return -1;
+      return a - b;
+    });
+  }, [papers, yearByKey]);
+
+  const topMethods = useMemo(
+    () =>
+      nodes
+        .filter((n) => n.kind === 'method')
+        .sort((a, b) => b.docs.length - a.docs.length || a.label.localeCompare(b.label, 'zh'))
+        .slice(0, 6),
+    [nodes],
+  );
+  const topConcepts = useMemo(
+    () =>
+      nodes
+        .filter((n) => n.kind === 'concept')
+        .sort((a, b) => b.docs.length - a.docs.length || a.label.localeCompare(b.label, 'zh'))
+        .slice(0, 6),
+    [nodes],
+  );
+
+  const pairEdges = useMemo(() => {
+    const lookup = new Map<string, GraphEdge[]>();
+    for (const edge of edges) {
+      for (const pairKey of [`${edge.from}::${edge.to}`, `${edge.to}::${edge.from}`]) {
+        const list = lookup.get(pairKey) ?? [];
+        list.push(edge);
+        lookup.set(pairKey, list);
+      }
+    }
+    return lookup;
+  }, [edges]);
+
+  return (
+    <div className="graph-timeline-wrap">
+      <section className="graph-timeline-section">
+        <header className="graph-timeline-head">
+          <h2>按年份技术演进脉络</h2>
+          <span>仅统计已抽取图谱的 {papers.length} 篇论文</span>
+        </header>
+        <div className="graph-timeline-list">
+          {yearGroups.map(([year, groupPapers]) => (
+            <div key={year} className="graph-timeline-year">
+              <div className="graph-timeline-badge">{year > 0 ? year : '年份未标注'}</div>
+              <div className="graph-timeline-papers">
+                {groupPapers.map((paper) => {
+                  const paperNodes = nodes
+                    .filter((n) => n.docs.includes(paper.key))
+                    .sort((a, b) => b.docs.length - a.docs.length)
+                    .slice(0, 8);
+                  return (
+                    <article key={paper.key} className="graph-timeline-card">
+                      <h3>{titleByKey.get(paper.key) ?? paper.title}</h3>
+                      <div className="graph-timeline-chips">
+                        {paperNodes.map((node) => (
+                          <button
+                            key={node.id}
+                            type="button"
+                            className={`graph-chip ${KIND_META[node.kind]?.tone ?? ''}${node.docs.length > 1 ? ' shared' : ''}`}
+                            onClick={() => onPick(node.id, paper.key)}
+                            title={node.docs.length > 1 ? `跨 ${node.docs.length} 篇共享` : '本篇实体'}
+                          >
+                            {shortLabel(node.label, 22)}
+                            {node.docs.length > 1 ? ` · ${node.docs.length}篇` : ''}
+                          </button>
+                        ))}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="graph-timeline-section">
+        <header className="graph-timeline-head">
+          <h2>方法 × 概念/问题 交叉空白矩阵</h2>
+          <span>无直接证据连线的格子代表当前已抽取文献中的潜在研究空白</span>
+        </header>
+        {topMethods.length && topConcepts.length ? (
+          <div className="graph-matrix-wrap">
+            <table className="graph-matrix graph-gap-matrix">
+              <thead>
+                <tr>
+                  <th className="graph-matrix-corner">方法 \ 概念与问题</th>
+                  {topConcepts.map((concept) => (
+                    <th key={concept.id}>
+                      <button type="button" onClick={() => onPick(concept.id, null)}>
+                        {shortLabel(concept.label, 18)}
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {topMethods.map((method) => (
+                  <tr key={method.id}>
+                    <th>
+                      <button type="button" onClick={() => onPick(method.id, null)}>
+                        {shortLabel(method.label, 20)}
+                      </button>
+                    </th>
+                    {topConcepts.map((concept) => {
+                      const hits = pairEdges.get(`${method.id}::${concept.id}`) ?? [];
+                      if (!hits.length) {
+                        return (
+                          <td key={concept.id} className="graph-gap-empty">
+                            未连接
+                          </td>
+                        );
+                      }
+                      const first = hits[0]!;
+                      return (
+                        <td key={concept.id} className="graph-gap-hit">
+                          <button type="button" onClick={() => onPickEdge(first.id)}>
+                            {first.label} ({hits.length})
+                          </button>
+                        </td>
+                      );
+                    })}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <p className="graph-hint">需要同时存在「方法」与「概念」类实体，才能生成交叉矩阵。</p>
+        )}
+      </section>
     </div>
   );
 }

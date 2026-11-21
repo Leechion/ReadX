@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentSummary, PDFLayout } from '@cbct/shared';
 import { isSectionFormat, pageParagraphs, segmentParagraph, statusLabel } from '@cbct/shared';
-import { api, ApiError, type Annotation, type DocumentJob, type EPUBSection, type NewAnnotation, type TranslationPreview } from '../api/client';
+import { api, ApiError, type Annotation, type AnnotationStroke, type DocumentJob, type EPUBSection, type NewAnnotation, type OCRRegionResult, type TranslationPreview } from '../api/client';
 import { useFullscreen } from '../hooks/useFullscreen';
 import { useListeningHighlight, type ReaderSpeakingPosition } from '../hooks/useListeningHighlight';
 import type { DocumentPhase } from '../hooks/useDocument';
@@ -15,6 +15,8 @@ import { ParagraphActions, type SelectedParagraph, type ParagraphQuestion } from
 import { ExportPDFDialog } from './ExportPDFDialog';
 import { CitationExportDialog } from './CitationExportDialog';
 import { CitationNetworkDialog } from './CitationNetworkDialog';
+import { FlashcardsDialog } from './FlashcardsDialog';
+import { ReaderPodcastBar } from './ReaderPodcastBar';
 import type { PDFDocumentProxy } from 'pdfjs-dist';
 import { STORAGE_KEYS } from '../lib/storage';
 import { listeningMatchChar, type ListeningBlock, type ListeningPane, type ListeningSource } from '../lib/listening';
@@ -66,6 +68,18 @@ export function ReaderScreen({
   const [marginDraft, setMarginDraft] = useState<{ page: number; id?: string; text: string; color: string; quote?: string; selection?: NewAnnotation; pageAspect?: number } | null>(null);
   const [marginBusy, setMarginBusy] = useState(false);
   const [marginError, setMarginError] = useState('');
+  const [toolMode, setToolMode] = useState<'select' | 'snip' | 'ink'>('select');
+  const [inkColor, setInkColor] = useState<'rose' | 'sky' | 'amber' | 'green' | 'violet'>('rose');
+  const [podcastOpen, setPodcastOpen] = useState(false);
+  const [flashcardsOpen, setFlashcardsOpen] = useState(false);
+  const [snipDraft, setSnipDraft] = useState<{
+    page: number;
+    imageBase64: string;
+    target: 'auto' | 'formula' | 'table';
+    busy: boolean;
+    result: OCRRegionResult | null;
+    error: string;
+  } | null>(null);
   const pdf = usePDF(!epub ? documentKey : null);
   const translatedPDF = usePDF(!epub ? documentKey : null, true);
   const [liveRenderedPage, setLiveRenderedPage] = useState<{ key: string; page: number; bytes: ArrayBuffer } | null>(null);
@@ -826,6 +840,40 @@ export function ReaderScreen({
     catch (cause) { setMarginError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setMarginBusy(false); }
   };
+
+  const runRegionOCR = useCallback(async (pageNum: number, imageBase64: string, target: 'auto' | 'formula' | 'table') => {
+    setSnipDraft({ page: pageNum, imageBase64, target, busy: true, result: null, error: '' });
+    try {
+      const result = await api.ocrRegion(imageBase64, target);
+      setSnipDraft((cur) => (cur && cur.imageBase64 === imageBase64 ? { ...cur, busy: false, result } : cur));
+    } catch (cause) {
+      setSnipDraft((cur) =>
+        cur && cur.imageBase64 === imageBase64
+          ? { ...cur, busy: false, error: cause instanceof Error ? cause.message : String(cause) }
+          : cur,
+      );
+    }
+  }, []);
+
+  const handleInkCommit = useCallback(
+    async ({ page: inkPage, strokes }: { page: number; strokes: AnnotationStroke[] }) => {
+      if (!documentKey || !strokes.length) return;
+      try {
+        setError('');
+        const created = await annotations.create({
+          page: inkPage,
+          kind: 'ink',
+          quote: `手写墨迹（第 ${inkPage} 页）`,
+          color: inkColor,
+          locator: { kind: 'pdf', strokes },
+        });
+        if (created) onFocusAnnotation(created.id, created.page);
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
+    },
+    [annotations, documentKey, inkColor, onFocusAnnotation],
+  );
   const source = (
     <div
       className="publication-pane"
@@ -866,6 +914,13 @@ export function ReaderScreen({
           onAnnotationClick={openHighlightedTextActions}
           onMarginNoteEdit={(item) => { if (item.page) { setMarginError(''); setMarginDraft({ page: item.page, id: item.id, text: item.note, color: item.color, quote: item.quote }); } }}
           onMarginNoteGeometry={async (item, noteRect) => { try { setError(''); await annotations.update(item.id, { noteRect }); } catch (cause) { setError(`保存笔记位置失败：${cause instanceof Error ? cause.message : String(cause)}`); throw cause; } }}
+          toolMode={toolMode}
+          inkColor={inkColor}
+          onRegionSnip={({ page: snipPage, imageBase64 }) => {
+            setToolMode('select');
+            void runRegionOCR(snipPage, imageBase64, 'auto');
+          }}
+          onInkCommit={handleInkCommit}
           find={findScope === 'source' ? findState : null}
           onFind={findScope === 'source' ? setFindReport : undefined}
         />
@@ -1013,12 +1068,16 @@ export function ReaderScreen({
           { id: 'citation', label: '引用', title: '导出这篇论文的 BibTeX / RIS 条目', disabled: !pdf.document || !documentKey, onSelect: () => setCitationOpen(true) },
           { id: 'network', label: '引用网络', title: '查看这篇论文与本库其它论文的引用关系', disabled: !pdf.document || !documentKey, onSelect: () => setNetworkOpen(true) },
           { id: 'export', label: '导出译文 PDF', title: '交给 LeePDF 重新生成整本译文 PDF', disabled: !pdf.document || !documentKey, onSelect: () => setExportOpen(true) },
+          { id: 'snip', label: toolMode === 'snip' ? '取消框选' : '框选转 LaTeX', checked: toolMode === 'snip', title: '框选页面中的公式或表格区域，识别为 LaTeX / Markdown', disabled: !pdf.document || !documentKey, onSelect: () => setToolMode((cur) => (cur === 'snip' ? 'select' : 'snip')) },
+          { id: 'ink', label: toolMode === 'ink' ? '结束手写' : '手写墨迹', checked: toolMode === 'ink', title: '在 PDF 原文页上自由手写墨迹批注', disabled: !pdf.document || !documentKey, onSelect: () => setToolMode((cur) => (cur === 'ink' ? 'select' : 'ink')) },
         ],
       }],
     });
   }
   const assistantTools: ReaderToolGroup['sections'][number]['tools'] = [
     { id: 'listening', label: '语音速听', disabled: !documentKey || !count, onSelect: () => openListening() },
+    { id: 'podcast', label: '速听讲稿', title: '用 AI 生成 2 分钟速听讲稿', disabled: !documentKey, onSelect: () => setPodcastOpen(value => !value) },
+    { id: 'flashcards', label: '闪卡复习', title: '复习这篇论文的批注、精读与术语闪卡', disabled: !documentKey, onSelect: () => setFlashcardsOpen(true) },
     { id: 'chat', label: 'AI 助教', checked: actualRightOpen && tab === 'chat', onSelect: () => toggleAssistant('chat') },
   ];
   if (!epub) assistantTools.push({
@@ -1058,8 +1117,31 @@ export function ReaderScreen({
             {selected?.title ?? '未选择文档'}
           </span>
         </div>
+        {toolMode === 'ink' ? (
+          <span className="reader-ink-palette" role="group" aria-label="墨迹颜色">
+            {(['rose', 'sky', 'amber', 'green', 'violet'] as const).map((c) => (
+              <button
+                key={c}
+                type="button"
+                className={`reader-ink-dot dot-${c}${inkColor === c ? ' active' : ''}`}
+                aria-label={c}
+                aria-pressed={inkColor === c}
+                onClick={() => setInkColor(c)}
+              />
+            ))}
+          </span>
+        ) : null}
         <ReaderToolbarMenus groups={toolGroups} />
       </header>
+      {podcastOpen && documentKey ? (
+        <ReaderPodcastBar
+          documentKey={documentKey}
+          documentTitle={selected?.title || documentKey}
+          currentPage={current}
+          currentPageText={epub ? (section?.text ?? '') : paragraphs.join('\n')}
+          onClose={() => setPodcastOpen(false)}
+        />
+      ) : null}
       <div className="reader-panels" ref={panelRoot}>
         <aside className="reader-sidebar" data-open={actualLeftOpen} aria-hidden={!actualLeftOpen} inert={!actualLeftOpen} style={{ width: focusMode ? actualLeftOpen ? focusLeftWidth : 0 : visibleLeft, flexBasis: visibleLeft }}>
           <p className="panel-label">{epub ? '章节目录' : 'PDF 目录'}</p>
@@ -1384,6 +1466,89 @@ export function ReaderScreen({
           onOpenDocument={onOpenDocument}
           onClose={() => setNetworkOpen(false)}
         />
+      ) : null}
+      {flashcardsOpen && documentKey ? (
+        <FlashcardsDialog
+          open={flashcardsOpen}
+          documentKey={documentKey}
+          documentTitle={selected?.title}
+          onClose={() => setFlashcardsOpen(false)}
+          onOpenAtPage={(_k, targetPage) => navigatePage(targetPage)}
+        />
+      ) : null}
+      {snipDraft ? (
+        <AppDialog
+          open
+          onClose={() => setSnipDraft(null)}
+          busy={snipDraft.busy}
+          closeOnBackdrop
+          className="ocr-region-dialog"
+          aria-labelledby="ocr-region-title"
+        >
+          <div className="ocr-region-body">
+            <header className="ocr-region-head">
+              <div>
+                <h2 id="ocr-region-title">局部区域识别 → LaTeX / Markdown（第 {snipDraft.page} 页）</h2>
+                <p>截取选中区域送入视觉模型转写公式或三线表。</p>
+              </div>
+              <button type="button" disabled={snipDraft.busy} onClick={() => setSnipDraft(null)} aria-label="关闭">
+                ×
+              </button>
+            </header>
+            <div className="ocr-region-preview">
+              <img src={snipDraft.imageBase64} alt="选中截图预览" />
+              <div className="ocr-region-modes" role="group" aria-label="识别模式">
+                {([
+                  { id: 'auto', label: '自动识别' },
+                  { id: 'formula', label: '数学公式' },
+                  { id: 'table', label: '表格' },
+                ] as const).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    className={snipDraft.target === item.id ? 'active' : ''}
+                    disabled={snipDraft.busy}
+                    onClick={() => void runRegionOCR(snipDraft.page, snipDraft.imageBase64, item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {snipDraft.busy ? (
+              <p className="ocr-region-status" role="status">正在识别截图内容…</p>
+            ) : snipDraft.error ? (
+              <p className="latex-alert error" role="alert">{snipDraft.error}</p>
+            ) : snipDraft.result ? (
+              <div className="ocr-region-results">
+                <div className="ocr-region-block">
+                  <div className="ocr-region-block-head">
+                    <strong>LaTeX 代码（{snipDraft.result.detectedKind}）</strong>
+                    <button
+                      type="button"
+                      onClick={() => void navigator.clipboard?.writeText(snipDraft.result!.latex)}
+                    >
+                      复制 LaTeX
+                    </button>
+                  </div>
+                  <pre>{snipDraft.result.latex}</pre>
+                </div>
+                <div className="ocr-region-block">
+                  <div className="ocr-region-block-head">
+                    <strong>Markdown</strong>
+                    <button
+                      type="button"
+                      onClick={() => void navigator.clipboard?.writeText(snipDraft.result!.markdown)}
+                    >
+                      复制 Markdown
+                    </button>
+                  </div>
+                  <pre>{snipDraft.result.markdown}</pre>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </AppDialog>
       ) : null}
     </div>
   );

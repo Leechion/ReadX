@@ -2,12 +2,12 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react'
 import JSZip from 'jszip';
 import type { DocumentSummary, LauncherOpenRequest } from '@cbct/shared';
 import { isSectionFormat } from '@cbct/shared';
-import { api, streamPresentationPlan, streamPresentationTheme, type PresentationPlanInput, type ReadingEntry, type ReadingVisualAnalysis } from '../api/client';
+import { api, streamPresentationComparePlan, streamPresentationPlan, streamPresentationTheme, type PresentationPlanInput, type ReadingEntry, type ReadingVisualAnalysis } from '../api/client';
 import { usePDF } from './PDFView';
 import { usePaperVisuals } from '../hooks/usePaperVisuals';
 import { visualRevision } from '../lib/readingVisuals';
 import { READING_STEPS, type ReadingKind } from '../lib/readingSteps';
-import { buildReadingDeck, generateReadingDeck, type PresentationPlan, type PresentationTheme } from '../lib/presentation';
+import { buildCompareDeck, buildReadingDeck, generateCompareDeck, generateReadingDeck, type PresentationPlan, type PresentationTheme } from '../lib/presentation';
 import { normalizePlannedSlide, DEFAULT_PRESENTATION_THEME } from '../lib/presentationDesign';
 import { PresentationCanvas } from './PresentationCanvas';
 import { listPresentationTemplates, savePresentationTemplate, type PresentationTemplateRecord } from '../lib/presentationTemplateLibrary';
@@ -171,8 +171,11 @@ function firstJSONObject(source: string): string | null {
 }
 
 export function PresentationWorkspace({ documents, onBack, launchRequest }: { documents: DocumentSummary[]; onBack: () => void; launchRequest?: LauncherOpenRequest | null }) {
+  const [deckMode, setDeckMode] = useState<'single' | 'compare'>('single');
   const [query, setQuery] = useState('');
   const [selected, setSelected] = useState<DocumentSummary | null>(null);
+  const [compareSelection, setCompareSelection] = useState<string[]>([]);
+  const [compareEntriesByKey, setCompareEntriesByKey] = useState<Record<string, Partial<Record<ReadingKind, ReadingEntry>>>>({});
   const [exporting, setExporting] = useState(false);
   const handledLaunch = useRef<number | null>(null);
   useEffect(() => {
@@ -299,7 +302,44 @@ export function PresentationWorkspace({ documents, onBack, launchRequest }: { do
       return !visual || (visual.reviewStatus !== 'needs-review' && visualRevision(visual) === analysis.revision && visual.caption === analysis.caption);
     });
   }, [analyses, visuals]);
-  const scenes = useMemo(() => selected ? buildReadingDeck({ document: selected, entries, analyses: readyAnalyses, visuals, theme: template?.theme, plan: livePlan ?? undefined, plannedOnly: exporting }) : [], [selected, entries, readyAnalyses, visuals, template?.theme, livePlan, exporting]);
+  const compareDocs = useMemo(
+    () => compareSelection.map((key) => documents.find((doc) => doc.key === key)).filter((doc): doc is DocumentSummary => Boolean(doc)),
+    [compareSelection, documents],
+  );
+  useEffect(() => {
+    if (deckMode !== 'compare' || !compareDocs.length) return;
+    const controller = new AbortController();
+    void Promise.all(
+      compareDocs.map(async (doc) => {
+        if (compareEntriesByKey[doc.key]) return;
+        try {
+          const res = await api.readings(doc.key, controller.signal);
+          if (!controller.signal.aborted) {
+            setCompareEntriesByKey((cur) => ({ ...cur, [doc.key]: savedEntries(res.entries) }));
+          }
+        } catch { /* fallback to empty entries */ }
+      }),
+    );
+    return () => controller.abort();
+  }, [compareDocs, compareEntriesByKey, deckMode]);
+
+  const toggleCompareDoc = (doc: DocumentSummary) => {
+    setCompareSelection((cur) => {
+      if (cur.includes(doc.key)) return cur.filter((k) => k !== doc.key);
+      if (cur.length >= 5) return cur;
+      return [...cur, doc.key];
+    });
+    setLivePlan(null);
+  };
+
+  const scenes = useMemo(() => {
+    if (deckMode === 'compare') {
+      return compareDocs.length >= 2
+        ? buildCompareDeck({ documents: compareDocs, entriesByKey: compareEntriesByKey, theme: template?.theme, plan: livePlan ?? undefined, plannedOnly: exporting })
+        : [];
+    }
+    return selected ? buildReadingDeck({ document: selected, entries, analyses: readyAnalyses, visuals, theme: template?.theme, plan: livePlan ?? undefined, plannedOnly: exporting }) : [];
+  }, [compareDocs, compareEntriesByKey, deckMode, selected, entries, readyAnalyses, visuals, template?.theme, livePlan, exporting]);
   const activeScene = scenes[Math.min(livePreviewIndex, Math.max(0, scenes.length - 1))];
   const generationStageLabel = generationPhase === 'reading' ? '通读全文' : generationPhase === 'planning' ? '设计页面' : generationPhase === 'building' ? '构建 PPT' : generationPhase === 'complete' ? '已生成' : generationPhase === 'error' ? '生成中断' : '准备就绪';
   const readingProgressPercent = generationProgress.total ? Math.round(generationProgress.current / generationProgress.total * 100) : 0;
@@ -344,6 +384,49 @@ export function PresentationWorkspace({ documents, onBack, launchRequest }: { do
     setTemplateReady(true);
     setTemplateStatus(`已选择${item.builtin ? '内置模板' : '模板库模板'}「${item.name}」。`);
     try { localStorage.setItem(STORAGE_KEYS.presentationTemplate, item.id); } catch { /* Storage may be disabled. */ }
+  };
+
+  const generateCompare = async () => {
+    if (compareDocs.length < 2 || exporting) return;
+    const controller = new AbortController();
+    generationAbort.current = controller; followLive.current = true;
+    setExporting(true); setGenerationPhase('reading'); setGenerationProgress({ current: 0, total: 0 }); setLivePlan(null); setLivePreviewIndex(0);
+    setNotice(`正在整理 ${compareDocs.length} 篇论文的精读与方法脉络…`);
+    try {
+      const allowedSections = new Set<ReadingKind>(READING_STEPS.map((s) => s.kind));
+      let planText = '';
+      let planError = '';
+      let receivedPlanDeltas = false;
+      await streamPresentationComparePlan(
+        compareDocs.map((d) => d.key),
+        template?.summary,
+        (chunk) => {
+          if (chunk.error) { planText += chunk.partial || ''; planError = chunk.error; }
+          else if (chunk.progress) { setNotice(chunk.progress); setGenerationPhase('planning'); }
+          else if (chunk.delta !== undefined) {
+            planText += chunk.delta;
+            receivedPlanDeltas = true;
+            setGenerationPhase('planning');
+            const partial = parsePartialPresentationPlan(planText, allowedSections);
+            if (partial.slides.length) setLivePlan(partial);
+          } else if (chunk.done && chunk.text !== undefined && !receivedPlanDeltas) planText = chunk.text;
+        },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      if (planError) throw new Error(planError);
+      const plan = parsePresentationPlan(planText, allowedSections);
+      setLivePlan(plan);
+      setGenerationPhase('building');
+      setNotice('对比结构已规划完成，正在生成可编辑多篇对比 PPT…');
+      const summary = await generateCompareDeck({ documents: compareDocs, entriesByKey: compareEntriesByKey, theme: template?.theme, plan, signal: controller.signal });
+      setGenerationPhase('complete');
+      setNotice(`多篇对比 PPT 已生成：${summary.slides} 页 · ${summary.fileName}`);
+    } catch (cause) {
+      if (controller.signal.aborted) { setGenerationPhase('idle'); setNotice('已停止生成，已完成的页面草稿仍可预览。'); return; }
+      setGenerationPhase('error');
+      setNotice(`多篇对比 PPT 生成失败：${cause instanceof Error ? cause.message : String(cause)}`);
+    } finally { generationAbort.current = null; setExporting(false); }
   };
 
   const generate = async () => {
@@ -420,14 +503,18 @@ export function PresentationWorkspace({ documents, onBack, launchRequest }: { do
       </header>
       <div className="presentation-studio-main">
         <aside className="presentation-library-panel" aria-label="论文书库">
-          <div className="presentation-library-heading"><div><span className="section-eyebrow">YOUR LIBRARY</span><h2>选择论文</h2></div><span className="presentation-count">{filtered.length} 篇</span></div>
+          <div className="presentation-library-heading"><div><span className="section-eyebrow">YOUR LIBRARY</span><h2>{deckMode === 'compare' ? '多篇组会对比 (2–5 篇)' : '选择论文'}</h2></div><span className="presentation-count">{deckMode === 'compare' ? `已选 ${compareDocs.length}/5` : `${filtered.length} 篇`}</span></div>
+          <div className="presentation-mode-switch" role="group" aria-label="演示稿模式">
+            <button type="button" className={deckMode === 'single' ? 'active' : ''} disabled={exporting} onClick={() => { setDeckMode('single'); setLivePlan(null); }}>单篇精讲</button>
+            <button type="button" className={deckMode === 'compare' ? 'active' : ''} disabled={exporting} onClick={() => { setDeckMode('compare'); setLivePlan(null); }}>多篇对比</button>
+          </div>
           <label className="presentation-picker-search"><span aria-hidden="true">⌕</span><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索标题或作者" /></label>
-          <div className="presentation-paper-grid" role="listbox" aria-label="选择论文">
+          <div className="presentation-paper-grid" role="listbox" aria-label="选择论文" aria-multiselectable={deckMode === 'compare'}>
             {filtered.map((doc, index) => {
               const cover = COVER_COLORS[index % COVER_COLORS.length]!;
-              const active = selected?.key === doc.key;
-              return <button type="button" role="option" aria-selected={active} key={doc.key} disabled={exporting} onClick={() => setSelected(doc)} className={`presentation-paper-card${active ? ' selected' : ''}`}>
-                <span className="presentation-paper-cover" style={{ '--cover-bg': cover[0], '--cover-ink': cover[1] } as CSSProperties}><strong className="presentation-cover-title">{doc.title || doc.translatedTitle || '（无标题）'}</strong><span className="presentation-cover-lines" /><span className="presentation-cover-brand">READX · PAPER</span></span>
+              const active = deckMode === 'compare' ? compareSelection.includes(doc.key) : selected?.key === doc.key;
+              return <button type="button" role="option" aria-selected={active} key={doc.key} disabled={exporting} onClick={() => deckMode === 'compare' ? toggleCompareDoc(doc) : setSelected(doc)} className={`presentation-paper-card${active ? ' selected' : ''}`}>
+                <span className="presentation-paper-cover" style={{ '--cover-bg': cover[0], '--cover-ink': cover[1] } as CSSProperties}><strong className="presentation-cover-title">{doc.title || doc.translatedTitle || '（无标题）'}</strong><span className="presentation-cover-lines" /><span className="presentation-cover-brand">{deckMode === 'compare' && active ? '✓ 已选对比' : 'READX · PAPER'}</span></span>
                 <span className="presentation-paper-copy"><small>{doc.authors.slice(0, 1).join('') || '作者未知'}{doc.year ? ` · ${doc.year}` : ''}</small></span>
               </button>;
             })}
@@ -450,7 +537,19 @@ export function PresentationWorkspace({ documents, onBack, launchRequest }: { do
           {notice && <p className="presentation-generation-notice" role="status">{notice}</p>}
         </section>
       </div>
-      <footer className="presentation-studio-footer"><button type="button" className="presentation-generate-button" disabled={!selected || loading || !noteCount || exporting || learning || Boolean(visualProgress)} onClick={() => void generate()}>{exporting ? '正在生成…' : visualProgress ? '正在准备图表…' : '生成学术演示稿'}<span aria-hidden="true">→</span></button></footer>
+      <footer className="presentation-studio-footer">
+        {deckMode === 'compare' ? (
+          <button type="button" className="presentation-generate-button" disabled={compareDocs.length < 2 || exporting || learning} onClick={() => void generateCompare()}>
+            {exporting ? '正在生成多篇对比…' : `生成 ${compareDocs.length} 篇组会对比 PPT`}
+            <span aria-hidden="true">→</span>
+          </button>
+        ) : (
+          <button type="button" className="presentation-generate-button" disabled={!selected || loading || !noteCount || exporting || learning || Boolean(visualProgress)} onClick={() => void generate()}>
+            {exporting ? '正在生成…' : visualProgress ? '正在准备图表…' : '生成学术演示稿'}
+            <span aria-hidden="true">→</span>
+          </button>
+        )}
+      </footer>
     </div>
   </main>;
 }

@@ -15,6 +15,8 @@ import { LibraryProcessingControl } from './LibraryProcessingControl';
 import { LibraryTrashButton } from './LibraryTrashButton';
 import { EmptyTrashDialog } from './EmptyTrashDialog';
 import { CitationExportDialog } from './CitationExportDialog';
+import { FlashcardsDialog } from './FlashcardsDialog';
+import { LibraryChatDialog } from './LibraryChatDialog';
 import { ReadonlyShareDialog } from './ReadonlyShareDialog';
 import { SyncSettingsDialog } from './SyncSettingsDialog';
 import { DailyRecommendations } from './DailyRecommendations';
@@ -229,6 +231,8 @@ export function LibraryScreen({
   const [arxivProgress, setArxivProgress] = useState('');
   const [arxivSummary, setArxivSummary] = useState('');
   const [citationOpen, setCitationOpen] = useState(false);
+  const [ragOpen, setRagOpen] = useState(false);
+  const [flashcardsOpen, setFlashcardsOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [syncSettingsOpen, setSyncSettingsOpen] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -254,6 +258,7 @@ export function LibraryScreen({
   // 搜索分两档：题录（本地筛选，标题/作者/会场）与全文（服务端逐页正文匹配）。
   // 全文检索的覆盖面见 coverage：未索引的论文搜不到，必须显示出来。
   const [searchMode, setSearchMode] = useState<'meta' | 'fulltext'>('meta');
+  const [fulltextQueryMode, setFulltextQueryMode] = useState<'phrase' | 'terms'>('terms');
   const [fulltext, setFulltext] = useState<SearchResponse | null>(null);
   const [fulltextLoading, setFulltextLoading] = useState(false);
   const [fulltextError, setFulltextError] = useState('');
@@ -284,7 +289,10 @@ export function LibraryScreen({
     setFulltextLoading(true);
     setFulltextError('');
     api
-      .search(query, controller.signal)
+      .search(query, controller.signal, {
+        mode: fulltextQueryMode,
+        category: categoryFilter || undefined,
+      })
       .then((value) => setFulltext(value))
       .catch((cause: unknown) => {
         if (cause instanceof DOMException && cause.name === 'AbortError') return;
@@ -294,7 +302,7 @@ export function LibraryScreen({
         if (!controller.signal.aborted) setFulltextLoading(false);
       });
     return () => controller.abort();
-  }, [searchMode, debounced]);
+  }, [searchMode, debounced, fulltextQueryMode, categoryFilter]);
 
   // 服务端按论文分组返回，这里只做相邻合并，保持后端给的顺序（命中多的在前）。
   const fulltextGroups = useMemo(() => {
@@ -457,14 +465,24 @@ export function LibraryScreen({
       </button>
     ) : null}
     {view !== 'trash' && view !== 'graph' && view !== 'calendar' ? (
-      <button
-        type="button"
-        className="library-toolbar-command"
-        title={categoryFilter ? `导出书架「${categoryFilter}」的书目` : '导出整库书目（不含回收站）'}
-        onClick={() => setCitationOpen(true)}
-      >
-        导出书目
-      </button>
+      <>
+        <button
+          type="button"
+          className="library-toolbar-command"
+          title={categoryFilter ? `导出书架「${categoryFilter}」的书目` : '导出整库书目（不含回收站）'}
+          onClick={() => setCitationOpen(true)}
+        >
+          导出书目
+        </button>
+        <button
+          type="button"
+          className="library-toolbar-command"
+          title={categoryFilter ? `导出书架「${categoryFilter}」为 Obsidian / Notion 双向链接 Markdown ZIP` : '导出整库为 Obsidian / Notion 双向链接 Markdown 知识库 ZIP'}
+          onClick={() => void api.exportMarkdownVault(categoryFilter ? { category: categoryFilter } : undefined)}
+        >
+          导出笔记库
+        </button>
+      </>
     ) : null}
     {view !== 'trash' && <button type="button" className="library-toolbar-command" onClick={() => setShareOpen(true)}>只读分享</button>}
     <button
@@ -662,10 +680,45 @@ export function LibraryScreen({
               <input
                 value={input}
                 onChange={(event) => setInput(event.target.value)}
-                placeholder={searchMode === 'meta' ? '搜索标题 / 作者 / 会场' : '在全文里找（至少 2 个字）'}
+                placeholder={searchMode === 'meta' ? '搜索标题 / 作者 / 会场' : '在全文里找（支持空格多词或短语）'}
                 aria-label={searchMode === 'meta' ? '搜索文献标题、作者或会场' : '在全库正文里检索'}
               />
             </label>
+            {searchMode === 'fulltext' ? (
+              <div className="view-switch" role="group" aria-label="全文匹配模式">
+                {([
+                  { id: 'terms', label: '多词' },
+                  { id: 'phrase', label: '短语' },
+                ] as const).map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    aria-pressed={fulltextQueryMode === item.id}
+                    className={fulltextQueryMode === item.id ? 'active' : ''}
+                    title={item.id === 'terms' ? '空格分隔多词同时命中（FTS5 BM25 排序）' : '按完整连续短语精确匹配'}
+                    onClick={() => setFulltextQueryMode(item.id)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+            <button
+              type="button"
+              className="library-rag-trigger"
+              onClick={() => setRagOpen(true)}
+              title="跨多篇论文/按书架向 AI 提问并附页码出处"
+            >
+              跨库问答
+            </button>
+            <button
+              type="button"
+              className="library-rag-trigger"
+              onClick={() => setFlashcardsOpen(true)}
+              title="复习术语表、精读要点与批注闪卡（SM-2 间隔重复 / Anki 导出）"
+            >
+              记忆闪卡
+            </button>
             <LibraryProcessingControl documents={allDocuments} onOpenDocument={onOpenDocument} onReload={onReload} />
             <span style={{ flex: 1 }} />
             {meta.tags.map((tag) => (
@@ -896,6 +949,23 @@ export function LibraryScreen({
         />
       ) : null}
       {syncSettingsOpen ? <SyncSettingsDialog onClose={() => setSyncSettingsOpen(false)} onSyncComplete={onReload} /> : null}
+      {ragOpen ? (
+        <LibraryChatDialog
+          open={ragOpen}
+          documents={allDocuments.filter((doc) => !meta.items[doc.key]?.deleted)}
+          categories={meta.categories.map((cat) => cat.name)}
+          activeCategory={categoryFilter}
+          onClose={() => setRagOpen(false)}
+          onOpenAtPage={onOpenAtPage}
+        />
+      ) : null}
+      {flashcardsOpen ? (
+        <FlashcardsDialog
+          open={flashcardsOpen}
+          onClose={() => setFlashcardsOpen(false)}
+          onOpenAtPage={onOpenAtPage}
+        />
+      ) : null}
       {shareOpen ? <ReadonlyShareDialog documents={allDocuments.filter(doc => !meta.items[doc.key]?.deleted)} onClose={() => setShareOpen(false)} /> : null}
     </div>
   );

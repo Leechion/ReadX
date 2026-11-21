@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type * as Monaco from 'monaco-editor';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
+import { latexCompletionContext } from '@cbct/shared';
 import type { OpenFile } from '../../hooks/useLatexProject';
 import type { LatexCompletionIndex } from '../../lib/latex/latexCompletion';
 import { applyIndexMarkers, registerLatexCompletion } from '../../lib/latex/latexCompletion';
@@ -26,12 +27,16 @@ export function LatexEditor({
   active,
   index,
   reveal,
+  pendingCiteInsert,
   onActivate,
   onClose,
   onChange,
   onSave,
   onReload,
   onForceSave,
+  onSyncToPdf,
+  onOpenLibraryCite,
+  syncBusy = false,
   readOnly = false,
 }: {
   files: OpenFile[];
@@ -39,12 +44,17 @@ export function LatexEditor({
   index: LatexCompletionIndex & { missingCitations?: string[]; missingLabels?: string[] };
   /** 诊断跳转请求：nonce 变化时滚到对应行并高亮。 */
   reveal?: { path: string; line: number; nonce: number } | null;
+  /** 从书库引用弹窗回传的待插入引用键。 */
+  pendingCiteInsert?: { keys: string[]; nonce: number } | null;
   onActivate: (path: string) => void;
   onClose: (path: string) => void;
   onChange: (path: string, content: string) => void;
   onSave: (path: string) => void;
   onReload: (path: string) => void;
   onForceSave: (path: string) => void;
+  onSyncToPdf?: (path: string, line: number) => void;
+  onOpenLibraryCite?: () => void;
+  syncBusy?: boolean;
   readOnly?: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
@@ -52,8 +62,8 @@ export function LatexEditor({
   const monacoRef = useRef<typeof Monaco | null>(null);
   const models = useRef(new Map<string, Monaco.editor.ITextModel>());
   // 回调放 ref：它们每次渲染都会变，但不该导致重建编辑器。
-  const handlers = useRef({ onChange, onSave });
-  handlers.current = { onChange, onSave };
+  const handlers = useRef({ onChange, onSave, onSyncToPdf });
+  handlers.current = { onChange, onSave, onSyncToPdf };
   // 提供者跟随编辑器生命周期，索引在当前项目内始终读取最新值。
   const indexRef = useRef(index);
   indexRef.current = index;
@@ -98,6 +108,21 @@ export function LatexEditor({
       instance.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
         const path = instance.getModel()?.uri.path.replace(/^\//, '');
         if (path) handlers.current.onSave(path);
+      });
+
+      instance.addAction({
+        id: 'readx.synctex.forward',
+        label: 'SyncTeX：定位到 PDF 对应位置',
+        keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyMod.Alt | monaco.KeyCode.KeyJ],
+        contextMenuGroupId: 'navigation',
+        contextMenuOrder: 1.5,
+        run: (ed) => {
+          const path = ed.getModel()?.uri.path.replace(/^\//, '');
+          const pos = ed.getPosition();
+          if (path && pos && /\.tex$/i.test(path)) {
+            handlers.current.onSyncToPdf?.(path, pos.lineNumber);
+          }
+        },
       });
 
       // 主题跟随应用（浅色/纸张走浅色主题，深色走深色）。
@@ -170,7 +195,7 @@ export function LatexEditor({
     }
   }, [files]);
 
-  // 诊断跳转：滚到出错那一行并把光标停在那里。
+  // 诊断/SyncTeX 跳转：滚到对应行并把光标停在那里。
   useEffect(() => {
     const instance = editor.current;
     if (!ready || !instance || !reveal) return;
@@ -182,6 +207,38 @@ export function LatexEditor({
     instance.setPosition({ lineNumber: line, column: 1 });
     instance.focus();
   }, [ready, reveal]);
+
+  // 插入从书库挑选的引用键（光标若已在 \cite{...} 内则只补键名）。
+  useEffect(() => {
+    const instance = editor.current;
+    if (!ready || !instance || !pendingCiteInsert?.keys.length) return;
+    const model = instance.getModel();
+    if (!model) return;
+    const selection = instance.getSelection();
+    const pos = selection ? selection.getStartPosition() : instance.getPosition();
+    if (!pos) return;
+    const lineBefore = model.getValueInRange({
+      startLineNumber: pos.lineNumber,
+      startColumn: 1,
+      endLineNumber: pos.lineNumber,
+      endColumn: pos.column,
+    });
+    const keysJoined = pendingCiteInsert.keys.join(', ');
+    let text = `\\cite{${keysJoined}}`;
+    if (latexCompletionContext(lineBefore) === 'cite') {
+      const openBrace = lineBefore.lastIndexOf('{');
+      const inside = openBrace >= 0 ? lineBefore.slice(openBrace + 1).trim() : '';
+      text = inside && !inside.endsWith(',') ? `, ${keysJoined}` : keysJoined;
+    }
+    const targetRange = selection ?? {
+      startLineNumber: pos.lineNumber,
+      startColumn: pos.column,
+      endLineNumber: pos.lineNumber,
+      endColumn: pos.column,
+    };
+    instance.executeEdits('readx-cite-library', [{ range: targetRange, text, forceMoveMarkers: true }]);
+    instance.focus();
+  }, [pendingCiteInsert, ready]);
 
   // 索引变化 → 刷新波浪线（引用了不存在的键）
   useEffect(() => {
@@ -218,9 +275,35 @@ export function LatexEditor({
       {active ? (
         <div className="latex-editor-head">
           <span className="latex-editor-path">{active.path}</span>
-          <span className="latex-editor-state">
-            {active.conflict ? '与磁盘冲突' : active.saving ? '保存中…' : active.dirty ? '未保存' : `已保存 · ${active.revision.slice(0, 8)}`}
-          </span>
+          <div className="latex-editor-head-right">
+            {/\.tex$/i.test(active.path) && onOpenLibraryCite ? (
+              <button
+                type="button"
+                className="latex-editor-mini-btn"
+                onClick={onOpenLibraryCite}
+                title="从 ReadX 书库检索论文并写入 .bib，同时插入 \\cite{}"
+              >
+                + 书库引用
+              </button>
+            ) : null}
+            {/\.tex$/i.test(active.path) && onSyncToPdf ? (
+              <button
+                type="button"
+                className="latex-editor-mini-btn"
+                disabled={syncBusy}
+                onClick={() => {
+                  const line = editor.current?.getPosition()?.lineNumber ?? 1;
+                  onSyncToPdf(active.path, line);
+                }}
+                title="SyncTeX：从当前光标行定位到 PDF（快捷键 Ctrl/Cmd+Alt+J）"
+              >
+                {syncBusy ? '定位中…' : '定位到 PDF'}
+              </button>
+            ) : null}
+            <span className="latex-editor-state">
+              {active.conflict ? '与磁盘冲突' : active.saving ? '保存中…' : active.dirty ? '未保存' : `已保存 · ${active.revision.slice(0, 8)}`}
+            </span>
+          </div>
         </div>
       ) : null}
 

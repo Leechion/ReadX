@@ -75,8 +75,17 @@ func (c *Client) generateWithImageOpenAI(ctx context.Context, system, user strin
 			map[string]any{"role": "user", "content": parts},
 		},
 	}
+	if c.requiresStreaming() {
+		payload["stream"] = true
+		return c.streamRawOpenAI(ctx, payload, timeout, nil)
+	}
 	response, err := c.postRaw(ctx, payload, timeout)
 	if err != nil {
+		if isNonStreamUnsupportedError(err) {
+			c.markRequiresStreaming()
+			payload["stream"] = true
+			return c.streamRawOpenAI(ctx, payload, timeout, nil)
+		}
 		return "", err
 	}
 	defer response.Body.Close()

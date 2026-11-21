@@ -83,17 +83,82 @@ export function buildReadingDeck(input: PresentationInput): PresentationScene[] 
 
 /** Build fully editable native text, tables and original, proportionally fitted images. */
 export async function generateReadingDeck(input: PresentationInput): Promise<PresentationSummary> {
+  const scenes = buildReadingDeck(input);
+  return exportScenesToPptx(scenes, input.document?.title || '论文精读报告', input.signal);
+}
+
+export interface ComparePresentationInput {
+  documents: DocumentSummary[];
+  entriesByKey: Record<string, Partial<Record<ReadingKind, ReadingEntry>>>;
+  theme?: PresentationTheme;
+  plan?: PresentationPlan;
+  plannedOnly?: boolean;
+  signal?: AbortSignal;
+}
+
+/** Multi-paper group-meeting comparison deck: builds preview scenes from AI plan or local readings. */
+export function buildCompareDeck(input: ComparePresentationInput): PresentationScene[] {
+  const pages: DeckPage[] = [];
+  if (input.plan?.slides.length) {
+    for (const spec of input.plan.slides) {
+      const bullets = spec.bullets.map((p) => latexToText(cleanInline(p)));
+      if (spec.table) {
+        pages.push({ ...spec, bullets, table: spec.table });
+      } else {
+        paginatePoints(bullets, spec.layout === 'process' ? 4 : 3).forEach((chunk, i) => {
+          pages.push({ ...spec, title: i ? `${spec.title}（续）` : spec.title, bullets: chunk });
+        });
+      }
+    }
+  } else if (!input.plannedOnly && input.documents.length >= 2) {
+    pages.push({
+      section: 'motivation',
+      title: `对比范围：${input.documents.length} 篇文献概览`,
+      layout: 'editorial',
+      bullets: input.documents.map((doc) => `${doc.title || doc.key}${doc.year ? ` (${doc.year})` : ''}${doc.venue ? ` · ${doc.venue}` : ''}`).slice(0, 5),
+      takeaway: '点击下方「生成多篇对比 PPT」可基于精读与全文生成完整组会汇报。',
+    });
+    const header = ['文献', '年份 / 会场', '精读已备章节'];
+    const rows = input.documents.map((doc) => {
+      const entries = input.entriesByKey[doc.key] ?? {};
+      const ready = READING_STEPS.filter((step) => Boolean(entries[step.kind])).map((s) => s.label).join('、') || '正文已就绪';
+      return [truncate(doc.title || doc.key, 36), [doc.year, doc.venue].filter(Boolean).join(' · ') || '—', ready];
+    });
+    pages.push({ section: 'experiment', title: '纳入对比的文献清单', bullets: [], table: { header, rows } });
+  }
+  const summaryDoc: DocumentSummary = {
+    id: 'compare-deck',
+    key: 'compare-deck',
+    title: `组会多篇对比汇报（${input.documents.length} 篇）`,
+    authors: input.documents.flatMap((d) => d.authors.slice(0, 1)).slice(0, 5),
+    year: input.documents[0]?.year ?? null,
+    venue: 'ReadX 多文献综述',
+    doi: '',
+    url: '',
+    status: 'done',
+    pdfPath: '',
+    addedAt: '',
+    updatedAt: '',
+  };
+  return createDeckScenes(summaryDoc, pages, input.theme ?? DEFAULT_PRESENTATION_THEME, !input.plannedOnly);
+}
+
+export async function generateCompareDeck(input: ComparePresentationInput): Promise<PresentationSummary> {
+  const scenes = buildCompareDeck(input);
+  return exportScenesToPptx(scenes, `组会多篇对比汇报（${input.documents.length} 篇）`, input.signal);
+}
+
+async function exportScenesToPptx(scenes: PresentationScene[], title: string, signal?: AbortSignal): Promise<PresentationSummary> {
   const { default: Pptx } = await import('pptxgenjs');
   const pptx = new Pptx();
   pptx.layout = 'LAYOUT_WIDE';
   pptx.author = 'ReadX'; pptx.company = 'ReadX'; pptx.subject = '论文研究汇报';
-  pptx.title = input.document?.title || '论文精读报告';
+  pptx.title = title;
   pptx.theme = { headFontFace: TEXT_FONT, bodyFontFace: TEXT_FONT };
-  const scenes = buildReadingDeck(input);
   let figures = 0;
   const imageCache = new Map<string, Promise<string | null>>();
   for (const scene of scenes) {
-    input.signal?.throwIfAborted();
+    signal?.throwIfAborted();
     const slide = pptx.addSlide();
     slide.background = { color: scene.background };
     for (const node of scene.nodes) {
@@ -115,7 +180,7 @@ export async function generateReadingDeck(input: PresentationInput): Promise<Pre
         let image = imageCache.get(node.url);
         if (!image) { image = loadImage(node.url); imageCache.set(node.url, image); }
         const data = await image;
-        input.signal?.throwIfAborted();
+        signal?.throwIfAborted();
         if (!data) throw new Error(`无法嵌入原图「${node.alt}」，请待图表加载完成后重试。`);
         const dimensions = await imageDimensions(data);
         const scale = Math.min(node.w / dimensions.width, node.h / dimensions.height);
@@ -126,8 +191,8 @@ export async function generateReadingDeck(input: PresentationInput): Promise<Pre
     }
     if (scene.notes) slide.addNotes(scene.notes);
   }
-  const fileName = `${safeFileName(input.document?.title || '论文精读报告')} · ReadX.pptx`;
-  input.signal?.throwIfAborted();
+  const fileName = `${safeFileName(title)} · ReadX.pptx`;
+  signal?.throwIfAborted();
   await pptx.writeFile({ fileName });
   return { slides: scenes.length, figures, fileName };
 }

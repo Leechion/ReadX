@@ -37,7 +37,7 @@ export function readableTheme(input: PresentationTheme): PresentationTheme {
 }
 export interface PlannedSlide {
   section: ReadingKind; title: string; bullets: string[];
-  layout?: PresentationLayout; takeaway?: string; visualIds?: string[];
+  layout?: PresentationLayout; takeaway?: string; visualIds?: string[]; table?: DeckTable;
 }
 export interface PresentationPlan { slides: PlannedSlide[] }
 export interface DeckVisual { id: string; section: ReadingKind; page: number; caption: string; imageURL: string; points: string[]; notes: string }
@@ -60,9 +60,22 @@ export function normalizePlannedSlide(value: unknown, allowed: Set<ReadingKind>)
   const bullets = item.bullets.filter((v): v is string => typeof v === 'string').map((v) => v.trim()).filter(Boolean).slice(0, 6);
   if (!title || !bullets.length) return null;
   const layout = typeof item.layout === 'string' && Object.hasOwn(LAYOUT_NAMES, item.layout) ? item.layout as PresentationLayout : undefined;
+  let table: DeckTable | undefined;
+  if (item.table && typeof item.table === 'object') {
+    const rawTable = item.table as Record<string, unknown>;
+    if (Array.isArray(rawTable.header) && Array.isArray(rawTable.rows)) {
+      const header = rawTable.header.filter((v): v is string => typeof v === 'string').map((v) => v.trim()).slice(0, 5);
+      const rows = rawTable.rows
+        .filter((r): r is unknown[] => Array.isArray(r))
+        .slice(0, 6)
+        .map((r) => header.map((_, i) => (typeof r[i] === 'string' ? (r[i] as string).trim() : '—')));
+      if (header.length >= 2 && rows.length >= 1) table = { header, rows };
+    }
+  }
   return { section: item.section as ReadingKind, title, bullets, layout,
     takeaway: typeof item.takeaway === 'string' ? item.takeaway.trim().slice(0, 240) : undefined,
-    visualIds: Array.isArray(item.visualIds) ? item.visualIds.filter((v): v is string => typeof v === 'string').slice(0, 2) : [] };
+    visualIds: Array.isArray(item.visualIds) ? item.visualIds.filter((v): v is string => typeof v === 'string').slice(0, 2) : [],
+    table };
 }
 
 // The same measured text boxes feed the SVG preview and native PowerPoint text.

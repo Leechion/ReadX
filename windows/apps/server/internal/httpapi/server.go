@@ -56,6 +56,8 @@ type Server struct {
 	syncMu              sync.Mutex
 	realtimeMu          sync.Mutex
 	realtimeSessions    map[string]*latexRealtimeSession
+	companionMu         sync.Mutex
+	companion           *lanCompanionState
 	workBuddyLoginMu    sync.Mutex
 	workBuddyLogin      workBuddyLoginStatus
 	// Paper memory and visual preparation are shared across five concurrent
@@ -111,6 +113,10 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/scholar/queue", withAuth(s.handleScholarQueue))
 	mux.Handle("POST /v1/scholar/snowball", withAuth(s.handleScholarSnowball))
 	mux.Handle("POST /v1/shares/readonly", withAuth(s.handleReadonlyShare))
+	mux.Handle("GET /v1/shares/lan", withAuth(s.handleLANShare))
+	mux.Handle("POST /v1/shares/lan", withAuth(s.handleLANShare))
+	mux.Handle("DELETE /v1/shares/lan", withAuth(s.handleLANShare))
+	mux.Handle("GET /v1/export/markdown-vault", withAuth(s.handleExportMarkdownVault))
 	mux.Handle("GET /v1/capture/inbox", withAuth(s.handleCaptureInbox))
 	mux.Handle("POST /v1/capture/inbox", withAuth(s.handleCaptureInbox))
 	mux.Handle("POST /v1/zotero/authorize", withAuth(s.handleZoteroAuthorize))
@@ -128,6 +134,8 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("/v1/meta", withAuth(s.handleMeta))
 	mux.Handle("/v1/sync/settings", withAuth(s.handleSyncSettings))
 	mux.Handle("/v1/sync", withAuth(s.handleSyncNow))
+	mux.Handle("GET /v1/sync/conflicts", withAuth(s.handleSyncConflicts))
+	mux.Handle("POST /v1/sync/conflicts/resolve", withAuth(s.handleSyncConflictResolve))
 	mux.Handle("GET /v1/books/search", withAuth(s.handleSlackBookSearch))
 	mux.Handle("GET /v1/books/download", withAuth(s.handleSlackBookDownload))
 	mux.Handle("GET /v1/books/fetch-web", withAuth(s.handleSlackWebSourceFetch))
@@ -197,6 +205,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("POST /v1/latex/projects/{id}/file-ops", withAuth(s.handleLatexFileOps))
 	mux.Handle("POST /v1/latex/projects/{id}/import-zip", withAuth(s.handleLatexImportZip))
 	mux.Handle("GET /v1/latex/projects/{id}/export-zip", withAuth(s.handleLatexExportZip))
+	mux.Handle("POST /v1/latex/projects/{id}/cite-library", withAuth(s.handleLatexCiteLibrary))
 	mux.Handle("GET /v1/latex/toolchains", withAuth(s.handleLatexToolchains))
 	mux.Handle("GET /v1/latex/realtime/runtime", withAuth(s.handleLatexRealtimeRuntime))
 	mux.Handle("POST /v1/latex/realtime/runtime", withAuth(s.handleLatexRealtimeRuntime))
@@ -205,14 +214,22 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/latex/projects/{id}/builds", withAuth(s.handleLatexBuilds))
 	mux.Handle("POST /v1/latex/projects/{id}/builds", withAuth(s.handleLatexBuilds))
 	mux.Handle("GET /v1/latex/builds/{id}", withAuth(s.handleLatexBuild))
+	mux.Handle("GET /v1/latex/builds/{id}/synctex/forward", withAuth(s.handleLatexSyncTeXForward))
+	mux.Handle("GET /v1/latex/builds/{id}/synctex/reverse", withAuth(s.handleLatexSyncTeXReverse))
 	mux.Handle("GET /v1/latex/builds/{id}/{action}", withAuth(s.handleLatexBuild))
 	mux.Handle("POST /v1/latex/builds/{id}/{action}", withAuth(s.handleLatexBuild))
 	// 源码快照：AI 直接写盘前会自动留一份，用户也可以手动打快照与回滚。
 	mux.Handle("GET /v1/latex/projects/{id}/snapshots", withAuth(s.handleLatexSnapshots))
 	mux.Handle("POST /v1/latex/projects/{id}/snapshots", withAuth(s.handleLatexSnapshots))
 	mux.Handle("GET /v1/latex/snapshots/{id}", withAuth(s.handleLatexSnapshot))
+	mux.Handle("GET /v1/latex/snapshots/{id}/diff", withAuth(s.handleLatexSnapshotDiff))
 	mux.Handle("POST /v1/latex/snapshots/{id}", withAuth(s.handleLatexSnapshot))
 	mux.Handle("DELETE /v1/latex/snapshots/{id}", withAuth(s.handleLatexSnapshot))
+	mux.Handle("GET /v1/latex/projects/{id}/git/status", withAuth(s.handleLatexGitStatus))
+	mux.Handle("POST /v1/latex/projects/{id}/git/init", withAuth(s.handleLatexGitInit))
+	mux.Handle("POST /v1/latex/projects/{id}/git/commit", withAuth(s.handleLatexGitCommit))
+	mux.Handle("POST /v1/latex/projects/{id}/git/remote", withAuth(s.handleLatexGitRemote))
+	mux.Handle("POST /v1/latex/projects/{id}/git/sync", withAuth(s.handleLatexGitSync))
 	mux.Handle("GET /v1/ai/status", withAuth(s.handleAIStatus))
 	mux.Handle("GET /v1/voice-studio/voices", withAuth(s.handleVoiceStudioVoices))
 	mux.Handle("POST /v1/voice-studio/speech", withAuth(s.handleVoiceStudioSpeech))
@@ -225,6 +242,7 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("GET /v1/ai/workbuddy/login", withAuth(s.handleWorkBuddyLoginStatus))
 	mux.Handle("DELETE /v1/ai/workbuddy/login", withAuth(s.handleWorkBuddyLogout))
 	mux.Handle("POST /v1/ai/chat", withAuth(s.handleAIChat))
+	mux.Handle("POST /v1/ai/library-chat", withAuth(s.handleLibraryChat))
 	mux.Handle("POST /v1/ai/latex-chat", withAuth(s.handleLatexAIChat))
 	mux.Handle("POST /v1/ai/latex-edit", withAuth(s.handleLatexAIEdit))
 	mux.Handle("POST /v1/ai/latex-fix", withAuth(s.handleLatexAIFix))
@@ -236,6 +254,12 @@ func (s *Server) Handler() http.Handler {
 	mux.Handle("PUT /v1/ai/latex-settings", withAuth(s.handleLatexAISettings))
 	mux.Handle("POST /v1/ai/presentation-theme", withAuth(s.handleAIPresentationTheme))
 	mux.Handle("POST /v1/ai/presentation-plan", withAuth(s.handleAIPresentationPlan))
+	mux.Handle("POST /v1/ai/presentation-compare-plan", withAuth(s.handleAIPresentationComparePlan))
+	mux.Handle("POST /v1/ai/ocr-region", withAuth(s.handleOCRRegion))
+	mux.Handle("POST /v1/ai/podcast-script", withAuth(s.handlePodcastScript))
+	mux.Handle("GET /v1/flashcards", withAuth(s.handleFlashcards))
+	mux.Handle("POST /v1/flashcards/review", withAuth(s.handleFlashcardReview))
+	mux.Handle("GET /v1/flashcards/export", withAuth(s.handleFlashcardsExport))
 	mux.Handle("POST /v1/ai/generate", withAuth(s.handleAIGenerate))
 	mux.Handle("GET /v1/documents/{key}/comparison-experiment-job", withAuth(s.handleComparisonExperimentJob))
 	mux.Handle("POST /v1/documents/{key}/comparison-experiment-job", withAuth(s.handleComparisonExperimentJob))

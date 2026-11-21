@@ -32,6 +32,7 @@ var annotationKinds = map[string]string{
 	"underline": "下划线",
 	"question":  "问题",
 	"margin":    "页边笔记",
+	"ink":       "手写墨迹",
 }
 
 var annotationColors = map[string]bool{
@@ -60,15 +61,28 @@ type annotationRect struct {
 	Width  float64 `json:"width"`
 	Height float64 `json:"height"`
 }
+type annotationPoint struct {
+	X float64 `json:"x"`
+	Y float64 `json:"y"`
+}
+type annotationStroke struct {
+	Points []annotationPoint `json:"points"`
+	Width  float64           `json:"width,omitempty"`
+}
 type annotationLocator struct {
-	Kind        string           `json:"kind"`
-	Href        string           `json:"href,omitempty"`
-	BlockStart  int              `json:"blockStart,omitempty"`
-	BlockEnd    int              `json:"blockEnd,omitempty"`
-	StartOffset int              `json:"startOffset,omitempty"`
-	EndOffset   int              `json:"endOffset,omitempty"`
-	Rects       []annotationRect `json:"rects,omitempty"`
-	NoteRect    *annotationRect  `json:"noteRect,omitempty"`
+	Kind        string             `json:"kind"`
+	Href        string             `json:"href,omitempty"`
+	BlockStart  int                `json:"blockStart,omitempty"`
+	BlockEnd    int                `json:"blockEnd,omitempty"`
+	StartOffset int                `json:"startOffset,omitempty"`
+	EndOffset   int                `json:"endOffset,omitempty"`
+	Rects       []annotationRect   `json:"rects,omitempty"`
+	NoteRect    *annotationRect    `json:"noteRect,omitempty"`
+	Strokes     []annotationStroke `json:"strokes,omitempty"`
+}
+
+func validAnnotationPoint(pt annotationPoint) bool {
+	return pt.X >= 0 && pt.X <= 1.002 && pt.Y >= 0 && pt.Y <= 1.002
 }
 
 func validAnnotationRect(rect annotationRect) bool {
@@ -124,9 +138,24 @@ func (s *Server) handleAnnotationCreate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	quote := strings.TrimSpace(body.Quote)
-	if quote == "" && body.Kind != "margin" {
+	kind := body.Kind
+	if kind == "" {
+		kind = "highlight"
+	}
+	if _, known := annotationKinds[kind]; !known {
+		writeError(w, http.StatusBadRequest, "不支持的批注类型")
+		return
+	}
+	if quote == "" && kind != "margin" && kind != "ink" {
 		writeError(w, http.StatusBadRequest, "批注必须带上被标注的原文摘录")
 		return
+	}
+	if kind == "ink" && quote == "" {
+		if body.Page != nil {
+			quote = fmt.Sprintf("手写墨迹（第 %d 页）", *body.Page)
+		} else {
+			quote = "手写墨迹"
+		}
 	}
 	if len([]rune(quote)) > maxAnnotationQuote {
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("摘录过长（> %d 字），请缩小选区", maxAnnotationQuote))
@@ -136,16 +165,12 @@ func (s *Server) handleAnnotationCreate(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusBadRequest, fmt.Sprintf("批注正文过长（上限 %d 字）", maxAnnotationNote))
 		return
 	}
-	kind := body.Kind
-	if kind == "" {
-		kind = "highlight"
-	}
-	if _, known := annotationKinds[kind]; !known {
-		writeError(w, http.StatusBadRequest, "不支持的批注类型")
-		return
-	}
 	if kind == "margin" && (strings.TrimSpace(body.Note) == "" || body.Locator == nil || body.Locator.Kind != "pdf" || (body.Locator.NoteRect == nil && len(body.Locator.Rects) != 1)) {
 		writeError(w, http.StatusBadRequest, "页边笔记需要内容和 PDF 页面位置")
+		return
+	}
+	if kind == "ink" && (body.Locator == nil || body.Locator.Kind != "pdf" || len(body.Locator.Strokes) == 0 || len(body.Locator.Strokes) > 80) {
+		writeError(w, http.StatusBadRequest, "手写墨迹需要有效的 PDF 笔迹数据（1–80 笔）")
 		return
 	}
 	color := strings.ToLower(strings.TrimSpace(body.Color))
@@ -176,7 +201,52 @@ func (s *Server) handleAnnotationCreate(w http.ResponseWriter, r *http.Request) 
 	if body.Locator != nil {
 		loc := body.Locator
 		if loc.Kind == "pdf" {
-			if doc.Format != "pdf" || body.Page == nil || len(loc.Rects) == 0 || len(loc.Rects) > 300 {
+			if doc.Format != "pdf" || body.Page == nil {
+				writeError(w, 400, "PDF 批注位置无效")
+				return
+			}
+			if kind == "ink" {
+				minX, minY, maxX, maxY := 1.0, 1.0, 0.0, 0.0
+				for sIdx := range loc.Strokes {
+					stroke := &loc.Strokes[sIdx]
+					if len(stroke.Points) < 2 || len(stroke.Points) > 500 {
+						writeError(w, 400, "每笔墨迹至少 2 个点且不超过 500 个点")
+						return
+					}
+					if stroke.Width <= 0 || stroke.Width > 0.05 {
+						stroke.Width = 0.003
+					}
+					for _, pt := range stroke.Points {
+						if !validAnnotationPoint(pt) {
+							writeError(w, 400, "手写笔迹坐标必须在页面内")
+							return
+						}
+						if pt.X < minX {
+							minX = pt.X
+						}
+						if pt.Y < minY {
+							minY = pt.Y
+						}
+						if pt.X > maxX {
+							maxX = pt.X
+						}
+						if pt.Y > maxY {
+							maxY = pt.Y
+						}
+					}
+				}
+				if len(loc.Rects) == 0 {
+					w := maxX - minX
+					h := maxY - minY
+					if w < 0.004 {
+						w = 0.004
+					}
+					if h < 0.004 {
+						h = 0.004
+					}
+					loc.Rects = []annotationRect{{X: minX, Y: minY, Width: min(w, 1.0-minX+0.001), Height: min(h, 1.0-minY+0.001)}}
+				}
+			} else if len(loc.Rects) == 0 || len(loc.Rects) > 300 {
 				writeError(w, 400, "PDF 批注位置无效")
 				return
 			}
@@ -318,8 +388,8 @@ func (s *Server) handleAnnotationPatch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "读取批注失败")
 			return
 		}
-		if (*body.Kind == "margin") != (currentKind == "margin") {
-			writeError(w, http.StatusBadRequest, "页边笔记不能转换为其他批注类型")
+		if (*body.Kind == "margin") != (currentKind == "margin") || (*body.Kind == "ink") != (currentKind == "ink") {
+			writeError(w, http.StatusBadRequest, "页边笔记或手写墨迹不能转换为其他批注类型")
 			return
 		}
 		if _, known := annotationKinds[*body.Kind]; !known {

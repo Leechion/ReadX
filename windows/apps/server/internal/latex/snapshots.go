@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -31,6 +32,22 @@ type RestoreReport struct {
 	RemovedFiles []string `json:"removedFiles"`
 	// RestoredMainFile 为 true 表示连根文档设置一起回到了快照时的值。
 	RestoredMainFile bool `json:"restoredMainFile"`
+}
+
+// SnapshotFileDiff 描述单个文件在某个快照与当前工作区之间的差异。
+type SnapshotFileDiff struct {
+	Path    string `json:"path"`
+	Status  string `json:"status"` // "modified" | "added" | "deleted"
+	Before  string `json:"before,omitempty"`
+	After   string `json:"after,omitempty"`
+	Binary  bool   `json:"binary,omitempty"`
+	TooBig  bool   `json:"tooBig,omitempty"`
+}
+
+// SnapshotDiffResult 返回快照与当前项目源码的逐文件对比结果。
+type SnapshotDiffResult struct {
+	Snapshot *Snapshot          `json:"snapshot"`
+	Files    []SnapshotFileDiff `json:"files"`
 }
 
 const (
@@ -398,4 +415,155 @@ func copyFile(source, target string, mode os.FileMode) error {
 		return err
 	}
 	return nil
+}
+
+const maxSnapshotDiffBytes = 512 << 10
+
+// DiffSnapshot 对比某个历史快照与当前工作区源码，列出新增、删除和修改的文件内容。
+func (s *Service) DiffSnapshot(ctx context.Context, snapshotID string) (*SnapshotDiffResult, error) {
+	snapshot, err := s.Snapshot(ctx, snapshotID)
+	if err != nil {
+		return nil, err
+	}
+	snapDir, err := s.SnapshotDir(snapshot.ProjectID, snapshot.ID)
+	if err != nil {
+		return nil, err
+	}
+	snapSrc := filepath.Join(snapDir, "src")
+	if info, statErr := os.Stat(snapSrc); statErr != nil || !info.IsDir() {
+		return nil, fmt.Errorf("%w: 快照内容已不在磁盘上", ErrNotFound)
+	}
+	curSrc, err := s.SrcDir(snapshot.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+
+	snapFiles, err := collectTreeFiles(snapSrc)
+	if err != nil {
+		return nil, err
+	}
+	curFiles, err := collectTreeFiles(curSrc)
+	if err != nil {
+		return nil, err
+	}
+
+	seen := map[string]struct{}{}
+	allPaths := make([]string, 0, len(snapFiles)+len(curFiles))
+	for p := range snapFiles {
+		seen[p] = struct{}{}
+		allPaths = append(allPaths, p)
+	}
+	for p := range curFiles {
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			allPaths = append(allPaths, p)
+		}
+	}
+	sort.Strings(allPaths)
+
+	diffs := make([]SnapshotFileDiff, 0)
+	for _, rel := range allPaths {
+		snapAbs, inSnap := snapFiles[rel]
+		curAbs, inCur := curFiles[rel]
+		kind := FileKind(rel)
+		isText := editableKind(kind)
+
+		if !inSnap && inCur {
+			item := SnapshotFileDiff{Path: rel, Status: "added", Binary: !isText}
+			if isText {
+				text, tooBig, readErr := readDiffTextFile(curAbs)
+				if readErr != nil {
+					return nil, readErr
+				}
+				item.After = text
+				item.TooBig = tooBig
+			}
+			diffs = append(diffs, item)
+			continue
+		}
+		if inSnap && !inCur {
+			item := SnapshotFileDiff{Path: rel, Status: "deleted", Binary: !isText}
+			if isText {
+				text, tooBig, readErr := readDiffTextFile(snapAbs)
+				if readErr != nil {
+					return nil, readErr
+				}
+				item.Before = text
+				item.TooBig = tooBig
+			}
+			diffs = append(diffs, item)
+			continue
+		}
+		// Both exist: compare raw bytes first.
+		snapBytes, err := os.ReadFile(snapAbs)
+		if err != nil {
+			return nil, err
+		}
+		curBytes, err := os.ReadFile(curAbs)
+		if err != nil {
+			return nil, err
+		}
+		if string(snapBytes) == string(curBytes) {
+			continue
+		}
+		item := SnapshotFileDiff{Path: rel, Status: "modified", Binary: !isText}
+		if isText {
+			if len(snapBytes) > maxSnapshotDiffBytes || len(curBytes) > maxSnapshotDiffBytes {
+				item.TooBig = true
+			} else {
+				item.Before = string(snapBytes)
+				item.After = string(curBytes)
+			}
+		}
+		diffs = append(diffs, item)
+	}
+
+	return &SnapshotDiffResult{Snapshot: snapshot, Files: diffs}, nil
+}
+
+func collectTreeFiles(root string) (map[string]string, error) {
+	result := map[string]string{}
+	if _, err := os.Stat(root); os.IsNotExist(err) {
+		return result, nil
+	}
+	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if d.IsDir() {
+			if d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return err
+		}
+		rel = filepath.ToSlash(rel)
+		if rel == "" || rel == "." {
+			return nil
+		}
+		result[rel] = p
+		return nil
+	})
+	return result, err
+}
+
+func readDiffTextFile(path string) (string, bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", false, err
+	}
+	if info.Size() > maxSnapshotDiffBytes {
+		return "", true, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", false, err
+	}
+	return string(data), false, nil
 }

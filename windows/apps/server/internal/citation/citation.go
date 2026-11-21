@@ -223,27 +223,35 @@ func BibTeX(works []Work, at time.Time) string {
 	out.WriteString("% 作者姓名按库中题录原样输出，未做 \"Last, First\" 改写。\n\n")
 	used := map[string]int{}
 	for _, work := range works {
-		class := Classify(work)
-		fmt.Fprintf(&out, "@%s{%s,\n", class.Kind, CiteKey(work, used))
-		writeBibField(&out, "author", strings.Join(work.Authors, " and "))
-		writeBibField(&out, "title", work.Title)
-		if class.Value != "" {
-			writeBibField(&out, class.Field, class.Value)
-		}
-		if work.Year > 0 {
-			writeBibField(&out, "year", fmt.Sprintf("%d", work.Year))
-		}
-		writeBibField(&out, "doi", work.DOI)
-		if work.ArxivID != "" {
-			writeBibField(&out, "eprint", work.ArxivID)
-			writeBibField(&out, "archivePrefix", "arXiv")
-		}
-		writeBibField(&out, "url", work.URL)
-		if len(work.Keywords) > 0 {
-			writeBibField(&out, "keywords", strings.Join(work.Keywords, ", "))
-		}
-		out.WriteString("}\n\n")
+		out.WriteString(BibTeXEntry(work, CiteKey(work, used)))
+		out.WriteString("\n")
 	}
+	return out.String()
+}
+
+// BibTeXEntry 渲染单篇论文的 BibTeX 条目；调用方负责传入已去重的 citeKey。
+func BibTeXEntry(work Work, citeKey string) string {
+	var out strings.Builder
+	class := Classify(work)
+	fmt.Fprintf(&out, "@%s{%s,\n", class.Kind, citeKey)
+	writeBibField(&out, "author", strings.Join(work.Authors, " and "))
+	writeBibField(&out, "title", work.Title)
+	if class.Value != "" {
+		writeBibField(&out, class.Field, class.Value)
+	}
+	if work.Year > 0 {
+		writeBibField(&out, "year", fmt.Sprintf("%d", work.Year))
+	}
+	writeBibField(&out, "doi", work.DOI)
+	if work.ArxivID != "" {
+		writeBibField(&out, "eprint", work.ArxivID)
+		writeBibField(&out, "archivePrefix", "arXiv")
+	}
+	writeBibField(&out, "url", work.URL)
+	if len(work.Keywords) > 0 {
+		writeBibField(&out, "keywords", strings.Join(work.Keywords, ", "))
+	}
+	out.WriteString("}\n")
 	return out.String()
 }
 

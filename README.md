@@ -26,7 +26,7 @@ ReadX 是一个面向科研阅读与论文写作的桌面工作区：导入论�
 
 桌面版按住 `Alt` 约 0.26 秒，可在鼠标附近呼出双层轮盘：内环切换个人书库、学术工作台、PPT、LaTeX Studio 与摸鱼，外环打开对应文献、待办或项目。移到目标后松开 `Alt` 即打开，滚轮翻页，`Esc` 取消。关闭主窗口会最小化并保留后台任务；右键系统托盘图标选择「退出 ReadX」才完全退出。macOS 使用 `Option/Alt`，首次需从托盘菜单「启用 Alt 轮盘」授予辅助功能权限。
 
-**v1.0.3（Windows）**：新增跨设备书库同步、PDF 手写页边笔记与 Alt 双层轮盘，并加入 AI 服务商预设和中断任务重新处理入口。完整变更见 [v1.0.3 发布说明](windows/release-notes/v1.0.3.md)。
+**v1.0.4（Windows / macOS）**：重构全局界面与 56px 左侧活动栏设计语言（浅色 / 纸质 / 深色 / 跟随系统四主题、`Ctrl+K` 全局命令面板），新增 **按流程指定 AI 模型**（翻译 / 论文问答 / 精读五重奏独立路由与推理强度）、**精读五重奏右侧步骤轨道**、**阅读日历与科研工作台重构**，以及 **LaTeX Studio 精简双模式编译顶栏与 Google PDF 风格内置阅读器**（HiDPI、段落选取、引用跳转、目录与缩略图、旋转与打印）。早期变更见 [v1.0.3 发布说明](windows/release-notes/v1.0.3.md)。
 
 ### 一眼看懂 ReadX
 
@@ -114,7 +114,7 @@ OCR、翻译、渲染与论文记忆状态分开展示，处理过程更明白�
 
 ![精读五重奏结构图](docs/images/readx-quintet.svg)
 
-- **五个独立章节**：实验动机、方法公式、实验配置、结果分析、代码复现，各自独立生成、独立保存、可单独重新生成。
+- **五个独立章节**：实验动机、方法公式、实验配置、结果分析、代码复现，各自独立生成、独立保存、可单独重新生成；桌面端将 5 步进度轨道固定于右侧，未生成步骤可就地一键生成，阅读区居中排版并支持一键导出全部章节。
 - **带出处的分析**：每节内容附页码与公式引用（如 Page 1、Page 3），结论可逐条回原文核对。
 - **可导出积累**：完成的章节可导出，逐步沉淀成该课题的结构化精读笔记。
 
@@ -134,9 +134,10 @@ OCR、翻译、渲染与论文记忆状态分开展示，处理过程更明白�
 
 配置模型与推理强度，让论文问答和精读流程适配你的工作习惯。
 
-- **多模型预设**：内置 DeepSeek、OpenAI、Anthropic、OpenRouter、通义千问、智谱 GLM、月之暗面、火山引擎等常用服务商，也支持自定义服务端点。
-- **CLI 直连**：Codex Desktop / CLI、Claude Code CLI、Kimi Code CLI 等可直接连接；Codex Desktop 用户登录后即可使用，无需单独管理密钥。
-- **按流程配置**：模型、推理强度等设置保存在本机，翻译、问答与精读可各用各的组合。
+- **多模型预设**：内置 DeepSeek、OpenAI、Anthropic、OpenRouter、通义千问、智谱 GLM、月之暗面、火山引擎等常用服务商，也支持自定义服务端点与连接测速（显示往返延迟 ms）。
+- **CLI 直连**：Codex Desktop / CLI、Claude Code CLI、Kimi Code CLI 与 WorkBuddy 国内版可直接连接；Codex Desktop 用户登录后即可使用，无需单独管理密钥。
+- **全局推理强度与按流程指定**：全局支持 `Low` / `Medium` / `High` 推理强度并跨渠道持久化；可在设置中为 **翻译**、**论文问答**、**精读五重奏** 三条流程分别指定跟随全局、本机 CLI（如 `Claude Code · High`）或独立 HTTP 模型与推理强度，由后端对应接口独立调度。
+- **界面与快捷键**：设置弹窗整合 AI 服务、同步与备份、处理策略、外观（主题、界面密度、阅读正文字体与字号）及键盘快捷键速查；支持 `Ctrl+K` 呼出全局命令面板。
 
 #### 10 · 查找、检索与对照：把散在各篇里的东西找出来
 
@@ -172,10 +173,9 @@ OCR、翻译、渲染与论文记忆状态分开展示，处理过程更明白�
 
 - **项目与文件**：新建项目会得到一份可直接编译的模板（`main.tex` / `references.bib` / `sections/` / `figures/`）；也可以把 Overleaf 导出的 ZIP 直接导进来（自动剥掉外层目录、跳过系统垃圾与编译副产物，并在报告里列出跳过了什么），或随时把源码导出成 ZIP（导出前剔除 `.aux`/`.log` 等副产物）。
 - **编辑**：编辑器是 Monaco（按需加载，不打开这个工作区就不会下载），带 LaTeX 语法高亮、`\begin`/`\end` 配对折叠、Ctrl/Cmd+S 立即保存与约 0.9 秒防抖的自动保存。`\cite` 与 `\ref` 的候选来自项目里真实的 `.bib` 条目与 `\label`；引用了不存在的键会直接标波浪线——那正是编译必然报 undefined 的地方。
-- **编译**：用**本机安装的 TeX 发行版**编译（MiKTeX / TeX Live），latexmk 可用时优先用它，不可用时走内置多趟（引擎 → 需要时跑 bibtex/biber → 交叉引用重跑，最多六趟）。工具链状态如实报告：哪个引擎可用、哪个不可用、为什么不可用（例如本机 `latexmk.exe` 在、但缺 Perl 跑不起来，界面就会这么写，并说明已改用内置多趟）。
-- **毫秒级实时预览**：选择 LuaLaTeX 并开启实时预览后，使用 rtex 按段落增量排版；首次预览排版整篇文档，之后编辑时只更新受影响的段落，并显示段落排版耗时。需要本机 LuaLaTeX；首次使用时可从界面下载并安装 rtex 实时排版引擎。普通 PDF 编译预览仍可用于查看完整编译结果。
-- **诊断**：编译错误与警告按「文件:行号 + 出错的那行源码」列出来，**点一下就跳到编辑器对应位置**；页数、退出码、错误/警告数一并显示，完整日志可随时打开。产物对应的是哪一版源码也被记住，改完源码还没重编译时会明确提示「当前 PDF 是上一次的产物」。
-- **预览**：右栏用 PDF.js 显示编译产物，支持翻页、缩放、适应宽度、下载，以及**在产物里查找**（扫描进度与「有页面读不出文字」都会如实说明）。
+- **实时编译 / 完整编译双模式切换**：顶栏外置深蓝灰 **「实时编译」**（`rtex` + LuaLaTeX 段落级增量排版）与深墨绿 **「编译」**（本机 MiKTeX / TeX Live 最多六趟完整编译）两个模式按钮随时切换；根文档、编译引擎、自动编译、Git 同步、导入/导出 ZIP 等次级操作收进「项目与工具」下拉菜单，减少视觉干扰。
+- **底部可折叠诊断与日志抽屉**：右栏顶部精简为单条编译状态徽章（错误 / 警告 / 页数）与陈旧 PDF 提示条；所有编译错误、行内诊断（标明报告方与 `file:line`，点击直达编辑器源码）、缺失引用提醒以及 **完整编译日志** 统一收纳在预览底部的「诊断与日志」面板中。
+- **Chrome（Google PDF）体验内置阅读器**：右栏基于 PDF.js 打造，支持 HiDPI（≥2x）锐利绘制与原生 `TextLayer` 段落拖选复制；支持点击引用序号（`[1]`、`\cite`、`\ref`、目录及网页链接）直接跳转目标并一键 **「返回 P.X」**（`Alt+←`）回到正文原位；配备可折叠左侧「缩略图 & PDF 目录大纲」边栏、页码直跳、适应宽度/整页、旋转 90°、`Ctrl+F` 悬浮查找、打印、下载 PDF 及双击 SyncTeX 回跳源码。
 - **直接在对话里请求修改**：输入「把 abstract 中的数字删掉」或「润色这一段，保留 LaTeX 命令」并发送，AI 会在对应回复下生成**修改确认卡片**，列出目标文件和修改说明，可展开查看修改前后内容。点**「确认修改」**后才创建源码快照并保存；点「取消修改」则保留原文件。输入栏的**「请求批准」**说明这一确认方式，不需要再找单独的预览按钮。每张卡片对应一个项目内的 `.tex` 或 `.bib` 文件。
 - **结合项目源码定位内容**：助手会读取当前编辑内容和项目内的 `.tex` / `.bib` 上下文，可沿着 `main.tex` 中的 `\input`、`\include` 找到实际章节。例如当前打开 `main.tex`，也可以请求修改 `sec/0_abstract.tex`。大型项目受上下文长度限制；保存前会再次核对源码，避免覆盖 AI 生成期间的新改动。
 - **自动修复编译错误**：展开**「编译修复与源码快照」**可生成修复建议、查看快照或执行自动修复。在工具栏开启**「自动修复写入」**后，自动修复会按「快照 → 写入 → 真实编译 → 错误未减少则回滚」执行，并显示错误数变化和保留／回滚结果；聊天中的修改仍然逐次请求确认。手动回滚会把项目恢复到快照时刻，之后新增的文件会被移除并列出。
@@ -253,13 +253,13 @@ ReadX is a desktop workspace for research reading. Import papers, let recognitio
 4. **Bilingual reading (04)** — Original and translated pages side by side with synced paging, section navigation, preserved two-column layout, and annotated-PDF export.
 5. **Highlights & notes (05)** — Highlight passages and equations, translate a whole paragraph, or send the selection to the assistant with context; annotations persist locally.
 6. **AI assistant (06)** — Paper-context Q&A whose answers cite pages, figures, and sections so every claim can be checked against the source.
-7. **Deep-reading quintet (07)** — Five independently generated and saved sections: motivation, methods and equations, experimental setup, results analysis, and code reproduction.
+7. **Deep-reading quintet (07)** — Five independently generated and saved sections: motivation, methods and equations, experimental setup, results analysis, and code reproduction, with the 5-step progress rail docked on the right and inline step generation.
 8. **Presentation studio (08)** — Pick a paper from the library and generate an editable academic slide deck with live preview, thumbnails, and built-in or custom templates.
-9. **AI settings (09)** — Presets for major providers plus custom endpoints and CLI connections (Codex, Claude Code, Kimi Code), with per-flow model and reasoning-effort choices.
-10. **Find, search & compare (10)** — In-document find with hit counts and next/previous (Ctrl/Cmd+F); library-wide full-text search over indexed page text with snippets, coverage disclosure, and jump-to-page; a cross-paper comparison table for 2–4 papers built from their experimental-setup extractions, with per-cell page links and an explicit "not extracted" vs "not reported" distinction.
-11. **Citations & stats (11)** — BibTeX / RIS export (single paper, shelf, or whole library) that discloses how each entry type was inferred; an OpenAlex-backed citation network showing which library papers this one cites and which cite it; and library statistics covering reading activity, annotations, per-stage processing durations, and year/shelf/topic distribution. Stay time is deliberately not reported — it is not collected.
+9. **AI settings & per-workflow routing (09)** — Presets for major providers plus custom endpoints and CLI connections (Codex, Claude Code, Kimi Code, WorkBuddy), global `Low` / `Medium` / `High` reasoning effort, live connection latency probe (`ms`), and independent workflow overrides for translation, paper Q&A, and deep reading.
+10. **Find, search & compare (10)** — Global `Ctrl+K` command palette, in-document find with hit counts and next/previous (`Ctrl/Cmd+F`), library-wide full-text search over indexed page text, and a cross-paper comparison table for 2–4 papers with per-cell page links.
+11. **Citations, calendar & workbench (11)** — BibTeX / RIS export, OpenAlex citation network, reading calendar heatmap (`Recent Year` / annual switcher) with honest processing-latency & shelf distribution bars (stay time is deliberately not collected), a Research Workbench (daily tasks & timer, degree tracker, arXiv/journal feeds), and a 3-column Code Reproduction workspace.
 12. **Knowledge graph (12)** — cross-paper entities and relations rendered as a dual-ring point cloud: shared entities sit nearest the center, single-paper entities around them, papers on the outer shell, all interlinked. Drag to rotate, scroll to zoom, hover a node to light up every link, click for relations with verbatim, page-anchored evidence that jumps back to the source page. A matrix view stays available for reading exact overlaps. Rendered with three.js (WebGL), lazy-loaded with the graph workspace.
-13. **LaTeX Studio (13)** — Create a starter project or import an Overleaf ZIP, edit real `.tex` / `.bib` files with Monaco, and preview PDFs compiled by your local TeX distribution. With LuaLaTeX and the rtex engine, live preview incrementally typesets changed paragraphs and reports their layout time; the first preview typesets the full document. Send an edit request in chat: the assistant uses project source context to locate the file and returns an approval card with a before/after preview. **Confirm modification** creates a snapshot and saves through the revision-checked file path; **Cancel modification** leaves the file as it was. Each card edits one project source file. LaTeX can use its own HTTP model settings, including a searchable model list. The file tree is resizable, diagnostics can be hidden, and compilation tools and snapshots are collapsed by default. The separate automatic compile-repair action requires its own write toggle and rolls back edits that do not reduce compile errors.
+13. **LaTeX Studio (13)** — Create a starter project or import an Overleaf ZIP, edit real `.tex` / `.bib` files with Monaco (with ReadX light/paper/dark themes), and switch freely via two prominent dark-toned toolbar buttons between **Live Compile** (`rtex` + LuaLaTeX incremental paragraphs) and **Compile** (local TeX multipass / `latexmk`) while secondary tools sit inside a compact dropdown. Errors, clickable source diagnostics, and full build logs dock in a collapsible bottom drawer, paired with a Chrome-style built-in PDF viewer supporting ≥2× HiDPI rendering, `TextLayer` paragraph selection & copy, clickable citations/references (`[1]`, `\cite`, `\ref`) with one-click jump-back history, collapsible outline/thumbnails sidebar, page jump, rotation, `Ctrl+F` find popover, print, download, and double-click SyncTeX.
 14. **Leisure workspace (14)** — Click the draggable top pendant to switch between research and leisure with pale-green comic curtains: flat colors, outlined folds, scalloped valances, and subtle halftone dots. Read local TXT / EPUB novels and image / CBZ comics, search Project Gutenberg and import downloads into the local shelf, or add compatible Legado sources for serialized novels. A weekly slacking report sums reading time, chapters, pages, and streak days; the "mini game" tab ships a 2048 with saved progress and best score; a draggable off-work countdown sign hangs at the top. `Ctrl+Shift+M` switches modes; `Esc` returns from leisure to research.
 
 **Pendant credits:** The hanging rope mascot design is inspired by [elysia395/dsh-wallpaper-engine](https://github.com/elysia395/dsh-wallpaper-engine); the Qwen image is taken from its `ROPE_IMG_QWEN` asset. [Upstream credits](https://github.com/elysia395/dsh-wallpaper-engine/blob/main/assets/readme/SOURCES.md) acknowledge [ZipZipPipe](https://space.bilibili.com/4168597) for the AI-girl character designs. Character and image rights remain with their respective owners. ReadX implements the workspace switch, pendant positioning, and pale-green comic curtain transition. See the [screenshots and Chinese credits above](#挂件来源与致谢).

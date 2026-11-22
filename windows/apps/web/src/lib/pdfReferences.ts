@@ -23,7 +23,7 @@ export interface PDFSourceLink {
   url?: string;
 }
 
-export async function resolvePDFDestination(document: PDFDocumentProxy, destination: string | unknown[]): Promise<PDFLocation> {
+export async function resolvePDFDestination(document: PDFDocumentProxy, destination: string | unknown[], rotation = 0): Promise<PDFLocation> {
   const dest = typeof destination === 'string' ? await document.getDestination(destination) : destination;
   if (!dest) throw new Error('PDF 中没有这个引用目标');
   const ref: unknown = dest[0];
@@ -34,7 +34,7 @@ export async function resolvePDFDestination(document: PDFDocumentProxy, destinat
   else throw new Error('PDF 引用目标的页码无效');
   if (index < 0 || index >= document.numPages) throw new Error('PDF 引用目标超出文档页数');
   const page = await document.getPage(index + 1);
-  const viewport = page.getViewport({ scale: 1 });
+  const viewport = page.getViewport({ scale: 1, rotation });
   const mode = dest[1]?.name;
   const left = mode === 'XYZ' || mode === 'FitR' || mode === 'FitV' || mode === 'FitBV' ? dest[2] : null;
   const top = mode === 'XYZ' ? dest[3] : mode === 'FitR' ? dest[5] : mode === 'FitH' || mode === 'FitBH' ? dest[2] : null;
@@ -43,8 +43,8 @@ export async function resolvePDFDestination(document: PDFDocumentProxy, destinat
   return { page: index + 1, x: Math.max(0, Math.min(1, x / viewport.width)), y: Math.max(0, Math.min(1, y / viewport.height)) };
 }
 
-export async function pdfPageLinks(page: PDFPageProxy): Promise<PDFSourceLink[]> {
-  const viewport = page.getViewport({ scale: 1 });
+export async function pdfPageLinks(page: PDFPageProxy, rotation = 0): Promise<PDFSourceLink[]> {
+  const viewport = page.getViewport({ scale: 1, rotation });
   const annotations = await page.getAnnotations({ intent: 'display' });
   return annotations.flatMap((annotation, index) => {
     if (annotation.subtype !== 'Link' || !Array.isArray(annotation.rect) || annotation.rect.length !== 4) return [];

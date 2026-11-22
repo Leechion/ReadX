@@ -24,6 +24,8 @@ import { AppDialog } from './AppDialog';
 import { initialMarginRect } from './MarginNote';
 import { ListeningDialog } from './ListeningDialog';
 import { ReaderToolbarMenus, type ReaderToolGroup } from './ReaderToolbarMenus';
+import { Icon } from './ui/Icon';
+import { IconButton, Segmented } from './ui/Primitives';
 
 type ReadingMode = 'source' | 'parallel' | 'translation';
 const modeLabels: Record<ReadingMode, string> = { source: '仅原文', parallel: '原文译文', translation: '仅译文' };
@@ -72,6 +74,9 @@ export function ReaderScreen({
   const [inkColor, setInkColor] = useState<'rose' | 'sky' | 'amber' | 'green' | 'violet'>('rose');
   const [podcastOpen, setPodcastOpen] = useState(false);
   const [flashcardsOpen, setFlashcardsOpen] = useState(false);
+  const [pillIdle, setPillIdle] = useState(false);
+  const [hoveredPreviewBlock, setHoveredPreviewBlock] = useState<number | null>(null);
+  const pillIdleTimer = useRef<number | undefined>(undefined);
   const [snipDraft, setSnipDraft] = useState<{
     page: number;
     imageBase64: string;
@@ -145,6 +150,40 @@ export function ReaderScreen({
     if (!focusMode) return;
     document.body.classList.add('reader-focus-active');
     return () => document.body.classList.remove('reader-focus-active');
+  }, [focusMode]);
+  useEffect(() => {
+    const bump = () => {
+      setPillIdle(false);
+      window.clearTimeout(pillIdleTimer.current);
+      pillIdleTimer.current = window.setTimeout(() => setPillIdle(true), 2200);
+    };
+    bump();
+    const el = readerRoot.current;
+    el?.addEventListener('pointermove', bump, { passive: true });
+    el?.addEventListener('wheel', bump, { passive: true });
+    el?.addEventListener('keydown', bump, { passive: true });
+    return () => {
+      window.clearTimeout(pillIdleTimer.current);
+      el?.removeEventListener('pointermove', bump);
+      el?.removeEventListener('wheel', bump);
+      el?.removeEventListener('keydown', bump);
+    };
+  }, []);
+  useEffect(() => {
+    const onToggleSidebar = () => {
+      if (focusMode) { setFocusEdge((prev) => (prev === 'left' ? null : 'left')); return; }
+      setLeftOpen((prev) => !prev);
+    };
+    const onToggleInspector = () => {
+      if (focusMode) { setFocusEdge((prev) => (prev === 'right' ? null : 'right')); return; }
+      setRightOpen((prev) => !prev);
+    };
+    window.addEventListener('readx-toggle-sidebar', onToggleSidebar);
+    window.addEventListener('readx-toggle-inspector', onToggleInspector);
+    return () => {
+      window.removeEventListener('readx-toggle-sidebar', onToggleSidebar);
+      window.removeEventListener('readx-toggle-inspector', onToggleInspector);
+    };
   }, [focusMode]);
   useEffect(() => {
     if (!readerToolbar.current || !readerRoot.current) return;
@@ -992,7 +1031,16 @@ export function ReaderScreen({
       ) : liveTranslationPreview?.blocks.length ? (
         <div className="translation-document live-translation-preview" data-listening-page={liveTranslationPreview.page} aria-live="polite">
           {liveTranslationPreview.blocks.map((block, index) => (
-            <p className="live-translation-block" data-listening-block={index} key={`${index}-${block.source.slice(0, 32)}`}>{block.target}</p>
+            <section
+              className="live-translation-block"
+              data-listening-block={index}
+              data-hovered={hoveredPreviewBlock === index ? 'true' : undefined}
+              onMouseEnter={() => setHoveredPreviewBlock(index)}
+              onMouseLeave={() => setHoveredPreviewBlock((cur) => (cur === index ? null : cur))}
+              key={`${index}-${block.source.slice(0, 32)}`}
+            >
+              <p>{block.target}</p>
+            </section>
           ))}
         </div>
       ) : (
@@ -1112,11 +1160,32 @@ export function ReaderScreen({
       </div> : null}
       <header className="reader-toolbar" ref={readerToolbar}>
         <div className="reader-title-group">
+          <IconButton
+            size="sm"
+            icon="sidebar"
+            label="开关左侧目录 (Ctrl+\)"
+            active={actualLeftOpen}
+            onClick={() => {
+              if (focusMode) { setFocusEdge((prev) => (prev === 'left' ? null : 'left')); return; }
+              setLeftOpen((value) => !value);
+              if (window.innerWidth < 1000) setRightOpen(false);
+            }}
+          />
           <button type="button" onClick={onBack}>← 书库</button>
           <span className="reader-title" title={[selected?.title, selected?.translatedTitle].filter(Boolean).join('\n')}>
             {selected?.title ?? '未选择文档'}
           </span>
         </div>
+        <Segmented
+          ariaLabel="阅读模式"
+          value={mode}
+          onChange={switchMode}
+          options={[
+            { value: 'parallel', label: '双语' },
+            { value: 'source', label: '原文' },
+            { value: 'translation', label: '译文', disabled: epub },
+          ]}
+        />
         {toolMode === 'ink' ? (
           <span className="reader-ink-palette" role="group" aria-label="墨迹颜色">
             {(['rose', 'sky', 'amber', 'green', 'violet'] as const).map((c) => (
@@ -1132,16 +1201,18 @@ export function ReaderScreen({
           </span>
         ) : null}
         <ReaderToolbarMenus groups={toolGroups} />
-      </header>
-      {podcastOpen && documentKey ? (
-        <ReaderPodcastBar
-          documentKey={documentKey}
-          documentTitle={selected?.title || documentKey}
-          currentPage={current}
-          currentPageText={epub ? (section?.text ?? '') : paragraphs.join('\n')}
-          onClose={() => setPodcastOpen(false)}
+        <IconButton
+          size="sm"
+          icon="panel"
+          label="开关右侧助教栏 (Ctrl+.)"
+          active={actualRightOpen}
+          onClick={() => {
+            if (focusMode) { setFocusEdge((prev) => (prev === 'right' ? null : 'right')); return; }
+            setRightOpen((value) => !value);
+            if (window.innerWidth < 1000) setLeftOpen(false);
+          }}
         />
-      ) : null}
+      </header>
       <div className="reader-panels" ref={panelRoot}>
         <aside className="reader-sidebar" data-open={actualLeftOpen} aria-hidden={!actualLeftOpen} inert={!actualLeftOpen} style={{ width: focusMode ? actualLeftOpen ? focusLeftWidth : 0 : visibleLeft, flexBasis: visibleLeft }}>
           <p className="panel-label">{epub ? '章节目录' : 'PDF 目录'}</p>
@@ -1302,31 +1373,91 @@ export function ReaderScreen({
         } : null)}
         onClose={() => { setSpeaking(null); setListening(null); }}
       />}
-      <footer className="reader-statusbar" aria-label="阅读状态">
-        <div className="reader-statusbar__pages">
-          <button type="button" aria-label={epub ? '上一章' : '上一页'} title={epub ? '上一章' : '上一页'} disabled={current <= 1 || !count} onClick={() => navigatePage(current - 1)}>‹</button>
-          <input
-            type="number" min={1} max={count || 1} disabled={!count}
-            aria-label={epub ? '章节序号' : '页码'} value={pageDraft}
-            onChange={(event) => setPageDraft(event.target.value)}
-            onBlur={() => {
-              const value = Number(pageDraft);
-              if (Number.isInteger(value) && value >= 1 && value <= count) { if (value !== current) navigatePage(value); }
-              else setPageDraft(String(current));
-            }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); }
-              else if (event.key === 'Escape') { event.stopPropagation(); setPageDraft(String(current)); }
-            }}
+      <div className={`rx-reader-pill-wrap${pillIdle && !podcastOpen && !focusMode ? ' idle' : ''}`}>
+        {podcastOpen && documentKey ? (
+          <ReaderPodcastBar
+            documentKey={documentKey}
+            documentTitle={selected?.title || documentKey}
+            currentPage={current}
+            currentPageText={epub ? (section?.text ?? '') : paragraphs.join('\n')}
+            onClose={() => setPodcastOpen(false)}
           />
-          <span>/ {count || '—'} {epub ? '章' : '页'}</span>
-          <button type="button" aria-label={epub ? '下一章' : '下一页'} title={epub ? '下一章' : '下一页'} disabled={current >= count || !count} onClick={() => navigatePage(current + 1)}>›</button>
-        </div>
-        <div className="reader-statusbar__progress"><progress value={count ? current : 0} max={count || 1} aria-label="阅读进度" /><span>{readingPercent}%</span></div>
-        <span className="reader-statusbar__document">{selected && statusLabel(selected.status)}</span>
-        <span className="reader-statusbar__processing" title={processingDetail} role="status"><i data-busy={documentJob?.status === 'running' || translationStatus === '翻译中'} />{translationStatus}</span>
-        {focusMode ? <button type="button" className="reader-focus-exit" onClick={leaveFocus} title="退出专注（Ctrl+Shift+Enter / Esc）">退出专注</button> : null}
-      </footer>
+        ) : null}
+        <footer className="reader-statusbar rx-reader-pill" aria-label="阅读状态">
+          <div className="reader-statusbar__pages">
+            <button type="button" aria-label={epub ? '上一章' : '上一页'} title={epub ? '上一章' : '上一页'} disabled={current <= 1 || !count} onClick={() => navigatePage(current - 1)}>‹</button>
+            <input
+              type="number" min={1} max={count || 1} disabled={!count}
+              aria-label={epub ? '章节序号' : '页码'} value={pageDraft}
+              onChange={(event) => setPageDraft(event.target.value)}
+              onBlur={() => {
+                const value = Number(pageDraft);
+                if (Number.isInteger(value) && value >= 1 && value <= count) { if (value !== current) navigatePage(value); }
+                else setPageDraft(String(current));
+              }}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); }
+                else if (event.key === 'Escape') { event.stopPropagation(); setPageDraft(String(current)); }
+              }}
+            />
+            <span>/ {count || '—'} {epub ? '章' : '页'}</span>
+            <button type="button" aria-label={epub ? '下一章' : '下一页'} title={epub ? '下一章' : '下一页'} disabled={current >= count || !count} onClick={() => navigatePage(current + 1)}>›</button>
+          </div>
+          <span className="rx-reader-pill-sep" aria-hidden="true" />
+          <div className="reader-statusbar__progress"><progress value={count ? current : 0} max={count || 1} aria-label="阅读进度" /><span>{readingPercent}%</span></div>
+          {!epub ? (
+            <>
+              <span className="rx-reader-pill-sep" aria-hidden="true" />
+              <div className="rx-reader-zoom" role="group" aria-label="页面缩放">
+                <button
+                  type="button"
+                  aria-label="缩小"
+                  onClick={() => {
+                    const next = (v: number) => Math.max(0.5, Math.round((v - 0.15) * 100) / 100);
+                    if (mode === 'translation') setTranslatedZoom(next);
+                    else { setSourceZoom(next); if (mode === 'parallel') setTranslatedZoom(next); }
+                  }}
+                >
+                  <Icon name="minus" size={13} />
+                </button>
+                <button
+                  type="button"
+                  title="重置缩放至 100%"
+                  onClick={() => { setSourceZoom(1); setTranslatedZoom(1); }}
+                >
+                  {Math.round((mode === 'translation' ? translatedZoom : sourceZoom) * 100)}%
+                </button>
+                <button
+                  type="button"
+                  aria-label="放大"
+                  onClick={() => {
+                    const next = (v: number) => Math.min(3, Math.round((v + 0.15) * 100) / 100);
+                    if (mode === 'translation') setTranslatedZoom(next);
+                    else { setSourceZoom(next); if (mode === 'parallel') setTranslatedZoom(next); }
+                  }}
+                >
+                  <Icon name="plus" size={13} />
+                </button>
+              </div>
+            </>
+          ) : null}
+          <span className="rx-reader-pill-sep" aria-hidden="true" />
+          <span className="reader-statusbar__processing" title={[selected && statusLabel(selected.status), processingDetail].filter(Boolean).join(' · ')} role="status"><i data-busy={documentJob?.status === 'running' || translationStatus === '翻译中'} />{translationStatus}</span>
+          {documentKey ? (
+            <button
+              type="button"
+              className={`rx-reader-pill-podcast${podcastOpen ? ' active' : ''}`}
+              aria-pressed={podcastOpen}
+              onClick={() => setPodcastOpen((v) => !v)}
+              title="展开语音速听与讲稿控制"
+            >
+              <Icon name={podcastOpen ? 'pause' : 'play'} size={12} />
+              <span>速听</span>
+            </button>
+          ) : null}
+          {focusMode ? <button type="button" className="reader-focus-exit" onClick={leaveFocus} title="退出专注（Ctrl+Shift+Enter / Esc）">退出专注</button> : null}
+        </footer>
+      </div>
       {selectedParagraph && documentKey && <ParagraphActions
         key={`${current}-${selectedParagraph.index}-${selectedParagraph.text}`}
         paragraph={selectedParagraph}
@@ -1369,6 +1500,26 @@ export function ReaderScreen({
             left: Math.max(8, Math.min(pending.left, window.innerWidth - 360)),
           }}
         >
+          <div className="selection-colors" role="radiogroup" aria-label="批注颜色">
+            {([
+              { id: 'amber', label: '琥珀' },
+              { id: 'rose', label: '玫红' },
+              { id: 'sky', label: '天蓝' },
+              { id: 'green', label: '青绿' },
+              { id: 'violet', label: '紫色' },
+            ] as const).map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="radio"
+                aria-checked={color === item.id}
+                aria-label={item.label}
+                title={item.label}
+                className={`selection-color-dot ${item.id}${color === item.id ? ' active' : ''}`}
+                onClick={() => setColor(item.id)}
+              />
+            ))}
+          </div>
           <p className="selection-quote">
             {pending.annotation.quote.slice(0, 100)}
           </p>
@@ -1384,25 +1535,6 @@ export function ReaderScreen({
             value={tags}
             onChange={(event) => setTags(event.target.value)}
           />
-          <select
-            aria-label="批注颜色"
-            value={color}
-            onChange={(event) => setColor(event.target.value)}
-          >
-            {['amber', 'rose', 'sky', 'green', 'violet'].map((item) => (
-              <option key={item} value={item}>
-                {
-                  {
-                    amber: '琥珀',
-                    rose: '玫红',
-                    sky: '天蓝',
-                    green: '青绿',
-                    violet: '紫色',
-                  }[item]
-                }
-              </option>
-            ))}
-          </select>
           <div className="selection-actions">
             <button type="button" onClick={() => openListening(pending.annotation.quote)}>朗读选区</button>
             {(['highlight', 'underline', 'question'] as const).map((kind) => (

@@ -4,7 +4,8 @@ import { api, streamLatexAutoFix } from '../../api/client';
 import { useLatexBuild } from '../../hooks/useLatexBuild';
 import { useLatexProject } from '../../hooks/useLatexProject';
 import { useLatexRealtime } from '../../hooks/useLatexRealtime';
-import { LatexBuildPanel } from './LatexBuildPanel';
+import { Icon } from '../ui/Icon';
+import { LATEX_BUILD_STATUS_LABEL, LatexBuildPanel } from './LatexBuildPanel';
 import { LatexAIAssistant } from './LatexAIAssistant';
 import { LatexAssetPreview } from './LatexAssetPreview';
 import { LatexCiteDialog } from './LatexCiteDialog';
@@ -43,6 +44,7 @@ export function LatexWorkspace({
     (state.project ?? project).engine, realtimeEnabled, state.files);
   const [busy, setBusy] = useState(false);
   const [log, setLog] = useState<string | null>(null);
+  const [logLoading, setLogLoading] = useState(false);
   const [reveal, setReveal] = useState<{ path: string; line: number; nonce: number } | null>(null);
   const [citeDialogOpen, setCiteDialogOpen] = useState(false);
   const [gitDialogOpen, setGitDialogOpen] = useState(false);
@@ -411,18 +413,33 @@ export function LatexWorkspace({
     [state],
   );
 
+  const activeBuildId = compiler.build?.id ?? null;
+  useEffect(() => {
+    setLog(null);
+  }, [activeBuildId]);
+
   const showLog = useCallback(async () => {
-    if (!compiler.build) return;
+    if (!compiler.build || !compiler.build.hasLog) return;
+    setLogLoading(true);
     try {
       const result = await api.latexBuildLog(compiler.build.id);
       setLog(result.log);
     } catch (cause) {
       state.setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setLogLoading(false);
     }
   }, [compiler.build, state]);
 
   const current = state.project ?? project;
   const activeBuild = compiler.build;
+  const stalePdf = Boolean(
+    activeBuild?.hasPdf
+    && !compiler.running
+    && !compiler.starting
+    && !realtimeEnabled
+    && (dirtyCount > 0 || (savedSignature && lastCompiledSignature.current && savedSignature !== lastCompiledSignature.current)),
+  );
 
   const handleLibraryCited = useCallback(
     async (result: LatexCiteLibraryResult) => {
@@ -492,67 +509,31 @@ export function LatexWorkspace({
         nodes={state.nodes}
         busy={busy || state.loading}
         dirtyCount={dirtyCount}
+        realtimeEnabled={realtimeEnabled}
+        compiling={compiler.running}
+        starting={compiler.starting}
+        hasBuild={Boolean(activeBuild)}
+        hasPdf={Boolean(activeBuild?.hasPdf)}
+        toolchains={compiler.toolchains}
+        onToggleRealtime={(enabled) => setRealtimeEnabled(enabled)}
+        onCompile={() => void compile()}
+        onCancelCompile={() => void compiler.cancel()}
         onPatch={(next) => void patch(next)}
         onFlush={() => void state.flushAll()}
         onExportZip={() => void exportZip()}
         onImportZip={(file) => void importZip(file)}
+        onOpenGit={() => setGitDialogOpen(true)}
+        onDownloadPdf={() => {
+          if (!activeBuild) return;
+          void api.latexDownloadPdf(activeBuild.id, `${current.title || 'document'}.pdf`);
+        }}
+        onReloadToolchains={() => void compiler.reloadToolchains()}
         onToggleAI={() => setAssistantVisibility(!assistantOpen)}
         aiOpen={assistantOpen}
         onBack={() => {
           void state.flushAll().then((saved) => { if (saved) onClose(); });
         }}
-        extra={
-          <>
-            <button type="button" onClick={() => setGitDialogOpen(true)} title="查看 Git 版本状态、提交并同步到远程仓库">
-              Git 版本
-            </button>
-            <button type="button" aria-pressed={realtimeEnabled}
-              onClick={() => setRealtimeEnabled(value => !value)}
-              title="使用 rtex 和 LuaLaTeX 实时更新编辑中的段落；关闭后查看普通 PDF">
-              {realtimeEnabled ? '关闭实时预览' : '实时预览'}
-            </button>
-            {compiler.running ? (
-              <button type="button" onClick={() => void compiler.cancel()} title="停止当前编译">
-                停止编译
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="primary"
-                disabled={busy || compiler.starting}
-                onClick={() => void compile()}
-                title="先保存改动，再用本机 TeX 编译当前项目"
-              >
-                {activeBuild ? '重新编译' : '编译'}
-              </button>
-            )}
-          </>
-        }
       />
-      {state.error ? (
-        <p className="latex-alert error" role="alert">
-          {state.error}
-          <button type="button" onClick={() => state.setError('')}>
-            知道了
-          </button>
-        </p>
-      ) : null}
-      {compiler.error ? (
-        <p className="latex-alert error" role="alert">
-          {compiler.error}
-          <button type="button" onClick={() => compiler.setError('')}>
-            知道了
-          </button>
-        </p>
-      ) : null}
-      {state.status ? (
-        <p className="latex-alert ok">
-          {state.status}
-          <button type="button" onClick={() => state.setStatus('')}>
-            知道了
-          </button>
-        </p>
-      ) : null}
       <div
         className="latex-panes"
         ref={panesRef}
@@ -642,39 +623,110 @@ export function LatexWorkspace({
           }}
         />
         <aside className="latex-pane-preview">
-          {realtimeEnabled ? <LatexRealtimePreview realtime={realtime} supported={current.engine === 'lualatex'}
-            onSwitchEngine={() => void patch({ engine: 'lualatex' })}
-            onDiagnostic={diagnostic => {
-              const raw = diagnostic.file?.replaceAll('\\', '/').replace(/^\.\//, '');
-              const file = state.nodes.map(node => node.path).sort((a,b) => b.length - a.length)
-                .find(path => raw === path || raw?.endsWith(`/${path}`));
-              if (file && !file.startsWith('/') && !file.includes(':') && !file.split('/').includes('..')) {
-                void state.openFile(file).then(() => setReveal({ path: file, line: diagnostic.line || 1, nonce: Date.now() }));
-              }
-            }} /> : <>
-          <LatexBuildPanel
-            toolchains={compiler.toolchains}
-            build={activeBuild}
-            running={compiler.running}
-            starting={compiler.starting}
-            onCompile={() => void compile()}
-            onCancel={() => void compiler.cancel()}
-            onReloadToolchains={() => void compiler.reloadToolchains()}
-            onOpenDiagnostic={(diagnostic) => void openDiagnostic(diagnostic)}
-            onShowLog={() => void showLog()}
-          />
-          <LatexPdfPreview
-            buildId={activeBuild && activeBuild.hasPdf ? activeBuild.id : null}
-            load={api.latexBuildPdf}
-            syncTarget={syncTarget}
-            onReverseSync={(pageNumber, x, y) => void reverseSync(pageNumber, x, y)}
-            onError={(message) => state.setError(message)}
-            onDownload={() => {
-              if (!activeBuild) return;
-              void api.latexDownloadPdf(activeBuild.id, `${current.title || 'document'}.pdf`);
-            }}
-          />
-          </>}
+          {!realtimeEnabled ? (
+            <header className="latex-inspector-topbar">
+              <span
+                className={`rx-cstat${
+                  !activeBuild
+                    ? ''
+                    : activeBuild.status === 'failed' || activeBuild.status === 'timeout' || activeBuild.errorCount > 0
+                      ? ' bad'
+                      : activeBuild.warningCount > 0
+                        ? ' warn'
+                        : activeBuild.status === 'succeeded'
+                          ? ' good'
+                          : ''
+                }`}
+              >
+                <span className="d" />
+                <span className="tabular-nums">
+                  {compiler.running
+                    ? '编译中…'
+                    : activeBuild
+                      ? `${LATEX_BUILD_STATUS_LABEL[activeBuild.status] ?? activeBuild.status} · ${activeBuild.errorCount} 错误 · ${activeBuild.warningCount} 警告${activeBuild.pages ? ` · ${activeBuild.pages} 页` : ''}`
+                      : '尚未编译'}
+                </span>
+              </span>
+
+              {state.status ? (
+                <span className="latex-status-note" title={state.status}>
+                  {state.status}
+                  <button type="button" onClick={() => state.setStatus('')} aria-label="清除提示">×</button>
+                </span>
+              ) : null}
+
+              <span className="rx-topbar-spacer" />
+
+              {activeBuild?.hasPdf ? (
+                <button
+                  type="button"
+                  className="rx-btn rx-btn-icon rx-btn-ghost"
+                  onClick={() => void api.latexDownloadPdf(activeBuild.id, `${current.title || 'document'}.pdf`)}
+                  title="下载 PDF"
+                  aria-label="下载 PDF"
+                >
+                  <Icon name="import" size={14} />
+                </button>
+              ) : null}
+            </header>
+          ) : null}
+
+          {stalePdf ? (
+            <div className="rx-stale" role="status">
+              <Icon name="alert" size={14} />
+              <span>当前 PDF 是上一次编译的产物，源码已修改</span>
+              <button
+                type="button"
+                className="rx-btn sm ghost"
+                onClick={() => void compile()}
+              >
+                重新编译
+              </button>
+            </div>
+          ) : null}
+
+          {realtimeEnabled ? (
+            <LatexRealtimePreview
+              realtime={realtime}
+              supported={current.engine === 'lualatex'}
+              onSwitchEngine={() => void patch({ engine: 'lualatex' })}
+              onDiagnostic={(diagnostic) => {
+                const raw = diagnostic.file?.replaceAll('\\', '/').replace(/^\.\//, '');
+                const file = state.nodes.map((node) => node.path).sort((a, b) => b.length - a.length)
+                  .find((path) => raw === path || raw?.endsWith(`/${path}`));
+                if (file && !file.startsWith('/') && !file.includes(':') && !file.split('/').includes('..')) {
+                  void state.openFile(file).then(() => setReveal({ path: file, line: diagnostic.line || 1, nonce: Date.now() }));
+                }
+              }}
+            />
+          ) : (
+            <>
+              <LatexPdfPreview
+                buildId={activeBuild && activeBuild.hasPdf ? activeBuild.id : null}
+                load={api.latexBuildPdf}
+                syncTarget={syncTarget}
+                onReverseSync={(pageNumber, x, y) => void reverseSync(pageNumber, x, y)}
+                onError={(message) => state.setError(message)}
+                onDownload={() => {
+                  if (!activeBuild) return;
+                  void api.latexDownloadPdf(activeBuild.id, `${current.title || 'document'}.pdf`);
+                }}
+              />
+              <LatexBuildPanel
+                toolchains={compiler.toolchains}
+                build={activeBuild}
+                log={log}
+                logLoading={logLoading}
+                stateError={state.error}
+                compilerError={compiler.error}
+                onClearStateError={() => state.setError('')}
+                onClearCompilerError={() => compiler.setError('')}
+                onReloadToolchains={() => void compiler.reloadToolchains()}
+                onOpenDiagnostic={(diagnostic) => void openDiagnostic(diagnostic)}
+                onEnsureLog={() => void showLog()}
+              />
+            </>
+          )}
         </aside>
         {assistantOpen ? (
           <>
@@ -717,19 +769,6 @@ export function LatexWorkspace({
           </>
         ) : null}
       </div>
-      {log !== null ? (
-        <div className="latex-log-overlay" role="dialog" aria-label="编译日志">
-          <div className="latex-log-box">
-            <header>
-              <strong>编译日志</strong>
-              <button type="button" onClick={() => setLog(null)}>
-                关闭
-              </button>
-            </header>
-            <pre>{log || '（日志为空）'}</pre>
-          </div>
-        </div>
-      ) : null}
       <LatexCiteDialog
         open={citeDialogOpen}
         projectId={current.id}

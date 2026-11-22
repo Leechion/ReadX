@@ -1,181 +1,217 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { LatexBuild, LatexDiagnostic, LatexToolchainReport } from '@cbct/shared';
-import { STORAGE_KEYS } from '../../lib/storage';
+import { Icon } from '../ui/Icon';
 
-const STATUS_LABEL: Record<string, string> = {
+export const LATEX_BUILD_STATUS_LABEL: Record<string, string> = {
   queued: '排队中',
   running: '编译中',
-  succeeded: '编译成功',
+  succeeded: '已编译',
   failed: '编译失败',
   cancelled: '已取消',
   timeout: '编译超时',
 };
 
 /**
- * 编译面板：工具链状态、编译控制、诊断列表。
- *
- * 诊断的每条都能点回源码行——排版错误的修复体验几乎全取决于这一点。
- * 没有工具链时这里给出具体原因与建议，而不是让人对着「编译失败」猜。
+ * 底部诊断与日志抽屉（对齐 #s-latex 底部 .diag 面板）：
+ * 统一收纳编译报错、行内诊断定位、缺失引用以及完整编译日志，不遮挡 PDF 预览区。
  */
 export function LatexBuildPanel({
   toolchains,
   build,
-  running,
-  starting,
-  onCompile,
-  onCancel,
+  log,
+  logLoading,
+  stateError,
+  compilerError,
+  onClearStateError,
+  onClearCompilerError,
   onReloadToolchains,
   onOpenDiagnostic,
-  onShowLog,
+  onEnsureLog,
 }: {
   toolchains: LatexToolchainReport | null;
   build: LatexBuild | null;
-  running: boolean;
-  starting: boolean;
-  onCompile: () => void;
-  onCancel: () => void;
+  log: string | null;
+  logLoading: boolean;
+  stateError?: string;
+  compilerError?: string;
+  onClearStateError?: () => void;
+  onClearCompilerError?: () => void;
   onReloadToolchains: () => void;
   onOpenDiagnostic: (diagnostic: LatexDiagnostic) => void;
-  onShowLog: () => void;
+  onEnsureLog: () => void;
 }) {
   const unavailable = toolchains?.strategy === 'unavailable';
   const diagnostics = build?.diagnostics ?? [];
-  // 后端已保证这些字段是数组，这里再兜一层：一个 null 就能把整个面板打崩，
-  // 而崩溃现场（React 卸载整棵子树）看起来像「编译卡住了」，极难自查。
   const missingCitations = build?.missingCitations ?? [];
   const missingReferences = build?.missingReferences ?? [];
-  const [diagnosticsHidden, setDiagnosticsHidden] = useState(() =>
-    typeof window !== 'undefined' && window.localStorage.getItem(STORAGE_KEYS.latexDiagnosticsHidden) === 'true',
+  const errorCount = (build?.errorCount ?? 0) + (compilerError ? 1 : 0) + (stateError ? 1 : 0);
+  const warningCount = build?.warningCount ?? 0;
+
+  const hasIssues = Boolean(
+    errorCount > 0 ||
+      warningCount > 0 ||
+      diagnostics.length > 0 ||
+      unavailable ||
+      missingCitations.length > 0 ||
+      missingReferences.length > 0,
   );
 
-  const toggleDiagnostics = () => {
-    setDiagnosticsHidden((hidden) => {
-      const next = !hidden;
-      window.localStorage.setItem(STORAGE_KEYS.latexDiagnosticsHidden, String(next));
-      return next;
-    });
+  const [open, setOpen] = useState(hasIssues);
+  const [panelTab, setPanelTab] = useState<'diagnostics' | 'log'>('diagnostics');
+
+  // 新出现错误或工具链缺失时自动展开底部抽屉。
+  useEffect(() => {
+    if (errorCount > 0 || unavailable) {
+      setOpen(true);
+    }
+  }, [errorCount, unavailable]);
+
+  const switchTab = (next: 'diagnostics' | 'log') => {
+    setPanelTab(next);
+    setOpen(true);
+    if (next === 'log') onEnsureLog();
   };
 
   return (
-    <div className="latex-build-panel">
-      <div className="latex-build-head">
-        <strong>编译</strong>
-        <span className={`latex-build-status status-${build?.status ?? 'idle'}`}>
-          {build ? STATUS_LABEL[build.status] ?? build.status : '尚未编译'}
-        </span>
-        <div className="latex-build-actions">
-          {diagnostics.length ? (
-            <button
-              type="button"
-              onClick={toggleDiagnostics}
-              aria-expanded={!diagnosticsHidden}
-              aria-controls="latex-diagnostics-list"
-            >
-              {diagnosticsHidden ? `显示诊断（${diagnostics.length}）` : '隐藏诊断'}
-            </button>
-          ) : null}
-          {running ? (
-            <button type="button" onClick={onCancel} className="danger">
-              停止
-            </button>
-          ) : (
-            <button type="button" onClick={onCompile} disabled={starting || unavailable} title={unavailable ? '本机没有可用的 TeX 引擎' : '编译当前项目'}>
-              编译
-            </button>
-          )}
-          {build?.hasLog ? (
-            <button type="button" onClick={onShowLog}>
-              日志
-            </button>
-          ) : null}
-        </div>
-      </div>
+    <details
+      className="rx-diag"
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
+      <summary>
+        <span>诊断与日志</span>
 
-      {toolchains ? (
-        <p className="latex-build-toolchain">
-          {toolchains.strategy === 'latexmk'
-            ? '编译方式：latexmk'
-            : unavailable
-              ? '本机没有找到可用的 TeX 引擎'
-              : '编译方式：内置多趟（引擎 + bibtex/biber + 交叉引用重跑）'}
-          {' · '}
-          {toolchains.engines
-            .map((tool) => `${tool.name}${tool.usable ? '' : '（不可用）'}`)
-            .join(' / ')}
-          <button type="button" className="link" onClick={onReloadToolchains} title="重新探测（装完 TeX 后不必重启）">
-            重新探测
+        {errorCount > 0 ? (
+          <span className="rx-chip bad">
+            <Icon name="alert" size={11} />
+            <span className="tabular-nums">{errorCount} 错误</span>
+          </span>
+        ) : null}
+
+        {warningCount > 0 ? (
+          <span className="rx-chip warn">
+            <Icon name="alert" size={11} />
+            <span className="tabular-nums">{warningCount} 警告</span>
+          </span>
+        ) : null}
+
+        {unavailable ? (
+          <span className="rx-chip bad">缺少 TeX 引擎</span>
+        ) : null}
+
+        <span className="rx-diag-grow" />
+
+        <span className="rx-diag-tabs" onClick={(e) => e.preventDefault()}>
+          <button
+            type="button"
+            className={`rx-diag-tab${panelTab === 'diagnostics' ? ' active' : ''}`}
+            onClick={(e) => {
+              e.stopPropagation();
+              switchTab('diagnostics');
+            }}
+          >
+            诊断{diagnostics.length ? ` (${diagnostics.length})` : ''}
           </button>
-        </p>
-      ) : null}
+          <button
+            type="button"
+            className={`rx-diag-tab${panelTab === 'log' ? ' active' : ''}`}
+            disabled={!build?.hasLog && !log}
+            onClick={(e) => {
+              e.stopPropagation();
+              switchTab('log');
+            }}
+          >
+            完整日志
+          </button>
+        </span>
 
-      {unavailable && toolchains?.hints.length ? (
-        <div className="latex-build-hints">
-          {toolchains.hints.map((hint) => (
-            <p key={hint}>{hint}</p>
-          ))}
-        </div>
-      ) : null}
+        <Icon name={open ? 'down' : 'right'} size={13} />
+      </summary>
 
-      {build?.message ? (
-        <p className={`latex-alert ${build.status === 'succeeded' ? 'ok' : 'error'}`}>{build.message}</p>
-      ) : null}
-      {build?.stale && build.hasPdf ? (
-        <p className="latex-alert warn">源码已改动，当前 PDF 是上一次编译的产物。重新编译即可更新。</p>
-      ) : null}
+      <div className="rx-diag-body">
+        {panelTab === 'log' ? (
+          <pre className="rx-diag-log">{logLoading ? '正在读取编译日志…' : (log || '（暂无编译日志）')}</pre>
+        ) : (
+          <>
+            {stateError ? (
+              <div className="rx-diag-alert bad" role="alert">
+                <span>{stateError}</span>
+                {onClearStateError ? (
+                  <button type="button" onClick={onClearStateError}>忽略</button>
+                ) : null}
+              </div>
+            ) : null}
 
-      {build ? (
-        <p className="latex-build-meta">
-          {build.engine} · 根文档 {build.mainFile} · 退出码 {build.exitCode} ·{' '}
-          {build.errorCount} 个错误 / {build.warningCount} 个警告
-          {build.pages ? ` · ${build.pages} 页` : ''}
-        </p>
-      ) : null}
+            {compilerError ? (
+              <div className="rx-diag-alert bad" role="alert">
+                <span>{compilerError}</span>
+                {onClearCompilerError ? (
+                  <button type="button" onClick={onClearCompilerError}>忽略</button>
+                ) : null}
+              </div>
+            ) : null}
 
-      {diagnostics.length ? (
-        diagnosticsHidden ? null : (
-          <ul className="latex-diagnostics" id="latex-diagnostics-list">
-            {diagnostics.map((diagnostic, index) => (
-              <li key={`${diagnostic.file ?? ''}:${diagnostic.line ?? 0}:${index}`} className={`severity-${diagnostic.severity}`}>
-                <button
-                  type="button"
-                  onClick={() => onOpenDiagnostic(diagnostic)}
-                  disabled={!diagnostic.file || !diagnostic.line}
-                  title={
-                    diagnostic.file && diagnostic.line
-                      ? diagnostic.locationSource === 'search'
-                        ? '在项目源码里找到了这个引用键：点它跳到那一行'
-                        : '跳到源码这一行（位置来自日志）'
-                      : '日志里没有给出文件位置——它可能是整篇级的警告，宁可不给也不猜错'
-                  }
-                >
-                  <span className="latex-diagnostic-where">
-                    {diagnostic.file
-                      ? `${diagnostic.file}${diagnostic.line ? `:${diagnostic.line}` : ''}`
-                      : diagnostic.line
-                        ? `全文 · 第 ${diagnostic.line} 行`
-                        : '（日志未给出位置）'}
-                  </span>
-                  {diagnostic.source ? (
-                    <span className="latex-diagnostic-source" title="这条诊断是谁报的">
-                      {diagnostic.source}
+            {build?.message && build.status !== 'succeeded' ? (
+              <div className="rx-diag-alert bad">{build.message}</div>
+            ) : null}
+
+            {unavailable && toolchains?.hints.length ? (
+              <div className="rx-diag-alert bad">
+                <div className="flex flex-col gap-1">
+                  {toolchains.hints.map((hint) => (
+                    <span key={hint}>{hint}</span>
+                  ))}
+                </div>
+                <button type="button" onClick={onReloadToolchains}>重新探测</button>
+              </div>
+            ) : null}
+
+            {build && (missingCitations.length > 0 || missingReferences.length > 0) ? (
+              <div className="rx-diag-alert warn">
+                <span>
+                  未定义引用：
+                  {missingCitations.length ? ` 文献 ${missingCitations.join('、')}` : ''}
+                  {missingReferences.length ? ` 标签 ${missingReferences.join('、')}` : ''}
+                </span>
+              </div>
+            ) : null}
+
+            {diagnostics.length ? (
+              <div className="rx-diag-list">
+                {diagnostics.map((diagnostic, index) => (
+                  <button
+                    key={`${diagnostic.file ?? ''}:${diagnostic.line ?? 0}:${index}`}
+                    type="button"
+                    className={`rx-dg severity-${diagnostic.severity}`}
+                    disabled={!diagnostic.file || !diagnostic.line}
+                    onClick={() => onOpenDiagnostic(diagnostic)}
+                  >
+                    <span className="rx-dg-ic">
+                      <Icon name="alert" size={14} />
                     </span>
-                  ) : null}
-                  <span className="latex-diagnostic-message">{diagnostic.message}</span>
-                  {diagnostic.snippet ? <code className="latex-diagnostic-snippet">{diagnostic.snippet}</code> : null}
-                </button>
-              </li>
-            ))}
-          </ul>
-        )
-      ) : null}
-
-      {build && (missingCitations.length || missingReferences.length) ? (
-        <p className="latex-alert warn">
-          未定义的引用：
-          {missingCitations.length ? ` 文献 ${missingCitations.join('、')}` : ''}
-          {missingReferences.length ? ` 标签 ${missingReferences.join('、')}` : ''}
-        </p>
-      ) : null}
-    </div>
+                    <span className="rx-dg-content">
+                      <b>{diagnostic.message}</b>
+                      <small>
+                        {diagnostic.file
+                          ? `${diagnostic.file}${diagnostic.line ? `:${diagnostic.line}` : ''}`
+                          : diagnostic.line
+                            ? `第 ${diagnostic.line} 行`
+                            : '未标注位置'}
+                        {diagnostic.source ? ` · ${diagnostic.source}` : ''}
+                      </small>
+                      {diagnostic.snippet ? <code>{diagnostic.snippet}</code> : null}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            ) : !stateError && !compilerError && !(build && build.status !== 'succeeded') && !unavailable ? (
+              <p className="rx-diag-empty">
+                {build ? '本次编译无错误或警告。' : '尚未编译，点击上方「编译」或切换至「实时编译」。'}
+              </p>
+            ) : null}
+          </>
+        )}
+      </div>
+    </details>
   );
 }

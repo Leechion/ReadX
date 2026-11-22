@@ -910,6 +910,34 @@ export interface LatexAISettings {
   status: AIStatus;
 }
 
+export type WorkflowKind = 'translation' | 'qa' | 'reading';
+
+export interface WorkflowAISetting {
+  followGlobal: boolean;
+  provider: string;
+  baseURL: string;
+  model: string;
+  reasoningEffort?: string;
+  keyConfigured: boolean;
+  status: AIStatus;
+}
+
+export interface WorkflowAISettingInput {
+  followGlobal: boolean;
+  provider?: string;
+  baseURL?: string;
+  model?: string;
+  apiKey?: string;
+  reasoningEffort?: string;
+}
+
+export interface SavedChannelView {
+  provider: string;
+  baseURL: string;
+  host?: string;
+  keyConfigured: boolean;
+}
+
 export interface AISettings {
   provider: string;
   baseURL: string;
@@ -921,6 +949,9 @@ export interface AISettings {
   status: AIStatus;
   /** LaTeX 工作区的模型渠道状态（与全局分开）。 */
   latex?: LatexAISettings;
+  /** 按流程指定的独立模型配置（翻译 / 论文问答 / 精读五重奏）。 */
+  workflows?: Record<WorkflowKind, WorkflowAISetting>;
+  savedChannels?: SavedChannelView[];
   cli: Record<string, boolean>;
   codex?: { available: boolean; authenticated: boolean; source: string; message: string };
   workbuddy?: { authenticated: boolean; nickname?: string; expiresAt?: number; login?: { state?: string; url?: string; pending: boolean; error?: string } };
@@ -1331,7 +1362,14 @@ export const api = {
     translationPreparation?: 'off' | 'artifacts_only' | 'terms' | 'terms+style' | 'editorial';
     apiKey?: string;
     clearKey?: boolean;
+    workflows?: Partial<Record<WorkflowKind, WorkflowAISettingInput>>;
   }) => request<AISettings>('/v1/ai/settings', { method: 'PUT', body }),
+  /** 按流程指定配置（翻译 / 论文问答 / 精读五重奏）。 */
+  workflowSettings: () =>
+    request<{ workflows: Record<WorkflowKind, WorkflowAISetting>; savedChannels: SavedChannelView[] }>('/v1/ai/workflows'),
+  saveWorkflowSettings: (body: {
+    workflows: Partial<Record<WorkflowKind, WorkflowAISettingInput>>;
+  }) => request<{ workflows: Record<WorkflowKind, WorkflowAISetting>; savedChannels: SavedChannelView[] }>('/v1/ai/workflows', { method: 'PUT', body }),
   /** LaTeX 工作区的模型渠道（与全局分开；followGlobal=true 表示跟随全局）。 */
   latexAISettings: () => request<LatexAISettings>('/v1/ai/latex-settings'),
   saveLatexAISettings: (body: {
@@ -1343,7 +1381,7 @@ export const api = {
     apiKey?: string;
   }) => request<LatexAISettings>('/v1/ai/latex-settings', { method: 'PUT', body }),
   testAI: () =>
-    request<{ ok: boolean; answer: string }>('/v1/ai/test', {
+    request<{ ok: boolean; answer: string; latencyMs?: number; provider?: string; model?: string }>('/v1/ai/test', {
       method: 'POST',
       body: {},
     }),

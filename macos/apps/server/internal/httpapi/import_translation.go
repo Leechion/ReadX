@@ -24,7 +24,7 @@ type publicationPageHint struct {
 // requireImportProviders 是 PDF 导入的硬前提：本地处理链需要 PaddleOCR 与翻译模型。
 // 缺任何一个都直接失败，不再退回文本层分段翻译。
 func (s *Server) requireImportProviders() error {
-	config, err := s.aiConfig()
+	config, err := s.workflowAIConfig(WorkflowTranslation)
 	if err != nil {
 		return fmt.Errorf("导入需要先配置 AI 助教：%w", err)
 	}

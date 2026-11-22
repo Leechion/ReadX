@@ -310,9 +310,14 @@ export function ImportDialog({
         onClose();
       }}
     >
-      <header>
-        <div><p className="section-eyebrow">BUILD YOUR LIBRARY</p><h2>导入文档</h2><p className="import-subtitle">PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI · 识别题录并保存全文翻译</p></div>
+      <header className="flex items-start justify-between gap-4 pb-3 border-b border-line">
+        <div>
+          <h2 className="m-0 text-xl font-semibold text-ink">导入论文</h2>
+          <p className="mt-1 mb-0 text-xs text-ink-faint">支持 PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI · 自动识别题录并全文翻译</p>
+        </div>
         <button
+          type="button"
+          className="rx-ibtn"
           onClick={() => {
             controller.current?.abort();
             onImported();
@@ -323,70 +328,97 @@ export function ImportDialog({
           ×
         </button>
       </header>
-      <ol className="import-steps" aria-label="导入流程"><li><span>01</span>选择文件</li><li><span>02</span>加入待导入队列</li><li><span>03</span>识别题录并翻译</li></ol>
-      <ZoteroImportPanel busy={busy} queuedKeys={zoteroQueuedKeys} onAdd={addZotero} />
-      <ScholarDiscoveryPanel busy={busy} onDownload={importLink} />
-      <CaptureInboxPanel busy={busy} onDownload={importLink} />
-      <ZoteroNotesPanel busy={busy} />
-      <ZoteroMigrationPanel busy={busy} onImported={onImported} />
-      <label className="text-sm">
-        <input type="checkbox" checked={localOnly} disabled={busy} onChange={event => setLocalOnly(event.target.checked)} />
-        仅保存原文（无需 AI / OCR 配置）
-        <small className="block text-ink-faint">适用于下方文件队列，不调用在线识别或翻译；可阅读原文、批注，配置服务后可在阅读器中重新翻译。扫描件暂不识别文字。</small>
-      </label>
-      <UploadShotStage
-        queue={queue}
-        active={active}
-        current={activity.current}
-        results={results}
-        busy={busy}
-        disabled={busy}
-        batchShot={batchShot}
-        batchBusy={busy && batchItems.some(item => item.status === 'queued' || item.status === 'working')}
-        onBatchShotEnd={endBatchShot}
-        onQueue={(selected) => setQueue((items) => [...items, ...selected])}
-        onMake={(file) => void upload(file)}
-      />
-      {queue.length > 0 && (
-        <button className="primary-button import-batch-button" disabled={busy} onClick={() => void startBatch()}>
-          {`并行导入全部（最多同时处理 ${MAX_CONCURRENT_IMPORTS} 篇，${queue.length} 篇）`}
-        </button>
-      )}
-      {batchItems.length > 0 && (
-        <section className="import-batch-progress" aria-live="polite">
-          <h3>批量处理进度</h3>
-          <ul>
-            {batchItems.map((item, index) => (
-              <li key={`${item.file.name}-${index}`} data-state={item.status}>
-                <span title={item.file.webkitRelativePath || item.file.name}>{item.file.name}</span>
-                <span>{item.message}</span>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-      <p className="text-xs text-ink-faint">
-        PDF / EPUB / TXT / MD / DOCX / FB2 / MOBI 均可导入：PDF 单文件最大 512 MB（LeePDF 服务会继续校验 OCR 限制），其余格式最大 100 MB。TXT/MD/DOCX/FB2/MOBI 按章节结构入库阅读。文件夹会递归收集这些格式；选择后点击“并行导入全部”开始处理。
-      </p>
-      <label className="import-link-field">
-        链接、arXiv 编号、DOI 或标题
-        <input
-          value={value}
-          onChange={(event) => setValue(event.target.value)}
-          placeholder="https://… / 2209.14540 / 10.… / 论文标题"
-          disabled={busy}
-        />
-      </label>
-      <div className="dialog-actions">
-        <button
-          disabled={busy || !value.trim()}
-          onClick={() => void importLink(value)}
-        >
-          从链接或编号导入
-        </button>
-        <button disabled={busy || !value.trim()} onClick={() => void search()}>
-          按标题 / DOI 查找
-        </button>
+      <ol className="flex items-center gap-2 py-3 text-xs text-ink-faint list-none m-0 px-0" aria-label="导入流程">
+        <li className={`flex items-center gap-1.5 whitespace-nowrap ${!active && !results.length ? 'text-ink font-medium' : 'text-accent font-medium'}`}>
+          <span className="grid place-items-center w-5 h-5 rounded-full bg-accent text-on-accent text-[11px] font-semibold">1</span>
+          选择文件或链接
+        </li>
+        <li className="flex-1 h-[1.5px] bg-line" aria-hidden="true" />
+        <li className={`flex items-center gap-1.5 whitespace-nowrap ${busy || active ? 'text-ink font-medium' : ''}`}>
+          <span className={`grid place-items-center w-5 h-5 rounded-full text-[11px] font-semibold border ${busy || active ? 'bg-accent border-accent text-on-accent' : 'border-line-strong text-ink-faint'}`}>2</span>
+          入库并翻译
+        </li>
+        <li className="flex-1 h-[1.5px] bg-line" aria-hidden="true" />
+        <li className={`flex items-center gap-1.5 whitespace-nowrap ${results.length ? 'text-ink font-medium' : ''}`}>
+          <span className={`grid place-items-center w-5 h-5 rounded-full text-[11px] font-semibold border ${results.length ? 'bg-accent border-accent text-on-accent' : 'border-line-strong text-ink-faint'}`}>3</span>
+          查看目录与译文
+        </li>
+      </ol>
+      <div className="grid gap-5 md:grid-cols-[1.15fr_1fr] items-start">
+        <div className="min-w-0">
+          <UploadShotStage
+            queue={queue}
+            active={active}
+            current={activity.current}
+            results={results}
+            busy={busy}
+            disabled={busy}
+            batchShot={batchShot}
+            batchBusy={busy && batchItems.some(item => item.status === 'queued' || item.status === 'working')}
+            onBatchShotEnd={endBatchShot}
+            onQueue={(selected) => setQueue((items) => [...items, ...selected])}
+            onMake={(file) => void upload(file)}
+          />
+          {queue.length > 0 && (
+            <button type="button" className="primary-button import-batch-button" disabled={busy} onClick={() => void startBatch()}>
+              {`并行导入全部（最多同时处理 ${MAX_CONCURRENT_IMPORTS} 篇，${queue.length} 篇）`}
+            </button>
+          )}
+          {batchItems.length > 0 && (
+            <section className="import-batch-progress" aria-live="polite">
+              <h3>批量处理进度</h3>
+              <ul>
+                {batchItems.map((item, index) => (
+                  <li key={`${item.file.name}-${index}`} data-state={item.status}>
+                    <span title={item.file.webkitRelativePath || item.file.name}>{item.file.name}</span>
+                    <span>{item.message}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+          )}
+          <p className="mt-2 text-xs leading-relaxed text-ink-faint">
+            PDF 单文件最大 512 MB（扫描件自动 OCR），EPUB / TXT / MD / DOCX / FB2 / MOBI 最大 100 MB。
+          </p>
+        </div>
+        <div className="flex flex-col gap-3 min-w-0">
+          <label className="import-link-field mt-0 pt-0 border-t-0">
+            按编号或链接导入（arXiv / DOI / URL / 标题）
+            <input
+              value={value}
+              onChange={(event) => setValue(event.target.value)}
+              placeholder="例如 2411.01234 / 10.… / https://…"
+              disabled={busy}
+            />
+          </label>
+          <div className="dialog-actions my-0">
+            <button
+              type="button"
+              className="rx-btn primary"
+              disabled={busy || !value.trim()}
+              onClick={() => void importLink(value)}
+            >
+              获取全文
+            </button>
+            <button type="button" className="rx-btn secondary" disabled={busy || !value.trim()} onClick={() => void search()}>
+              按标题 / DOI 查找
+            </button>
+          </div>
+          <label className="flex items-start gap-2 rounded-lg border border-line bg-surface-sunk p-2.5 text-xs text-ink-soft cursor-pointer">
+            <input type="checkbox" className="mt-0.5 accent-accent" checked={localOnly} disabled={busy} onChange={event => setLocalOnly(event.target.checked)} />
+            <span>
+              <strong className="font-medium text-ink">仅保存原文（不调用 AI / OCR）</strong>
+              <small className="block mt-0.5 text-xs text-ink-faint">先入库阅读和批注，需要时可在阅读器中再触发翻译。</small>
+            </span>
+          </label>
+        </div>
+      </div>
+      <div className="mt-4 space-y-2">
+        <ZoteroImportPanel busy={busy} queuedKeys={zoteroQueuedKeys} onAdd={addZotero} />
+        <ScholarDiscoveryPanel busy={busy} onDownload={importLink} />
+        <CaptureInboxPanel busy={busy} onDownload={importLink} />
+        <ZoteroNotesPanel busy={busy} />
+        <ZoteroMigrationPanel busy={busy} onImported={onImported} />
       </div>
       {error && (
         <p role="alert" className="text-bad whitespace-pre-line">

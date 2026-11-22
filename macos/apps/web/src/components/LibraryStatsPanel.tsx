@@ -1,168 +1,159 @@
 import { useEffect, useState } from 'react';
 import { api, type StatsResponse, type TrendsResponse } from '../api/client';
-import { WorkspaceIcon } from './WorkspaceIcon';
 
-/** 书库与阅读统计面板。 */
-export function LibraryStatsPanel() {
-  const [stats, setStats] = useState<StatsResponse | null>(null);
-  const [trends, setTrends] = useState<TrendsResponse | null>(null);
-  const [error, setError] = useState('');
-  const [loading, setLoading] = useState(true);
+interface LibraryStatsPanelProps {
+  stats?: StatsResponse | null;
+  trends?: TrendsResponse | null;
+  loading?: boolean;
+  error?: string;
+}
+
+/** 书库统计面板（#s-cal 下半区：处理耗时 + 书库分布，使用水平条形对比）。 */
+export function LibraryStatsPanel({
+  stats: statsProp,
+  trends: trendsProp,
+  loading: loadingProp,
+  error: errorProp,
+}: LibraryStatsPanelProps = {}) {
+  const controlled = statsProp !== undefined || loadingProp !== undefined;
+  const [localStats, setLocalStats] = useState<StatsResponse | null>(null);
+  const [localTrends, setLocalTrends] = useState<TrendsResponse | null>(null);
+  const [localError, setLocalError] = useState('');
+  const [localLoading, setLocalLoading] = useState(!controlled);
 
   useEffect(() => {
+    if (controlled) return;
     const controller = new AbortController();
-    setLoading(true);
-    setError('');
+    setLocalLoading(true);
+    setLocalError('');
     Promise.all([
       api.stats(controller.signal),
-      // 主题是加分项：拿不到不影响统计本身，所以单独兜住错误。
       api.trends(controller.signal).catch(() => null),
     ])
       .then(([value, trendValue]) => {
-        setStats(value);
-        setTrends(trendValue);
+        setLocalStats(value);
+        setLocalTrends(trendValue);
       })
       .catch((cause: unknown) => {
         if (cause instanceof DOMException && cause.name === 'AbortError') return;
-        setError(cause instanceof Error ? cause.message : String(cause));
+        setLocalError(cause instanceof Error ? cause.message : String(cause));
       })
       .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
+        if (!controller.signal.aborted) setLocalLoading(false);
       });
     return () => controller.abort();
-  }, []);
+  }, [controlled]);
 
-  if (loading) return <p className="stats-basis" role="status">读取统计…</p>;
-  if (error) return <p className="stats-basis text-bad" role="alert">{error}</p>;
+  const stats = controlled ? (statsProp ?? null) : localStats;
+  const trends = controlled ? (trendsProp ?? null) : localTrends;
+  const loading = controlled ? Boolean(loadingProp) : localLoading;
+  const error = controlled ? (errorProp ?? '') : localError;
+
+  if (loading && !stats) return <p className="rx-src" role="status">读取统计…</p>;
+  if (error && !stats) return <p className="rx-src text-bad" role="alert">{error}</p>;
   if (!stats) return null;
 
   const { library, reading, processing, distribution } = stats;
-  const supported = (trends?.findings ?? []).filter((item) => item.IsSupported).slice(0, 8);
+  const supported = (trends?.findings ?? []).filter((item) => item.IsSupported).slice(0, 6);
   const unsupported = (trends?.findings ?? []).filter((item) => !item.IsSupported);
 
+  // 处理耗时：优先用单页平均耗时，缺失时退回中位耗时。
+  const stageMetrics = processing.stages.map((stage) => {
+    const ms = stage.perPageMs ?? stage.medianMs;
+    return {
+      key: stage.key,
+      label: stage.label || stage.key,
+      ms,
+      display: stage.perPageMs != null ? `${formatRate(stage.perPageMs)}/页` : formatDuration(stage.medianMs),
+      runs: stage.runs,
+    };
+  });
+  const maxStageMs = stageMetrics.reduce((acc, s) => Math.max(acc, s.ms), 0);
+
+  // 书库分布：优先按书架分类，若没有书架则展示年份分布。
+  const distItems = distribution.shelves.length ? distribution.shelves : distribution.years;
+  const topDist = distItems.slice(0, 6);
+  const maxDistCount = topDist.reduce((acc, item) => Math.max(acc, item.count), 0);
+
   return (
-    <section className="stats-panel" aria-label="书库与阅读统计">
-      <div className="stats-head">
-        <h2>书库统计</h2>
-      </div>
-
-      <div className="stats-tiles">
-        <Tile icon="library" value={library.active} unit="篇" label="在库文献" />
-        <Tile icon="file" value={library.reading} unit="篇" label="正在阅读" />
-        <Tile icon="check" value={library.done} unit="篇" label="已精读" />
-        <Tile icon="sparkles" value={reading.activeWeek} unit="篇" label="最近 7 天在读" />
-        <Tile icon="calendar" value={reading.activeMonth} unit="篇" label="最近 30 天在读" />
-        <Tile icon="panel" value={reading.annotations} unit="条" label={`批注（近 30 天 +${reading.annotationsMonth}）`} />
-      </div>
-
-      <div className="stats-columns">
-        <div className="stats-block">
-          <p className="stats-label">处理耗时</p>
-          {processing.stages.length ? (
-            <table className="stats-table">
-              <thead>
-                <tr>
-                  <th>阶段</th>
-                  <th>次数</th>
-                  <th>中位</th>
-                  <th>总计</th>
-                  <th>每页</th>
-                </tr>
-              </thead>
-              <tbody>
-                {processing.stages.map((stage) => (
-                  <tr key={stage.key}>
-                    <td>{stage.label || stage.key}</td>
-                    <td className="tabular-nums">{stage.runs}</td>
-                    <td className="tabular-nums">{formatDuration(stage.medianMs)}</td>
-                    <td className="tabular-nums">{formatDuration(stage.totalMs)}</td>
-                    <td className="tabular-nums">{stage.perPageMs == null ? '—' : formatDuration(stage.perPageMs)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <p className="stats-empty">还没有带时间戳的处理记录。</p>
-          )}
+    <section className="rx-cal-two" aria-label="书库与处理统计">
+      <div className="rx-cal-col">
+        <h4 className="rx-cal-h4">处理耗时（中位 / 单页）</h4>
+        {stageMetrics.length ? (
+          <div>
+            {stageMetrics.map((stage) => {
+              const ratio = maxStageMs > 0 ? Math.max(0.06, stage.ms / maxStageMs) : 0;
+              const isMax = maxStageMs > 0 && stage.ms === maxStageMs;
+              return (
+                <div key={stage.key} className={`rx-hbar${isMax ? ' hi' : ''}`} title={`共运行 ${stage.runs} 次`}>
+                  <span className="rx-hbar-name">{stage.label}</span>
+                  <div className="tr"><i style={{ width: `${ratio * 100}%` }} /></div>
+                  <span className="v">{stage.display}</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="rx-cal-empty">还没有带时间戳的处理记录。</p>
+        )}
+        <div className="rx-cal-foot-meta">
+          <span>精读记录 <b>{reading.readingNotes}</b> 篇</span>
+          <span>正文索引 <b>{reading.indexedDocuments}</b> 篇 · <b>{reading.indexedPages}</b> 页</span>
+          <span>收藏 <b>{library.favorite}</b> · 回收站 <b>{library.trashed}</b></span>
         </div>
-
-        <div className="stats-block">
-          <p className="stats-label">产出与分布</p>
-          <ul className="stats-list">
-            <li><span>精读记录</span><strong>{reading.readingNotes} 篇</strong></li>
-            <li><span>正文索引</span><strong>{reading.indexedDocuments} 篇 · {reading.indexedPages} 页</strong></li>
-            <li><span>书架 / 收藏</span><strong>{library.shelves} 个 · {library.favorite} 篇</strong></li>
-            <li><span>回收站</span><strong>{library.trashed} 篇</strong></li>
-          </ul>
-          {distribution.years.length ? (
-            <div className="stats-bars">
-              {distribution.years.slice(0, 6).map((item) => (
-                <Bar key={item.name} name={item.name} count={item.count} max={distribution.years[0]?.count ?? 1} />
-              ))}
-            </div>
-          ) : null}
-          {distribution.shelves.length ? (
-            <div className="stats-tags">
-              {distribution.shelves.map((item) => (
-                <span key={item.name}>{item.name} <b>{item.count}</b></span>
-              ))}
-            </div>
-          ) : null}
-        </div>
+        <p className="rx-src">来源：本地解析 / 翻译 / AI 任务的起止时间戳统计，优先按页折算。</p>
       </div>
 
-      {supported.length ? (
-        <div className="stats-block">
-          <p className="stats-label">主题（按题录关键词聚合）</p>
-          <ul className="stats-topics">
+      <div className="rx-cal-col">
+        <h4 className="rx-cal-h4">
+          {distribution.shelves.length ? '书架分类分布' : '发表年份分布'}
+        </h4>
+        {topDist.length ? (
+          <div>
+            {topDist.map((item) => {
+              const ratio = maxDistCount > 0 ? Math.max(0.06, item.count / maxDistCount) : 0;
+              const isMax = maxDistCount > 0 && item.count === maxDistCount;
+              return (
+                <div key={item.name} className={`rx-hbar${isMax ? ' hi' : ''}`}>
+                  <span className="rx-hbar-name">{item.name}</span>
+                  <div className="tr"><i style={{ width: `${ratio * 100}%` }} /></div>
+                  <span className="v">{item.count} 篇</span>
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <p className="rx-cal-empty">书库里还没有分类统计数据。</p>
+        )}
+        <p className="rx-src">
+          来源：共 {library.shelves} 个书架，当前展示样本量最大的 {topDist.length} 组。
+        </p>
+
+        {supported.length ? (
+          <ul className="rx-cal-findings" aria-label="题录关键词趋势">
             {supported.map((item) => (
               <li key={item.Topic}>
                 <strong>{item.Claim}</strong>
                 <span>{item.Caveat}</span>
               </li>
             ))}
+            {unsupported.length ? (
+              <li className="rx-src" style={{ borderTop: 0, paddingTop: 2 }}>
+                另有 {unsupported.length} 个主题样本不足 {trends?.minimum ?? 5} 篇，未在此列出。
+              </li>
+            ) : null}
           </ul>
-          {unsupported.length ? (
-            <p className="stats-note">
-              另有 {unsupported.length} 个主题样本不足 {trends?.minimum ?? 5} 篇，只计入计数、未在此列出。
-            </p>
-          ) : null}
-        </div>
-      ) : null}
-
+        ) : null}
+      </div>
     </section>
   );
 }
 
-function Tile({
-  icon,
-  value,
-  unit,
-  label,
-}: {
-  icon: 'library' | 'file' | 'check' | 'sparkles' | 'calendar' | 'panel';
-  value: number;
-  unit: string;
-  label: string;
-}) {
-  return (
-    <div className="stats-tile">
-      <WorkspaceIcon name={icon} size={16} />
-      <strong className="tabular-nums">{value}<small>{unit}</small></strong>
-      <span>{label}</span>
-    </div>
-  );
-}
-
-function Bar({ name, count, max }: { name: string; count: number; max: number }) {
-  const ratio = max > 0 ? Math.max(0.04, count / max) : 0;
-  return (
-    <div className="stats-bar">
-      <span className="stats-bar-name">{name}</span>
-      <span className="stats-bar-track"><i style={{ width: `${ratio * 100}%` }} /></span>
-      <span className="stats-bar-count tabular-nums">{count}</span>
-    </div>
-  );
+function formatRate(ms: number): string {
+  if (ms <= 0) return '—';
+  if (ms < 1000) return `${ms} ms`;
+  const seconds = ms / 1000;
+  return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`;
 }
 
 /** 秒级以下不显示小数：处理耗时看的是量级。 */

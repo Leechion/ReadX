@@ -249,9 +249,11 @@ func (s *Server) Handler() http.Handler {
 	// 直接写盘：与 latex-fix 分开，因为它的副作用完全不同（会改源码），
 	// 需要项目显式开启开关，并且走「快照 → 写入 → 强制编译验证 → 未改善回滚」。
 	mux.Handle("POST /v1/ai/latex-autofix", withAuth(s.handleLatexAutoFix))
-	// LaTeX 工作区可以单独指定模型渠道，不影响全局阅读/翻译用的渠道。
+	// LaTeX 工作区与「按流程指定」模型渠道（翻译 / 论文问答 / 精读五重奏）可单独配置，不相互干扰。
 	mux.Handle("GET /v1/ai/latex-settings", withAuth(s.handleLatexAISettings))
 	mux.Handle("PUT /v1/ai/latex-settings", withAuth(s.handleLatexAISettings))
+	mux.Handle("GET /v1/ai/workflows", withAuth(s.handleWorkflowAISettings))
+	mux.Handle("PUT /v1/ai/workflows", withAuth(s.handleWorkflowAISettings))
 	mux.Handle("POST /v1/ai/presentation-theme", withAuth(s.handleAIPresentationTheme))
 	mux.Handle("POST /v1/ai/presentation-plan", withAuth(s.handleAIPresentationPlan))
 	mux.Handle("POST /v1/ai/presentation-compare-plan", withAuth(s.handleAIPresentationComparePlan))

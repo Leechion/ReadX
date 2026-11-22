@@ -1,24 +1,24 @@
 .latex-live { display:flex; flex:1; flex-direction:column; min-height:0; min-width:0; color:var(--color-ink); }
 .latex-live-toolbar { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:9px 12px; border-bottom:1px solid var(--color-line); background:var(--color-surface); font-size:12px; }
-.latex-live-toolbar small { color:var(--color-ink-faint); font-size:10px; }
+.latex-live-toolbar small { color:var(--color-ink-faint); font-size:12px; }
 .latex-live-actions { display:flex; align-items:center; gap:5px; margin-left:auto; }
 .latex-live button { border:1px solid var(--color-line); border-radius:5px; padding:4px 7px; background:var(--color-surface); color:var(--color-ink); font-size:11px; cursor:pointer; }
 .latex-live button:hover,.latex-live button[aria-pressed=true] { color:var(--color-accent); border-color:var(--color-accent); }
 .latex-live button:disabled { opacity:.5; cursor:default; }
 .latex-live-status { display:flex; align-items:center; gap:7px; min-height:32px; padding:5px 12px; font-size:11px; color:var(--color-ink-faint); border-bottom:1px solid var(--color-line); }
 .latex-live-status>span { width:6px; height:6px; border-radius:50%; background:var(--color-accent); }
-.latex-live-status>span.pending { background:#c18b34; animation:latex-live-pulse 1s ease-in-out infinite alternate; }
+.latex-live-status>span.pending { background:var(--color-warn); animation:latex-live-pulse 1s ease-in-out infinite alternate; }
 .latex-live-status button { margin-left:auto; }
 .latex-live-viewport { flex:1; min-height:0; overflow:auto; padding:16px; display:flex; flex-direction:column; align-items:flex-start; gap:16px; }
-.latex-live-page { position:relative; flex-shrink:0; margin:0 auto; background:white; box-shadow:0 2px 12px #0002; }
+.latex-live-page { position:relative; flex-shrink:0; margin:0 auto; background:white; box-shadow:0 2px 12px rgb(0 0 0 / .12); }
 .latex-live-page canvas { display:block; }
-.latex-live-page-number { position:absolute; bottom:3px; right:7px; color:#888; font-size:10px; pointer-events:none; }
-.latex-live-badge { position:absolute; top:5px; right:6px; padding:3px 6px; border-radius:4px; background:#fff2cd; color:#72531d; font-size:10px; }
+.latex-live-page-number { position:absolute; bottom:3px; right:7px; color:#888; font-size:12px; pointer-events:none; }
+.latex-live-badge { position:absolute; top:5px; right:6px; padding:3px 6px; border-radius:4px; background:var(--color-warn-soft); color:var(--color-warn); font-size:12px; }
 .latex-live-empty { display:flex; flex:1; flex-direction:column; align-items:center; justify-content:center; gap:12px; max-width:480px; padding:36px 24px; margin:auto; text-align:center; font-size:12px; color:var(--color-ink-faint); }
 .latex-live-empty strong { font-size:15px; color:var(--color-ink); }
 .latex-live-empty p { margin:0; line-height:1.7; }
 .latex-live-empty button { padding:8px 14px; color:var(--color-accent); }
-.latex-live-error { flex-shrink:0; max-height:130px; margin:0; padding:9px 12px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.6 inherit; color:var(--color-warn); background:#c0444410; }
+.latex-live-error { flex-shrink:0; max-height:130px; margin:0; padding:9px 12px; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; font:11px/1.6 inherit; color:var(--color-warn); background:var(--color-bad-soft); }
 .latex-live-diagnostics { max-height:180px; overflow:auto; border-top:1px solid var(--color-line); padding:8px 12px; font-size:11px; }
 .latex-live-diagnostics summary { cursor:pointer; }
 .latex-live-diagnostics button { display:flex; flex-direction:column; gap:4px; width:100%; margin-top:6px; text-align:left; }

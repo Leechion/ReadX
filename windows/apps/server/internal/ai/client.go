@@ -42,11 +42,32 @@ type Message struct {
 }
 
 type chatRequest struct {
-	Model          string    `json:"model"`
-	Messages       []Message `json:"messages"`
-	Stream         bool      `json:"stream"`
-	Temperature    float64   `json:"temperature"`
-	ResponseFormat any       `json:"response_format,omitempty"`
+	Model           string    `json:"model"`
+	Messages        []Message `json:"messages"`
+	Stream          bool      `json:"stream"`
+	Temperature     float64   `json:"temperature"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	ResponseFormat  any       `json:"response_format,omitempty"`
+}
+
+func isOpenAIReasoningModel(model string) bool {
+	m := strings.ToLower(strings.TrimSpace(model))
+	return strings.HasPrefix(m, "o1") ||
+		strings.HasPrefix(m, "o3") ||
+		strings.HasPrefix(m, "o4") ||
+		strings.HasPrefix(m, "gpt-5") ||
+		strings.Contains(m, "reasoner") ||
+		strings.Contains(m, "-r1") ||
+		strings.Contains(m, "thinking") ||
+		strings.Contains(m, "qwq")
+}
+
+func (c *Client) openAIReasoningEffort() string {
+	effort := strings.ToLower(strings.TrimSpace(c.cfg.ReasoningEffort))
+	if effort == "" || !isOpenAIReasoningModel(c.cfg.ModelName()) {
+		return ""
+	}
+	return effort
 }
 
 type chatChoice struct {
@@ -338,6 +359,17 @@ func isNonStreamUnsupportedError(err error) bool {
 	return false
 }
 
+func isUnsupportedReasoningEffortError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var statusErr *upstreamStatusError
+	if !errors.As(err, &statusErr) || statusErr.status != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(strings.ToLower(statusErr.message), "reasoning_effort")
+}
+
 func (c *Client) generateWithTimeout(ctx context.Context, system, user string, temperature float64, timeout time.Duration, responseFormat any) (string, error) {
 	if timeout <= 0 {
 		timeout = RequestTimeout
@@ -354,10 +386,15 @@ func (c *Client) generateWithTimeout(ctx context.Context, system, user string, t
 			{Role: "system", Content: system},
 			{Role: "user", Content: user},
 		},
-		Temperature:    temperature,
-		ResponseFormat: responseFormat,
+		Temperature:     temperature,
+		ReasoningEffort: c.openAIReasoningEffort(),
+		ResponseFormat:  responseFormat,
 	}
 	response, err := c.post(requestCtx, payload, timeout)
+	if err != nil && payload.ReasoningEffort != "" && isUnsupportedReasoningEffortError(err) {
+		payload.ReasoningEffort = ""
+		response, err = c.post(requestCtx, payload, timeout)
+	}
 	if err != nil {
 		if isNonStreamUnsupportedError(err) {
 			c.markRequiresStreaming()
@@ -413,12 +450,19 @@ func (c *Client) StreamWithTimeout(ctx context.Context, messages []Message, temp
 	if c.cfg.ProviderName() == "anthropic" {
 		return c.streamAnthropic(ctx, messages, temperature, onDelta)
 	}
-	return c.streamRawOpenAI(ctx, chatRequest{
-		Model:       c.cfg.ModelName(),
-		Messages:    messages,
-		Stream:      true,
-		Temperature: temperature,
-	}, timeout, onDelta)
+	reqPayload := chatRequest{
+		Model:           c.cfg.ModelName(),
+		Messages:        messages,
+		Stream:          true,
+		Temperature:     temperature,
+		ReasoningEffort: c.openAIReasoningEffort(),
+	}
+	text, err := c.streamRawOpenAI(ctx, reqPayload, timeout, onDelta)
+	if err != nil && reqPayload.ReasoningEffort != "" && isUnsupportedReasoningEffortError(err) {
+		reqPayload.ReasoningEffort = ""
+		return c.streamRawOpenAI(ctx, reqPayload, timeout, onDelta)
+	}
+	return text, err
 }
 
 func (c *Client) streamRawOpenAI(ctx context.Context, payload any, timeout time.Duration, onDelta func(string)) (string, error) {

@@ -5,6 +5,8 @@ import { formatBadgeLabel, isSectionFormat, sectionDownloadInfo } from '@cbct/sh
 import { api, type DocumentJob, type JobStage } from '../api/client';
 import { AppDialog } from './AppDialog';
 import { downloadBlob } from '../lib/download';
+import { Icon } from './ui/Icon';
+import { Button } from './ui/Primitives';
 
 GlobalWorkerOptions.workerSrc = workerURL;
 
@@ -384,20 +386,32 @@ export function DocumentJobDialog({
                     { key: 'translate', label: '翻译', status: 'pending', message: '', completed: 0, total: 0 },
                     { key: 'render', label: '渲染', status: 'pending', message: '', completed: 0, total: 0 },
                     { key: 'memory', label: '论文记忆', status: 'pending', message: '', completed: 0, total: 0 },
-                  ]).map((stage, index, list) => (
-                    <li key={stage.key} data-status={stage.status}>
-                      <span className="job-stage-dot" aria-hidden="true">{stage.status === 'done' ? '✓' : stage.status === 'running' ? <i /> : index + 1}</span>
-                      <div>
-                        <p>
-                          <strong>{stage.label}</strong>
-                          <span className="job-chip">{STAGE_LABEL[stage.status] ?? stage.status}</span>
-                        </p>
-                        {stageCount(stage) ? <span className="job-stage-count">{stageCount(stage)} {stageUnit(stage)}</span> : null}
-                        {stage.message ? <small>{stage.message}</small> : null}
-                      </div>
-                      {index < list.length - 1 ? <span className="job-stage-line" aria-hidden="true" /> : null}
-                    </li>
-                  ))}
+                  ]).map((stage, index, list) => {
+                    const isStoppedStage = stage.status === 'failed' || stage.status === 'interrupted';
+                    return (
+                      <li key={stage.key} data-status={stage.status}>
+                        <span className="job-stage-dot" aria-hidden="true">
+                          {stage.status === 'done' ? <Icon name="check" size={14} /> : stage.status === 'running' ? <Icon name="loader" size={14} className="rx-spin" /> : isStoppedStage ? <Icon name="alert" size={14} /> : <Icon name="queue" size={14} />}
+                        </span>
+                        <div>
+                          <p>
+                            <strong>{stage.label}</strong>
+                            <span className="job-chip">{STAGE_LABEL[stage.status] ?? stage.status}</span>
+                          </p>
+                          {stageCount(stage) ? <span className="job-stage-count num">{stageCount(stage)} {stageUnit(stage)}</span> : null}
+                          {stage.message ? <small>{stage.message}</small> : null}
+                          {isStoppedStage && reprocessable ? (
+                            <div className="mt-2">
+                              <Button size="sm" variant="secondary" onClick={() => void restart()} disabled={restarting}>
+                                <Icon name="sync" size={13} />{restarting ? '正在提交…' : '重新处理'}
+                              </Button>
+                            </div>
+                          ) : null}
+                        </div>
+                        {index < list.length - 1 ? <span className="job-stage-line" aria-hidden="true" /> : null}
+                      </li>
+                    );
+                  })}
                 </ol>
               </section>
 

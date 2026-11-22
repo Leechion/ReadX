@@ -13,6 +13,76 @@ self.MonacoEnvironment = {
   getWorker: () => new editorWorker(),
 };
 
+function resolveReadxMonacoTheme(): 'readx-light' | 'readx-dark' | 'readx-paper' {
+  const attr = document.documentElement.getAttribute('data-theme');
+  if (attr === 'dark') return 'readx-dark';
+  if (attr === 'paper') return 'readx-paper';
+  return 'readx-light';
+}
+
+function registerReadxMonacoThemes(monaco: typeof Monaco) {
+  monaco.editor.defineTheme('readx-light', {
+    base: 'vs',
+    inherit: true,
+    rules: [
+      { token: 'keyword', foreground: '2F6F59', fontStyle: 'bold' },
+      { token: 'comment', foreground: '8C8E86', fontStyle: 'italic' },
+      { token: 'string', foreground: '9D6B26' },
+      { token: 'number', foreground: '2F6F59' },
+    ],
+    colors: {
+      'editor.background': '#FBFBF9',
+      'editor.foreground': '#1C1D1A',
+      'editor.lineHighlightBackground': '#F4F3EF',
+      'editor.selectionBackground': '#E6F0EC',
+      'editorLineNumber.foreground': '#9A9B93',
+      'editorLineNumber.activeForeground': '#1C1D1A',
+      'editorCursor.foreground': '#2F6F59',
+      'editorGutter.background': '#FBFBF9',
+    },
+  });
+  monaco.editor.defineTheme('readx-paper', {
+    base: 'vs',
+    inherit: true,
+    rules: [
+      { token: 'keyword', foreground: '7A542E', fontStyle: 'bold' },
+      { token: 'comment', foreground: '8E836D', fontStyle: 'italic' },
+      { token: 'string', foreground: '68492A' },
+      { token: 'number', foreground: '7A542E' },
+    ],
+    colors: {
+      'editor.background': '#FAF5E8',
+      'editor.foreground': '#262118',
+      'editor.lineHighlightBackground': '#F2EBD9',
+      'editor.selectionBackground': '#EFE4D0',
+      'editorLineNumber.foreground': '#8E836D',
+      'editorLineNumber.activeForeground': '#262118',
+      'editorCursor.foreground': '#7A542E',
+      'editorGutter.background': '#FAF5E8',
+    },
+  });
+  monaco.editor.defineTheme('readx-dark', {
+    base: 'vs-dark',
+    inherit: true,
+    rules: [
+      { token: 'keyword', foreground: '4FA886', fontStyle: 'bold' },
+      { token: 'comment', foreground: '747870', fontStyle: 'italic' },
+      { token: 'string', foreground: 'D8A24A' },
+      { token: 'number', foreground: '4FA886' },
+    ],
+    colors: {
+      'editor.background': '#1C1E1C',
+      'editor.foreground': '#E8E9E4',
+      'editor.lineHighlightBackground': '#242724',
+      'editor.selectionBackground': '#1E342A',
+      'editorLineNumber.foreground': '#6F726C',
+      'editorLineNumber.activeForeground': '#E8E9E4',
+      'editorCursor.foreground': '#4FA886',
+      'editorGutter.background': '#1C1E1C',
+    },
+  });
+}
+
 type Editor = Monaco.editor.IStandaloneCodeEditor;
 
 /**
@@ -81,9 +151,10 @@ export function LatexEditor({
       if (disposed || !host.current) return;
       monacoRef.current = monaco;
       registerLatexLanguage(monaco);
+      registerReadxMonacoThemes(monaco);
       completion = registerLatexCompletion(monaco, () => indexRef.current);
 
-      const theme = document.documentElement.getAttribute('data-theme') === 'dark' ? 'vs-dark' : 'vs';
+      const theme = resolveReadxMonacoTheme();
       const instance = monaco.editor.create(host.current, {
         value: '',
         language: LATEX_LANGUAGE_ID,
@@ -125,10 +196,9 @@ export function LatexEditor({
         },
       });
 
-      // 主题跟随应用（浅色/纸张走浅色主题，深色走深色）。
+      // 主题跟随应用（light -> readx-light, paper -> readx-paper, dark -> readx-dark）。
       observer = new MutationObserver(() => {
-        const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'vs-dark' : 'vs';
-        monaco.editor.setTheme(next);
+        monaco.editor.setTheme(resolveReadxMonacoTheme());
       });
       observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
@@ -319,15 +389,9 @@ export function LatexEditor({
 
       <div className={`latex-monaco${active ? '' : ' hidden'}`} ref={host} data-testid="latex-editor" />
 
-      {active ? (
-        <p className="latex-editor-hint">
-          {index.missingCitations?.length || index.missingLabels?.length
-            ? `⚠ ${index.missingCitations?.length ?? 0} 个引用键、${index.missingLabels?.length ?? 0} 个标签在项目里找不到定义（已标波浪线）。`
-            : 'Ctrl/Cmd+S 立即保存；编辑后约 0.9 秒自动保存；\\cite 与 \\ref 会提示项目里真实存在的键。'}
-        </p>
-      ) : (
+      {active ? null : (
         <div className="latex-editor-placeholder">
-          <p>从左侧打开一个 .tex 或 .bib 文件开始写作。</p>
+          <p>从左侧选择文件开始编辑</p>
         </div>
       )}
     </div>

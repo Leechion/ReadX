@@ -10,7 +10,9 @@ import { useDocument } from './hooks/useDocument';
 import { useLibraryMeta } from './hooks/useLibraryMeta';
 import { useTheme } from './hooks/useTheme';
 import { useWorkspace } from './hooks/useWorkspace';
-import { WorkspaceIcon } from './components/WorkspaceIcon';
+import { ActivityRail, RAIL_ITEMS, type ScreenId } from './components/ActivityRail';
+import { CommandPalette } from './components/CommandPalette';
+import { Icon } from './components/ui/Icon';
 const ImportDialog = lazy(() => import('./components/ImportDialog').then((module) => ({ default: module.ImportDialog })));
 const RetranslateDialog = lazy(() => import('./components/RetranslateDialog').then((module) => ({ default: module.RetranslateDialog })));
 const DocumentJobDialog = lazy(() => import('./components/DocumentJobDialog').then((module) => ({ default: module.DocumentJobDialog })));
@@ -27,7 +29,8 @@ import { FocusPendant } from './components/research/FocusPendant';
 import { useResearchWorkbench } from './hooks/useResearchWorkbench';
 import { useLauncherCatalog } from './hooks/useLauncherCatalog';
 import { api } from './api/client';
-type Screen = 'library' | 'reader' | 'graph' | 'reproduction' | 'calendar' | 'presentation' | 'compare' | 'latex' | 'research';
+
+type Screen = ScreenId;
 
 const MODE_KEY = STORAGE_KEYS.workspaceMode;
 
@@ -49,17 +52,6 @@ function readWorkspaceMode(): WorkspaceMode {
   }
 }
 
-/**
- * 视觉版式 v2（对齐 cynicalight/reader 的布局结构，token 映射到本仓库暖色系）：
- *
- *   书库   LibraryScreen   左侧边栏 + 封面网格/列表/表格（全屏，无边框工作区）
- *   阅读   ReaderScreen    顶部工具栏 + 左目录 + 原文·译文双栏（可切单栏/交换）
- *   图谱   KnowledgeGraphSection  概念 / 方法 / 结论 连成网络，跨文献合并，每条关系回到原文依据
- *   复现   ReproductionSection  分析校验 + 五组核对项 + R-11 仓库核对
- *
- * 书库点封面 → 进入阅读页（selected 决定）；阅读页「←」回书库。
- * 知识图谱/复现是独立入口，从书库侧栏进入。
- */
 export default function App() {
   const researchWorkbench = useResearchWorkbench();
   const popupTarget = useMemo(readReaderPopupTarget, []);
@@ -87,14 +79,16 @@ export default function App() {
   }, []);
   const [selectedId, setSelectedId] = useState<string | null>(() => popupTarget?.documentId ?? null);
   const [importFiles, setImportFiles] = useState<File[] | null>(null);
+  const [dragHover, setDragHover] = useState(false);
+  const dragDepth = useRef(0);
   const [retranslateDocument, setRetranslateDocument] = useState<DocumentSummary | null>(null);
   const [processingDocument, setProcessingDocument] = useState<DocumentSummary | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [activeJobCount, setActiveJobCount] = useState(0);
   const [launcherRequest, setLauncherRequest] = useState<LauncherOpenRequest | null>(null);
   const [launcherError, setLauncherError] = useState('');
-  const [libraryView, setLibraryView] = useState<'all' | 'favorite' | 'trash' | 'shelves'>(
-    'all',
-  );
+  const [libraryView, setLibraryView] = useState<'all' | 'favorite' | 'trash' | 'shelves'>('all');
   const [mode, setMode] = useState<WorkspaceMode>(readWorkspaceMode);
   const [curtain, setCurtain] = useState<{ target: WorkspaceMode; phase: 'closing' | 'opening' } | null>(null);
   const changingMode = useRef(false);
@@ -134,14 +128,41 @@ export default function App() {
       if (event.ctrlKey && event.shiftKey && (event.key === 'M' || event.key === 'm')) {
         event.preventDefault();
         switchMode(mode === 'slack' ? 'research' : 'slack');
+        return;
+      }
+      if (mode !== 'research' || popupTarget) return;
+      const mod = event.ctrlKey || event.metaKey;
+      if (mod && !event.shiftKey && !event.altKey) {
+        const lower = event.key.toLowerCase();
+        if (lower === 'k') {
+          event.preventDefault();
+          setCommandOpen((open) => !open);
+          return;
+        }
+        if (event.key === '\\') {
+          event.preventDefault();
+          window.dispatchEvent(new CustomEvent('readx-toggle-sidebar'));
+          return;
+        }
+        if (event.key === '.') {
+          event.preventDefault();
+          window.dispatchEvent(new CustomEvent('readx-toggle-inspector'));
+          return;
+        }
+        const digit = Number(event.key);
+        if (digit >= 1 && digit <= 9) {
+          const target = RAIL_ITEMS[digit - 1];
+          if (target) {
+            event.preventDefault();
+            setScreen(target.id);
+          }
+        }
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [mode, returnToResearch, switchMode]);
+  }, [mode, popupTarget, returnToResearch, setScreen, switchMode]);
 
-  // documents 只用于书库列表渲染（跟随搜索/筛选）；跨页跳转必须用不受筛选影响的全集，
-  // 否则搜索状态下从图谱点「原文依据」会找不到目标论文、继续用上一篇的 selectedId。
   const documents = phase.kind === 'ready' ? phase.documents.documents : [];
   const navigationDocuments = useMemo(
     () => (allDocuments.length ? allDocuments : documents),
@@ -159,21 +180,36 @@ export default function App() {
   );
   const libraryMeta = useLibraryMeta();
   const theme = useTheme();
-  // 后端从「未连接」变为「已连接」时重取库元数据：首次请求可能在 token 注入前发出并留下错误。
   const [page, setPage] = useState<number | null>(() => popupTarget?.page ?? null);
   const [cite, setCite] = useState<{ page: number; nonce: number } | null>(
     () => popupTarget?.page != null ? { page: popupTarget.page, nonce: 1 } : null,
   );
-  const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(
-    null,
-  );
-  // 从全文检索点进来时带着关键词：阅读器打开查找栏并定位到那一页的命中。
+  const [focusedAnnotationId, setFocusedAnnotationId] = useState<string | null>(null);
   const [pendingFind, setPendingFind] = useState<{
     query: string;
     page: number;
     nonce: number;
   } | null>(null);
   const lastScreen = useRef<string>('library');
+
+  useEffect(() => {
+    if (popupTarget || typeof api.documentJobs !== 'function') return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const res = await api.documentJobs(controller.signal);
+        if (controller.signal.aborted) return;
+        const count = res.jobs.filter((job) => job.status === 'running' || job.stages?.some((s) => s.status === 'running')).length;
+        setActiveJobCount(count);
+      } catch {
+        /* ignore background polling errors */
+      }
+      if (!controller.signal.aborted) timer = window.setTimeout(poll, 5000);
+    };
+    void poll();
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [popupTarget]);
 
   useEffect(() => {
     if (popupTarget) return;
@@ -190,8 +226,7 @@ export default function App() {
         window.dispatchEvent(new Event('readx-sync-complete'));
         reload();
       } catch {
-        // A temporary cloud-folder delay is retried on the next focus/interval;
-        // the manual sync control reports errors directly in Settings.
+        // Temporary cloud-folder delay is retried on next focus/interval.
       } finally {
         running = false;
       }
@@ -211,25 +246,19 @@ export default function App() {
       : [];
 
   useEffect(() => {
-    // pages 只列出已缓存文本页，阅读位置可能指向尚未索引的有效 PDF 页。
-    // 只在页面尚未初始化时选首个缓存页，不用缓存列表把恢复位置弹回第一页。
     if (pages.length) setPage((current) => current ?? pages[0] ?? null);
   }, [pages.join(',')]);
 
-  // 离开阅读页时把出处焦点清掉，回来不残留上次的闪烁。
   useEffect(() => {
     if (screen !== 'reader' && lastScreen.current === 'reader') setCite(null);
     lastScreen.current = screen;
   }, [screen]);
-
-
 
   const citePage = useCallback((target: number) => {
     setPage(target);
     setCite((current) => ({ page: target, nonce: (current?.nonce ?? 0) + 1 }));
   }, []);
 
-  // 图谱里点某条关系的原文依据：选定该文献 → 进阅读页 → 跳到那一页并闪一下出处。
   const citeInDocument = useCallback(
     (target: { key: string; page: number }) => {
       const doc = navigationDocuments.find((item) => item.key === target.key);
@@ -238,13 +267,13 @@ export default function App() {
       setCite((current) => ({ page: target.page, nonce: (current?.nonce ?? 0) + 1 }));
       setScreen('reader');
     },
-    [navigationDocuments],
+    [navigationDocuments, setScreen],
   );
 
   const focusAnnotation = useCallback(
-    (id: string, page: number | null) => {
+    (id: string, targetPage: number | null) => {
       setFocusedAnnotationId(id);
-      if (page != null) citePage(page);
+      if (targetPage != null) citePage(targetPage);
     },
     [citePage],
   );
@@ -256,9 +285,8 @@ export default function App() {
     setPendingFind(null);
     setSelectedId(id);
     setScreen('reader');
-  }, []);
+  }, [setScreen]);
 
-  /** 按论文键打开（引用关系里跳转用）：键与 id 不总是相同，所以按 key 查回 id。 */
   const openDocumentByKey = useCallback(
     (key: string) => {
       const doc = navigationDocuments.find((item) => item.key === key);
@@ -267,7 +295,6 @@ export default function App() {
     [navigationDocuments, openDocument],
   );
 
-  /** 从全文检索结果点进某篇的某一页：页码直接给定，并把关键词交给阅读器的查找栏。 */
   const openSearchHit = useCallback(
     (key: string, target: number, query: string) => {
       const doc = navigationDocuments.find((item) => item.key === key);
@@ -282,7 +309,7 @@ export default function App() {
       }));
       setScreen('reader');
     },
-    [navigationDocuments],
+    [navigationDocuments, setScreen],
   );
 
   const openReproduction = useCallback(
@@ -291,7 +318,7 @@ export default function App() {
       if (target) setSelectedId(target.id);
       setScreen('reproduction');
     },
-    [navigationDocuments],
+    [navigationDocuments, setScreen],
   );
 
   const pickForReproduction = useCallback(
@@ -333,12 +360,27 @@ export default function App() {
   return (
     <div
       className="flex h-full min-h-0 flex-col"
+      onDragEnter={(event) => {
+        if (mode !== 'research') return;
+        if (event.dataTransfer.types.includes('Files')) {
+          event.preventDefault();
+          dragDepth.current += 1;
+          setDragHover(true);
+        }
+      }}
       onDragOver={(event) => {
         if (mode !== 'research') return;
         if (event.dataTransfer.types.includes('Files')) event.preventDefault();
       }}
+      onDragLeave={() => {
+        if (mode !== 'research') return;
+        dragDepth.current = Math.max(0, dragDepth.current - 1);
+        if (dragDepth.current === 0) setDragHover(false);
+      }}
       onDrop={(event) => {
         if (mode !== 'research') return;
+        dragDepth.current = 0;
+        setDragHover(false);
         if (event.dataTransfer.files.length) {
           event.preventDefault();
           setImportFiles(Array.from(event.dataTransfer.files));
@@ -355,171 +397,217 @@ export default function App() {
           />
         </Suspense>
       ) : null}
+
       <Activity mode={mode === 'research' ? 'visible' : 'hidden'}>
-      <HeaderBar
-        phase={phase}
-        screen={screen}
-        onScreen={setScreen}
-        onPresentation={() => setScreen('presentation')}
-        onReload={reload}
-        onImport={() => setImportFiles([])}
-        theme={theme.choice}
-        onThemeChange={theme.setTheme}
-      />
+        <div className="rx-shell">
+          {!popupTarget ? (
+            <ActivityRail
+              screen={screen}
+              onScreen={setScreen}
+              onImport={() => setImportFiles([])}
+              onSettings={() => setSettingsOpen(true)}
+              onReload={reload}
+              onToggleCommandPalette={() => setCommandOpen(true)}
+              theme={theme.choice}
+              onThemeChange={theme.setTheme}
+              connected={phase.kind === 'ready'}
+              activeJobCount={activeJobCount}
+              onOpenJobs={() => {
+                setLibraryView('all');
+                setScreen('library');
+                window.dispatchEvent(new CustomEvent('readx-open-jobs'));
+              }}
+            />
+          ) : null}
 
-      <Suspense fallback={<p className="p-6" role="status">加载中…</p>}>
-      {screen === 'library' ? (
-        <LibraryScreen
-          phase={phase}
-          allDocuments={navigationDocuments}
-          filters={filters}
-          setFilters={setFilters}
-          selectedId={selectedId}
-          onOpenDocument={openDocument}
-          onRetranslate={setRetranslateDocument}
-          onOpenProcessing={setProcessingDocument}
-          onOpenImport={() => setImportFiles([])}
-          onOpenAcademic={() => setScreen('research')}
-          onOpenSettings={() => setSettingsOpen(true)}
-          meta={libraryMeta}
-          view={libraryView}
-          onViewChange={(view) => {
-            if (view === 'all' || view === 'favorite' || view === 'trash' || view === 'shelves')
-              setLibraryView(view);
-            setScreen(
-              view === 'graph'
-                ? 'graph'
-                : view === 'calendar'
-                  ? 'calendar'
-                  : view === 'compare'
-                    ? 'compare'
-                    : 'library',
-            );
-          }}
-          onOpenReproduction={openReproduction}
-          onTrashEmptied={() => { setSelectedId(null); reload(); }}
-          onReload={reload}
-          onOpenAtPage={openSearchHit}
-        />
-      ) : screen === 'presentation' ? (
-        <PresentationWorkspace documents={launcherDocuments} onBack={() => setScreen('library')} launchRequest={launcherRequest?.workspace === 'presentation' ? launcherRequest : null} />
-      ) : screen === 'compare' ? (
-        <CompareWorkspace
-          documents={navigationDocuments.filter((doc) => !libraryMeta.items[doc.key]?.deleted)}
-          onBack={() => setScreen('library')}
-          onOpenAtPage={openSearchHit}
-          onOpenDocument={openDocument}
-        />
-      ) : screen === 'latex' ? (
-        <LatexStudio documents={launcherDocuments} registerBeforeLeave={registerLatexBeforeLeave} launchRequest={launcherRequest?.workspace === 'latex' ? launcherRequest : null} />
-      ) : screen === 'reader' ? (
-        <ReaderScreen
-          key={selected?.id ?? 'empty'}
-          detail={detail.phase}
-          selected={selected}
-          page={page}
-          onPage={setPage}
-          onBack={() => setScreen('library')}
-          onPopout={() => {
-            if (!selected) return;
-            const params = new URLSearchParams({ readxWindow: 'reader', documentId: selected.id });
-            if (page != null) params.set('page', String(page));
-            window.open(`${window.location.origin}/?${params.toString()}`, '_blank');
-          }}
-          cite={cite}
-          onCite={citePage}
-          annotations={annotations}
-          onFocusAnnotation={focusAnnotation}
-          focusedAnnotationId={focusedAnnotationId}
-          pendingFind={pendingFind}
-          onOpenDocument={openDocumentByKey}
-        />
-      ) : screen === 'graph' ? (
-        <KnowledgeGraphSection
-          phase={phase}
-          documents={navigationDocuments}
-          onBack={() => setScreen('library')}
-          onCite={citeInDocument}
-        />
-      ) : screen === 'calendar' ? (
-        <ReadingCalendarSection
-          phase={phase}
-          documents={navigationDocuments}
-          onBack={() => setScreen('library')}
-          onOpenDocument={openDocument}
-        />
-      ) : screen === 'research' ? (
-        <ResearchWorkbench controller={researchWorkbench} documents={launcherDocuments} onOpenDocument={openDocument} onReload={reload} onOpenLibrary={() => setScreen('library')} launchRequest={launcherRequest?.workspace === 'research' ? launcherRequest : null} />
-      ) : (
-        <ReproductionSection
-          document={selected}
-          documents={navigationDocuments}
-          onPick={pickForReproduction}
-          onBack={() => setScreen('library')}
-        />
-      )}
+          <div className="rx-workspace-slot">
+            <Suspense fallback={<p className="p-6 text-sm text-ink-soft" role="status">加载中…</p>}>
+              {screen === 'library' ? (
+                <LibraryScreen
+                  phase={phase}
+                  allDocuments={navigationDocuments}
+                  filters={filters}
+                  setFilters={setFilters}
+                  selectedId={selectedId}
+                  onOpenDocument={openDocument}
+                  onRetranslate={setRetranslateDocument}
+                  onOpenProcessing={setProcessingDocument}
+                  onOpenImport={() => setImportFiles([])}
+                  onOpenAcademic={() => setScreen('research')}
+                  onOpenSettings={() => setSettingsOpen(true)}
+                  meta={libraryMeta}
+                  view={libraryView}
+                  onViewChange={(view) => {
+                    if (view === 'all' || view === 'favorite' || view === 'trash' || view === 'shelves')
+                      setLibraryView(view);
+                    setScreen(
+                      view === 'graph'
+                        ? 'graph'
+                        : view === 'calendar'
+                          ? 'calendar'
+                          : view === 'compare'
+                            ? 'compare'
+                            : 'library',
+                    );
+                  }}
+                  onOpenReproduction={openReproduction}
+                  onTrashEmptied={() => { setSelectedId(null); reload(); }}
+                  onReload={reload}
+                  onOpenAtPage={openSearchHit}
+                />
+              ) : screen === 'presentation' ? (
+                <PresentationWorkspace documents={launcherDocuments} onBack={() => setScreen('library')} launchRequest={launcherRequest?.workspace === 'presentation' ? launcherRequest : null} />
+              ) : screen === 'compare' ? (
+                <CompareWorkspace
+                  documents={navigationDocuments.filter((doc) => !libraryMeta.items[doc.key]?.deleted)}
+                  onBack={() => setScreen('library')}
+                  onOpenAtPage={openSearchHit}
+                  onOpenDocument={openDocument}
+                />
+              ) : screen === 'latex' ? (
+                <LatexStudio documents={launcherDocuments} registerBeforeLeave={registerLatexBeforeLeave} launchRequest={launcherRequest?.workspace === 'latex' ? launcherRequest : null} />
+              ) : screen === 'reader' ? (
+                <ReaderScreen
+                  key={selected?.id ?? 'empty'}
+                  detail={detail.phase}
+                  selected={selected}
+                  page={page}
+                  onPage={setPage}
+                  onBack={() => setScreen('library')}
+                  onPopout={() => {
+                    if (!selected) return;
+                    const params = new URLSearchParams({ readxWindow: 'reader', documentId: selected.id });
+                    if (page != null) params.set('page', String(page));
+                    window.open(`${window.location.origin}/?${params.toString()}`, '_blank');
+                  }}
+                  cite={cite}
+                  onCite={citePage}
+                  annotations={annotations}
+                  onFocusAnnotation={focusAnnotation}
+                  focusedAnnotationId={focusedAnnotationId}
+                  pendingFind={pendingFind}
+                  onOpenDocument={openDocumentByKey}
+                />
+              ) : screen === 'graph' ? (
+                <KnowledgeGraphSection
+                  phase={phase}
+                  documents={navigationDocuments}
+                  onBack={() => setScreen('library')}
+                  onCite={citeInDocument}
+                />
+              ) : screen === 'calendar' ? (
+                <ReadingCalendarSection
+                  phase={phase}
+                  documents={navigationDocuments}
+                  onBack={() => setScreen('library')}
+                  onOpenDocument={openDocument}
+                />
+              ) : screen === 'research' ? (
+                <ResearchWorkbench controller={researchWorkbench} documents={launcherDocuments} onOpenDocument={openDocument} onReload={reload} onOpenLibrary={() => setScreen('library')} launchRequest={launcherRequest?.workspace === 'research' ? launcherRequest : null} />
+              ) : (
+                <ReproductionSection
+                  document={selected}
+                  documents={navigationDocuments}
+                  onPick={pickForReproduction}
+                  onBack={() => setScreen('library')}
+                />
+              )}
+            </Suspense>
 
-      </Suspense>
-      {/* 对话框各自一个边界：首次加载 chunk 时只让弹窗区域回退，绝不卸载整页
-          （否则滚动位置、面板本地状态与已发出的列表请求都会重来一遍）。 */}
-      {importFiles !== null && (
-        <Suspense fallback={null}>
-          <ImportDialog
-            files={importFiles}
-            onClose={() => setImportFiles(null)}
-            onImported={reload}
+            {phase.kind === 'error' ? (
+              <footer className="absolute inset-x-0 bottom-0 z-30 border-t border-bad/30 bg-bad-soft px-5 py-2">
+                <p className="text-xs leading-relaxed text-bad">
+                  {phase.message}
+                  <span className="mx-2 text-line-strong">|</span>
+                  {phase.hint}
+                </p>
+              </footer>
+            ) : null}
+          </div>
+        </div>
+
+        {importFiles !== null && (
+          <Suspense fallback={null}>
+            <ImportDialog
+              files={importFiles}
+              onClose={() => setImportFiles(null)}
+              onImported={reload}
+              onOpenDocument={openDocument}
+            />
+          </Suspense>
+        )}
+        {retranslateDocument ? (
+          <Suspense fallback={null}>
+            <RetranslateDialog
+              document={retranslateDocument}
+              onClose={() => setRetranslateDocument(null)}
+              onComplete={reload}
+              onOpenReader={() => {
+                const id = retranslateDocument.id;
+                setRetranslateDocument(null);
+                openDocument(id);
+              }}
+            />
+          </Suspense>
+        ) : null}
+        {processingDocument ? (
+          <Suspense fallback={null}>
+            <DocumentJobDialog
+              document={processingDocument}
+              jobKey={processingDocument.key}
+              importing={false}
+              pending={false}
+              onClose={() => {
+                setProcessingDocument(null);
+                reload();
+              }}
+              onOpenReader={() => {
+                const id = processingDocument.id;
+                setProcessingDocument(null);
+                openDocument(id);
+              }}
+            />
+          </Suspense>
+        ) : null}
+        {settingsOpen && (
+          <Suspense fallback={null}>
+            <AISettingsDialog
+              onClose={() => setSettingsOpen(false)}
+              appearance={{
+                theme: theme.choice,
+                onThemeChange: theme.setTheme,
+                density: theme.density,
+                readingFont: theme.readingFont,
+                readingSize: theme.readingSize,
+                onAppearanceChange: theme.setAppearance,
+              }}
+            />
+          </Suspense>
+        )}
+        {commandOpen && !popupTarget ? (
+          <CommandPalette
+            open={commandOpen}
+            onClose={() => setCommandOpen(false)}
+            documents={launcherDocuments}
             onOpenDocument={openDocument}
+            onScreen={setScreen}
+            onImport={() => setImportFiles([])}
+            onSettings={() => setSettingsOpen(true)}
+            onThemeChange={theme.setTheme}
           />
-        </Suspense>
-      )}
-      {retranslateDocument ? (
-        <Suspense fallback={null}>
-          <RetranslateDialog
-            document={retranslateDocument}
-            onClose={() => setRetranslateDocument(null)}
-            onComplete={reload}
-            onOpenReader={() => {
-              const id = retranslateDocument.id;
-              setRetranslateDocument(null);
-              openDocument(id);
-            }}
-          />
-        </Suspense>
-      ) : null}
-      {processingDocument ? (
-        <Suspense fallback={null}>
-          <DocumentJobDialog
-            document={processingDocument}
-            jobKey={processingDocument.key}
-            importing={false}
-            pending={false}
-            onClose={() => {
-              setProcessingDocument(null);
-              reload();
-            }}
-            onOpenReader={() => {
-              const id = processingDocument.id;
-              setProcessingDocument(null);
-              openDocument(id);
-            }}
-          />
-        </Suspense>
-      ) : null}
-      {settingsOpen && (
-        <Suspense fallback={null}>
-          <AISettingsDialog onClose={() => setSettingsOpen(false)} />
-        </Suspense>
-      )}
-      {phase.kind === 'error' ? (
-        <footer className="shrink-0 border-t border-bad/30 bg-bad/5 px-5 py-2">
-          <p className="text-[12px] leading-relaxed text-bad">
-            {phase.message}
-            <span className="mx-2 text-line-strong">|</span>
-            {phase.hint}
-          </p>
-        </footer>
-      ) : null}
+        ) : null}
       </Activity>
+
+      {dragHover && mode === 'research' ? (
+        <div className="rx-drop-overlay" aria-hidden="true">
+          <div className="rx-drop-overlay-box">
+            <Icon name="import" size={28} className="text-accent" />
+            <strong>松开以导入 PDF / EPUB</strong>
+            <span>支持拖入多篇论文，自动加入书库处理队列</span>
+          </div>
+        </div>
+      ) : null}
+
       {researchWorkbench.data.focusSession && (screen !== 'research' || mode !== 'research') && (
         <FocusPendant controller={researchWorkbench} onOpenWorkbench={() => {
           researchWorkbench.setData(current => ({ ...current, activeTab: 'daily' }));
@@ -528,7 +616,12 @@ export default function App() {
         }} />
       )}
       <ModePendant mode={mode} onMode={switchMode} />
-      {launcherError && <div role="alert" className="fixed bottom-5 left-1/2 z-50 flex -translate-x-1/2 items-center gap-4 rounded-xl border border-bad/30 bg-surface px-4 py-3 text-sm text-bad shadow-lg">{launcherError}<button type="button" onClick={() => setLauncherError('')} aria-label="关闭提示">×</button></div>}
+      {launcherError && (
+        <div role="alert" className="fixed bottom-5 left-1/2 z-50 flex -translate-x-1/2 items-center gap-4 rounded-xl border border-bad/30 bg-surface-raised px-4 py-3 text-sm text-bad shadow-lg">
+          {launcherError}
+          <button type="button" onClick={() => setLauncherError('')} aria-label="关闭提示">×</button>
+        </div>
+      )}
       {curtain ? (
         <div className={`mode-curtain mode-curtain--${curtain.phase}`} aria-hidden="true">
           <div
@@ -548,95 +641,5 @@ export default function App() {
         </div>
       ) : null}
     </div>
-  );
-}
-
-/**
- * 全局工作区导航：书库、PPT、LaTeX Studio 与主题、导入入口在各页面保持一致。
- */
-function HeaderBar({
-  phase,
-  screen,
-  onScreen,
-  onPresentation,
-  onReload,
-  onImport,
-  theme,
-  onThemeChange,
-}: {
-  phase: ReturnType<typeof useWorkspace>['phase'];
-  screen: 'library' | 'reader' | 'graph' | 'reproduction' | 'calendar' | 'presentation' | 'compare' | 'latex' | 'research';
-  onScreen: (screen: 'library' | 'reader' | 'graph' | 'reproduction' | 'calendar' | 'presentation' | 'compare' | 'latex' | 'research') => void;
-  onPresentation: () => void;
-  onReload: () => void;
-  onImport: () => void;
-  theme: string;
-  onThemeChange: (theme: 'light' | 'dark' | 'paper' | 'system') => void;
-}) {
-  const ready = phase.kind === 'ready';
-  return (
-    <header className="app-header">
-      <button type="button" className="app-brand" onClick={() => onScreen('library')} aria-label="ReadX，返回书库">
-        <span className="brand-mark" aria-hidden="true">◈</span><span>ReadX</span>
-      </button>
-      <nav className="app-navigation" aria-label="工作区导航">
-      <button
-        type="button"
-        onClick={() => onScreen('library')}
-        aria-current={['library', 'reader', 'graph', 'calendar', 'compare', 'reproduction', 'research'].includes(screen) ? 'page' : undefined}
-        className={['library', 'reader', 'graph', 'calendar', 'compare', 'reproduction', 'research'].includes(screen) ? 'active' : ''}
-      >
-        <WorkspaceIcon name="library" size={16} /><span>工作台</span>
-      </button>
-      <button type="button" onClick={onPresentation} aria-current={screen === 'presentation' ? 'page' : undefined} className={screen === 'presentation' ? 'active' : ''} title="从书库选择论文生成演示稿">
-        <WorkspaceIcon name="file" size={16} /><span>PPT</span>
-      </button>
-      <button
-        type="button"
-        onClick={() => onScreen('latex')}
-        aria-current={screen === 'latex' ? 'page' : undefined}
-        className={screen === 'latex' ? 'active' : ''}
-        title="LaTeX Studio：本地论文写作工作区（项目、编辑、编译、PDF 预览）"
-      >
-        <WorkspaceIcon name="code" size={16} /><span>LaTex Studio</span>
-      </button>
-      </nav>
-      <div className="app-header-actions">
-        <div className="theme-switch" role="group" aria-label="界面主题">
-          {(['light', 'dark', 'paper', 'system'] as const).map((item) => (
-            <button
-              key={item}
-              type="button"
-              onClick={() => onThemeChange(item)}
-              aria-pressed={theme === item}
-              className={theme === item ? 'active' : ''}
-            >
-              {
-                {
-                  light: '浅色',
-                  dark: '深色',
-                  paper: '纸张',
-                  system: '跟随系统',
-                }[item]
-              }
-            </button>
-          ))}
-        </div>
-        <select className="theme-select" aria-label="界面主题" value={theme} onChange={event => onThemeChange(event.target.value as 'light' | 'dark' | 'paper' | 'system')}>
-          <option value="light">浅色</option><option value="dark">深色</option><option value="paper">纸张</option><option value="system">跟随系统</option>
-        </select>
-        <button
-          type="button"
-          onClick={onReload}
-          className={`connection-button${ready ? ' ready' : ''}`}
-          title={ready ? '后端已连接，点按重连' : '后端未连接，点按重试'}
-        >
-          <span aria-hidden="true" />{ready ? '已连接' : '未连接 · 重试'}
-        </button>
-        <button type="button" className="primary-button global-import" onClick={onImport}>
-          <span>＋ 导入 PDF / EPUB</span>
-        </button>
-      </div>
-    </header>
   );
 }

@@ -29,14 +29,15 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) {
 		s.settingsMu.Lock()
 		defer s.settingsMu.Unlock()
 		var body struct {
-			Provider               string  `json:"provider"`
-			BaseURL                string  `json:"baseURL"`
-			Model                  string  `json:"model"`
-			APIKey                 string  `json:"apiKey"`
-			ClearKey               bool    `json:"clearKey"`
-			ReasoningEffort        *string `json:"reasoningEffort"`
-			CodexFastMode          *bool   `json:"codexFastMode"`
-			TranslationPreparation string  `json:"translationPreparation"`
+			Provider               string                            `json:"provider"`
+			BaseURL                string                            `json:"baseURL"`
+			Model                  string                            `json:"model"`
+			APIKey                 string                            `json:"apiKey"`
+			ClearKey               bool                              `json:"clearKey"`
+			ReasoningEffort        *string                           `json:"reasoningEffort"`
+			CodexFastMode          *bool                             `json:"codexFastMode"`
+			TranslationPreparation string                            `json:"translationPreparation"`
+			Workflows              map[string]WorkflowAISettingInput `json:"workflows,omitempty"`
 		}
 		if decodeJSON(w, r, &body) != nil {
 			return
@@ -95,17 +96,25 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) {
 		}
 		raw["translationPreparation"] = preparation
 		if body.ReasoningEffort != nil {
-			raw["reasoningEffort"] = strings.TrimSpace(*body.ReasoningEffort)
+			raw["reasoningEffort"] = normalizeReasoningEffort(body.Provider, *body.ReasoningEffort)
 		} else if previousProvider != body.Provider || previousModel != strings.TrimSpace(body.Model) {
 			raw["reasoningEffort"] = ""
 		}
 		if body.Provider != "codex" {
-			raw["reasoningEffort"] = ""
 			raw["codexFastMode"] = false
 		} else if body.CodexFastMode != nil {
 			raw["codexFastMode"] = *body.CodexFastMode
 		}
 		raw["apiKey"] = savedKey
+		if len(body.Workflows) > 0 {
+			var preview ai.Config
+			previewBytes, _ := json.Marshal(raw)
+			_ = json.Unmarshal(previewBytes, &preview)
+			if err := applyWorkflowInputs(raw, body.Workflows, preview); err != nil {
+				writeError(w, 400, err.Error())
+				return
+			}
+		}
 		encoded, _ := json.MarshalIndent(raw, "", "  ")
 		var cfg ai.Config
 		_ = json.Unmarshal(encoded, &cfg)
@@ -155,7 +164,22 @@ func (s *Server) handleAISettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	cfg, _ := ai.LoadConfig(path)
-	writeJSON(w, 200, map[string]any{"provider": cfg.ProviderName(), "baseURL": cfg.PublicBaseURL(), "model": cfg.Model, "reasoningEffort": cfg.ReasoningEffort, "codexFastMode": cfg.CodexFastMode, "translationPreparation": cfg.TranslationPreparation, "keyConfigured": cfg.APIKey != "", "status": cfg.Redact(), "latex": s.latexAISettingsView(cfg), "cli": map[string]bool{"codex": ai.CLIAvailable("codex"), "claude": ai.CLIAvailable("claude"), "kimi": ai.CLIAvailable("kimi")}, "codex": ai.CodexStatus(r.Context()), "workbuddy": s.workBuddyStatus()})
+	writeJSON(w, 200, map[string]any{
+		"provider":               cfg.ProviderName(),
+		"baseURL":                cfg.PublicBaseURL(),
+		"model":                  cfg.Model,
+		"reasoningEffort":        cfg.ReasoningEffort,
+		"codexFastMode":          cfg.CodexFastMode,
+		"translationPreparation": cfg.TranslationPreparation,
+		"keyConfigured":          cfg.APIKey != "",
+		"status":                 cfg.Redact(),
+		"latex":                  s.latexAISettingsView(cfg),
+		"workflows":              s.workflowAISettingsView(cfg),
+		"savedChannels":          s.savedChannelsView(cfg),
+		"cli":                    map[string]bool{"codex": ai.CLIAvailable("codex"), "claude": ai.CLIAvailable("claude"), "kimi": ai.CLIAvailable("kimi")},
+		"codex":                  ai.CodexStatus(r.Context()),
+		"workbuddy":              s.workBuddyStatus(),
+	})
 }
 
 // handleAIModels 读取当前地址可用的模型列表：OpenAI 兼容与 Anthropic 都提供 GET /models。
@@ -369,10 +393,18 @@ func (s *Server) handleAIProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 45*time.Second)
 	defer cancel()
+	started := time.Now()
 	answer, err := ai.NewClient(cfg).Generate(ctx, "仅回复 OK，不使用工具。", "连接测试", 0)
 	if err != nil {
 		writeError(w, 502, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true, "answer": answer})
+	latencyMs := time.Since(started).Milliseconds()
+	writeJSON(w, 200, map[string]any{
+		"ok":        true,
+		"answer":    answer,
+		"latencyMs": latencyMs,
+		"provider":  cfg.ProviderName(),
+		"model":     cfg.ModelName(),
+	})
 }

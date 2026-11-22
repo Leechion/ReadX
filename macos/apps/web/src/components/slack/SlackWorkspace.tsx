@@ -202,7 +202,7 @@ export function SlackWorkspace({
               <option value="system">跟随系统</option>
             </select>
           )}
-          <button type="button" className="slack-boss" onClick={onExit} title="立即返回科研界面（Esc）">
+          <button type="button" className="slack-boss" onClick={onExit} title="立即返回科研工作台（Ctrl+Shift+M / Esc）">
             ← 返回工作区
           </button>
         </div>

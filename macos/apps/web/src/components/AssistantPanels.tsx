@@ -71,7 +71,7 @@ export function AssistantSidebar({
   return (
     <div className="flex h-full min-h-0 flex-col bg-surface">
       <div
-        className="flex shrink-0 items-center gap-1 border-b border-line px-3 py-2"
+        className="flex shrink-0 items-center gap-1 border-b border-line px-3"
         style={{ height: 48 }}
       >
         {ASSISTANT_TABS.filter(
@@ -83,7 +83,7 @@ export function AssistantSidebar({
             onClick={() => onTabChange(item.id)}
             aria-current={item.id === tab ? 'true' : undefined}
             className={[
-              'rounded-pill px-2.5 py-1 text-[11px] transition',
+              'rounded-full px-3 py-1.5 text-[12px] transition',
               item.id === tab
                 ? 'bg-accent-soft font-medium text-accent'
                 : 'text-ink-soft hover:text-ink',
@@ -92,7 +92,7 @@ export function AssistantSidebar({
             {item.label}
           </button>
         ))}
-        <span className="ml-auto pr-1 text-[10px] text-ink-faint">
+        <span className="ml-auto max-w-[140px] truncate pr-1 text-[12px] text-ink-faint">
           {status?.configured ? status.model || status.provider : '未配置'}
         </span>
       </div>

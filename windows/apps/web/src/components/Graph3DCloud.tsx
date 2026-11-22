@@ -73,10 +73,10 @@ function readPalette(): ThemePalette {
   const hsl = { h: 0, s: 0, l: 1 };
   canvas.getHSL(hsl);
   return {
-    concept: themeColor('--color-accent', '#2b6651'),
-    method: themeColor('--color-good', '#3f7d53'),
-    conclusion: themeColor('--color-warn', '#a9762a'),
-    paper: themeColor('--color-ink-faint', '#69776d'),
+    concept: themeColor('--color-entity-1', '#2f6f59'),
+    method: themeColor('--color-entity-2', '#2872b8'),
+    conclusion: themeColor('--color-entity-3', '#9d6b26'),
+    paper: themeColor('--color-entity-4', '#7e8389'),
     link: themeColor('--color-line-strong', '#bccbbf'),
     linkMember: themeColor('--color-line', '#dfe6de'),
     additive: hsl.l < 0.5,

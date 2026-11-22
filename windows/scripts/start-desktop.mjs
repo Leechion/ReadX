@@ -76,20 +76,16 @@ if (await isLocalPortOpen(vitePort)) {
   }
 }
 
-const logDir = path.join(root, '.tmp-smoke', 'launcher');
-fs.mkdirSync(logDir, { recursive: true });
-const log = fs.openSync(path.join(logDir, 'desktop-launch.log'), 'a');
 const child = spawn(executable, [path.join(root, 'apps', 'desktop')], {
   cwd: root,
   env,
   detached: true,
   windowsHide: false,
-  stdio: ['ignore', log, log],
+  stdio: 'ignore',
 });
 child.on('error', (error) => {
   console.error(error.message);
   process.exitCode = 1;
 });
 child.unref();
-fs.closeSync(log);
 console.log(`ReadX 桌面版已启动（PID ${child.pid}）。`);

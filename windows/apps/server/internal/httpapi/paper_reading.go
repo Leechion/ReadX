@@ -71,7 +71,7 @@ func (s *Server) preparePaperMemoryDuringImport(ctx context.Context, documentKey
 			report("memory", message, 0, 1)
 		}
 	}
-	cfg, err := s.aiConfig()
+	cfg, err := s.workflowAIConfig(WorkflowReading)
 	if err != nil || !cfg.Ready() {
 		s.jobStage(jobKey, "memory", "skipped", "AI 模型未就绪，精读时可再准备论文记忆", -1, -1)
 		return err

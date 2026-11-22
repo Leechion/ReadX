@@ -109,11 +109,8 @@ export function LatexProjectList({ onOpen }: { onOpen: (project: LatexProject) =
 
       {projects.length === 0 ? (
         <div className="latex-empty">
-          <h2>还没有项目</h2>
-          <p>
-            新建一个空白项目会得到一份可直接编译的 <code>article</code> 模板；
-            也可以导入 Overleaf 导出的 ZIP，里面会保留目录结构与图片。
-          </p>
+          <h2>暂无项目</h2>
+          <p>新建空白项目或导入 Overleaf ZIP。</p>
         </div>
       ) : (
         <ul className="latex-projects">

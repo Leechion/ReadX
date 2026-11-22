@@ -1,10 +1,9 @@
 import { createElement, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { CSSProperties, ReactNode } from 'react';
-import type { DocumentSummary } from '@cbct/shared';
-import type { DesktopUpdateStatus } from '@cbct/shared';
-import { isSectionFormat, statusLabel } from '@cbct/shared';
+import type { ReactNode } from 'react';
+import type { DesktopUpdateStatus, DocumentSummary } from '@cbct/shared';
+import { formatBadgeLabel, isSectionFormat, statusLabel } from '@cbct/shared';
 import type { Category, DocumentMeta } from '../api/client';
-import { api, type SearchHit, type SearchResponse } from '../api/client';
+import { api, type DocumentProcessingJob, type SearchHit, type SearchResponse } from '../api/client';
 import type { Filters, WorkspacePhase } from '../hooks/useWorkspace';
 import { useDebouncedValue } from '../hooks/useWorkspace';
 import type { useLibraryMeta } from '../hooks/useLibraryMeta';
@@ -21,14 +20,18 @@ import { ReadonlyShareDialog } from './ReadonlyShareDialog';
 import { SyncSettingsDialog } from './SyncSettingsDialog';
 import { DailyRecommendations } from './DailyRecommendations';
 import { ResizeHandle } from './ResizeHandle';
-import { WorkspaceIcon, type WorkspaceIconName } from './WorkspaceIcon';
+import { Icon } from './ui/Icon';
+import { Button, Chip, EmptyState, IconButton, ProgressBar, SearchInput, Segmented, Skeleton, Tabs } from './ui/Primitives';
 import { STORAGE_KEYS } from '../lib/storage';
 import { AppDialog } from './AppDialog';
+import { jobStatus } from './processingJobs';
 
-type Layout = 'grid' | 'list' | 'table';
+type Layout = 'list' | 'grid' | 'table';
 type SortKey = 'title' | 'year' | 'status';
 type TableColumn = 'title' | 'author' | 'year' | 'status' | 'shelves';
 type GridDensity = 'comfortable' | 'compact';
+type StatusFilter = '' | 'reading' | 'unread' | 'done';
+type InspectorTab = 'detail' | 'discover' | 'jobs';
 
 const RELEASE_NOTE_TAGS = new Set(['p', 'br', 'hr', 'h1', 'h2', 'h3', 'h4', 'div', 'span', 'ul', 'ol', 'li', 'strong', 'b', 'em', 'i', 'del', 's', 'code', 'pre', 'blockquote', 'a']);
 const RELEASE_NOTE_DROP_TAGS = new Set(['script', 'style', 'iframe', 'object', 'embed', 'svg', 'math']);
@@ -36,7 +39,6 @@ const RELEASE_NOTE_DROP_TAGS = new Set(['script', 'style', 'iframe', 'object', '
 function releaseNoteNode(node: Node, key: string): ReactNode {
   if (node.nodeType === Node.TEXT_NODE) return node.textContent;
   if (node.nodeType !== Node.ELEMENT_NODE) return null;
-
   const element = node as HTMLElement;
   const tag = element.tagName.toLowerCase();
   if (RELEASE_NOTE_DROP_TAGS.has(tag)) return null;
@@ -59,9 +61,6 @@ function releaseNoteNode(node: Node, key: string): ReactNode {
 
 export function ReleaseNotesContent({ value }: { value: string }) {
   let source = value.replace(/\\(?=<\/?[a-z][^>]*>)/gi, '');
-  // electron-updater/GitHub metadata can hand us an HTML body with its angle
-  // brackets entity-escaped. Decode only when no real tags are present; the
-  // result still goes through the element allowlist below.
   for (let pass = 0; pass < 2 && !/<\/?[a-z][^>]*>/i.test(source)
     && /(?:&lt;|&#0*60;|&#x0*3c;)\s*\/?[a-z]/i.test(source); pass += 1) {
     const decoder = document.createElement('textarea');
@@ -69,21 +68,18 @@ export function ReleaseNotesContent({ value }: { value: string }) {
     source = decoder.value;
   }
   const template = document.createElement('template');
-  // Some release editors escape the angle brackets with a preceding backslash.
   template.innerHTML = source;
   const isHtml = /<\/?[a-z][^>]*>/i.test(source);
   return <div className={`update-release-notes-content${isHtml ? ' is-html' : ''}`}>{Array.from(template.content.childNodes).map((node, index) => releaseNoteNode(node, `release-note-${index}`))}</div>;
 }
 
-/** 每日推荐的独立侧栏：开合与宽度都按用户上次的选择保存。 */
 const DAILY_STORAGE = STORAGE_KEYS.libraryDaily;
-const DAILY_DEFAULT_WIDTH = 316;
-const DAILY_MIN_WIDTH = 260;
-const DAILY_MAX_WIDTH = 720;
+const DAILY_DEFAULT_WIDTH = 320;
+const DAILY_MIN_WIDTH = 280;
+const DAILY_MAX_WIDTH = 560;
 
-function readDailyPanel(): { open: boolean; width: number } {
-  // 宽窗口默认展开（原来它常驻列表顶部），窄窗口默认收起，不挤占书库列表。
-  const fallback = { open: typeof window !== 'undefined' && window.innerWidth >= 1280, width: DAILY_DEFAULT_WIDTH };
+function readInspectorPanel(): { open: boolean; width: number } {
+  const fallback = { open: typeof window !== 'undefined' && window.innerWidth >= 1100, width: DAILY_DEFAULT_WIDTH };
   if (typeof localStorage === 'undefined') return fallback;
   try {
     const value = JSON.parse(localStorage.getItem(DAILY_STORAGE) ?? 'null') as { open?: unknown; width?: unknown } | null;
@@ -102,9 +98,9 @@ const LAYOUT_STORAGE = STORAGE_KEYS.libraryLayout;
 const GRID_DENSITY_STORAGE = STORAGE_KEYS.libraryGridDensity;
 const TABLE_STORAGE = STORAGE_KEYS.libraryTable;
 const SIDEBAR_WIDTH_STORAGE = STORAGE_KEYS.librarySidebarWidth;
-const DEFAULT_SIDEBAR_WIDTH = 238;
+const DEFAULT_SIDEBAR_WIDTH = 240;
 const MIN_SIDEBAR_WIDTH = 190;
-const MAX_SIDEBAR_WIDTH = 420;
+const MAX_SIDEBAR_WIDTH = 380;
 const DEFAULT_TABLE_COLUMNS: TableColumn[] = ['title', 'author', 'year', 'status', 'shelves'];
 
 function readGridDensity(): GridDensity {
@@ -136,9 +132,9 @@ function readSidebarWidth(): number {
 }
 
 function readLayout(): Layout {
-  if (typeof localStorage === 'undefined') return 'grid';
+  if (typeof localStorage === 'undefined') return 'list';
   const value = localStorage.getItem(LAYOUT_STORAGE);
-  return value === 'list' || value === 'table' ? value : 'grid';
+  return value === 'grid' || value === 'table' || value === 'list' ? value : 'list';
 }
 
 function normalizePaperTitle(value: string): string {
@@ -150,19 +146,10 @@ function extractArxivId(value: string | undefined): string | null {
   return value.match(/(?:arxiv(?:\.org\/(?:abs|pdf)\/|:)\s*)?(\d{4}\.\d{4,5}(?:v\d+)?|[a-z][a-z.-]*\/\d{7}(?:v\d+)?)/i)?.[1] ?? null;
 }
 
-const STATUS_TONE: Record<string, string> = {
-  reading: 'bg-accent-soft text-accent',
-  done: 'bg-good/10 text-good',
-  queue: 'bg-surface-sunk text-ink-soft',
-  archive: 'bg-surface-sunk text-ink-faint',
-};
-
-/** 左侧导航的视图项（复刻参考实现：全部文档 / 收藏 / 回收站）。 */
 type ViewId = 'all' | 'favorite' | 'trash' | 'shelves' | 'calendar' | 'graph' | 'compare';
 
 interface Props {
   phase: WorkspacePhase;
-  /** 不受搜索影响的文献全集：侧栏计数与「自动补缺失 PDF」都按它算。 */
   allDocuments: DocumentSummary[];
   filters: Filters;
   setFilters: (next: Partial<Filters>) => void;
@@ -179,15 +166,9 @@ interface Props {
   onOpenReproduction: (key: string) => void;
   onTrashEmptied: () => void;
   onReload: () => void;
-  /** 打开某篇论文并跳到指定页，同时把搜索词带进阅读器的查找栏。 */
   onOpenAtPage: (key: string, page: number, query: string) => void;
 }
 
-/**
- * 书库全屏页：左侧边栏（视图导航 + 分类 + 底部导入/设置）+ 主区（顶部条 + 封面网格/列表/表格）。
- * 版式对齐参考实现（`.app` / `.library-sidebar` / `.library-main` / `.book-grid`），
- * 颜色映射到本仓库既有 token，因此三主题仍然生效。
- */
 export function LibraryScreen({
   phase,
   allDocuments,
@@ -198,8 +179,6 @@ export function LibraryScreen({
   onOpenProcessing,
   onRetranslate,
   onOpenImport,
-  onOpenAcademic,
-  onOpenSettings,
   meta,
   view,
   onViewChange,
@@ -210,6 +189,7 @@ export function LibraryScreen({
 }: Props) {
   const [emptyTrashKeys, setEmptyTrashKeys] = useState<string[] | null>(null);
   const [input, setInput] = useState(filters.q);
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('');
   const [categoryFilter, setCategoryFilter] = useState('');
   const [tagFilter, setTagFilter] = useState('');
   const [layout, setLayout] = useState<Layout>(readLayout);
@@ -218,15 +198,66 @@ export function LibraryScreen({
   const { sort, columns: tableColumns } = tablePreferences;
   const [managingCategories, setManagingCategories] = useState(false);
   const [duplicates, setDuplicates] = useState<{ primaryKey: string; keys: string[] }[]>([]);
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => typeof window !== 'undefined' && window.innerWidth < 1100);
   const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
-  const [dailyOpen, setDailyOpen] = useState(() => readDailyPanel().open);
-  const [dailyWidth, setDailyWidth] = useState(() => readDailyPanel().width);
+  const [inspectorOpen, setInspectorOpen] = useState(() => readInspectorPanel().open);
+  const [inspectorWidth, setInspectorWidth] = useState(() => readInspectorPanel().width);
+  const [inspectorTab, setInspectorTab] = useState<InspectorTab>('discover');
+  const [inspectedDocId, setInspectedDocId] = useState<string | null>(selectedId);
+  const [jobs, setJobs] = useState<DocumentProcessingJob[]>([]);
+  const [discoverCount, setDiscoverCount] = useState(0);
+
   useEffect(() => {
     try {
-      localStorage.setItem(DAILY_STORAGE, JSON.stringify({ open: dailyOpen, width: dailyWidth }));
+      localStorage.setItem(DAILY_STORAGE, JSON.stringify({ open: inspectorOpen, width: inspectorWidth }));
     } catch { /* Storage may be disabled. */ }
-  }, [dailyOpen, dailyWidth]);
+  }, [inspectorOpen, inspectorWidth]);
+
+  useEffect(() => {
+    const onToggleSidebar = () => setCollapsed((v) => !v);
+    const onToggleInspector = () => setInspectorOpen((v) => !v);
+    const onOpenJobs = () => {
+      setInspectorOpen(true);
+      setInspectorTab('jobs');
+    };
+    const onFindShortcut = (event: KeyboardEvent) => {
+      if ((event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === 'f') {
+        const inputEl = document.getElementById('library-search-input');
+        if (inputEl) {
+          event.preventDefault();
+          inputEl.focus();
+        }
+      }
+    };
+    window.addEventListener('readx-toggle-sidebar', onToggleSidebar);
+    window.addEventListener('readx-toggle-inspector', onToggleInspector);
+    window.addEventListener('readx-open-jobs', onOpenJobs);
+    window.addEventListener('keydown', onFindShortcut);
+    return () => {
+      window.removeEventListener('readx-toggle-sidebar', onToggleSidebar);
+      window.removeEventListener('readx-toggle-inspector', onToggleInspector);
+      window.removeEventListener('readx-open-jobs', onOpenJobs);
+      window.removeEventListener('keydown', onFindShortcut);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (typeof api.documentJobs !== 'function') return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    const loadJobs = async () => {
+      try {
+        const res = await api.documentJobs(controller.signal);
+        if (!controller.signal.aborted) setJobs(res.jobs);
+      } catch {
+        /* ignore background polling errors */
+      }
+      if (!controller.signal.aborted) timer = window.setTimeout(loadJobs, inspectorOpen && inspectorTab === 'jobs' ? 1500 : 5000);
+    };
+    void loadJobs();
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [inspectorOpen, inspectorTab]);
+
   const [fetchingArxiv, setFetchingArxiv] = useState(false);
   const [arxivProgress, setArxivProgress] = useState('');
   const [arxivSummary, setArxivSummary] = useState('');
@@ -238,6 +269,7 @@ export function LibraryScreen({
   const [moreOpen, setMoreOpen] = useState(false);
   const moreRef = useRef<HTMLDivElement | null>(null);
   const moreButtonRef = useRef<HTMLButtonElement | null>(null);
+
   useEffect(() => {
     if (!moreOpen) return;
     const closeOnOutside = (event: PointerEvent) => {
@@ -255,8 +287,7 @@ export function LibraryScreen({
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [moreOpen]);
-  // 搜索分两档：题录（本地筛选，标题/作者/会场）与全文（服务端逐页正文匹配）。
-  // 全文检索的覆盖面见 coverage：未索引的论文搜不到，必须显示出来。
+
   const [searchMode, setSearchMode] = useState<'meta' | 'fulltext'>('meta');
   const [fulltextQueryMode, setFulltextQueryMode] = useState<'phrase' | 'terms'>('terms');
   const [fulltext, setFulltext] = useState<SearchResponse | null>(null);
@@ -264,11 +295,9 @@ export function LibraryScreen({
   const [fulltextError, setFulltextError] = useState('');
   const arxivController = useRef<AbortController | null>(null);
   const debounced = useDebouncedValue(input, 300);
-  /** 全文模式下有关键词时，正文结果取代文献列表；空关键词仍然显示书库。 */
   const fulltextActive = searchMode === 'fulltext' && input.trim().length >= 2;
 
   useEffect(() => {
-    // 全文模式下不再把关键词塞进题录筛选：两档各管一个搜索框，混在一起会互相打架。
     if (searchMode === 'meta' && debounced !== filters.q) setFilters({ q: debounced });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debounced, searchMode]);
@@ -304,7 +333,6 @@ export function LibraryScreen({
     return () => controller.abort();
   }, [searchMode, debounced, fulltextQueryMode, categoryFilter]);
 
-  // 服务端按论文分组返回，这里只做相邻合并，保持后端给的顺序（命中多的在前）。
   const fulltextGroups = useMemo(() => {
     const groups: { key: string; title: string; year: number; hits: SearchHit[] }[] = [];
     for (const hit of fulltext?.hits ?? []) {
@@ -316,23 +344,16 @@ export function LibraryScreen({
   }, [fulltext]);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(LAYOUT_STORAGE, layout);
-    } catch {
-      /* 隐私模式写不了：本次会话仍生效。 */
-    }
+    try { localStorage.setItem(LAYOUT_STORAGE, layout); } catch { /* ignore */ }
   }, [layout]);
-
   useEffect(() => {
-    try { localStorage.setItem(GRID_DENSITY_STORAGE, gridDensity); } catch { /* Storage may be disabled. */ }
+    try { localStorage.setItem(GRID_DENSITY_STORAGE, gridDensity); } catch { /* ignore */ }
   }, [gridDensity]);
-
   useEffect(() => {
-    try { localStorage.setItem(TABLE_STORAGE, JSON.stringify({ sort, columns: tableColumns })); } catch { /* Storage may be disabled. */ }
+    try { localStorage.setItem(TABLE_STORAGE, JSON.stringify({ sort, columns: tableColumns })); } catch { /* ignore */ }
   }, [sort, tableColumns]);
-
   useEffect(() => {
-    try { localStorage.setItem(SIDEBAR_WIDTH_STORAGE, String(sidebarWidth)); } catch { /* Storage may be disabled. */ }
+    try { localStorage.setItem(SIDEBAR_WIDTH_STORAGE, String(sidebarWidth)); } catch { /* ignore */ }
   }, [sidebarWidth]);
 
   useEffect(() => {
@@ -346,11 +367,11 @@ export function LibraryScreen({
 
   const rawDocuments = phase.kind === 'ready' ? phase.documents.documents : [];
   const total = phase.kind === 'ready' ? phase.meta.documentsTotal : 0;
-  // 计数基于全集：搜索只缩小列表，不该让「回收站/收藏」的数字跟着缩水。
   const trashCount = allDocuments.filter((doc) => meta.items[doc.key]?.deleted).length;
   const activeDocuments = rawDocuments.filter((doc) => !meta.items[doc.key]?.deleted);
   const favoriteCount = allDocuments.filter((doc) => meta.items[doc.key]?.favorite && !meta.items[doc.key]?.deleted).length;
   const toggleTrash = (key: string) => meta.patch(key, { deleted: !meta.items[key]?.deleted });
+
   const missingPDFs = useMemo(() => allDocuments.filter((doc) =>
     !meta.items[doc.key]?.deleted && doc.title.trim() && !isSectionFormat(doc.format) && !(doc.hasPdf ?? Boolean(doc.pdfPath))),
   [allDocuments, meta.items]);
@@ -411,6 +432,9 @@ export function LibraryScreen({
       if (view === 'favorite' && !item?.favorite) return false;
       if (categoryFilter && !(item?.categories ?? []).includes(categoryFilter)) return false;
       if (tagFilter && !(item?.tags ?? []).includes(tagFilter)) return false;
+      if (statusFilter === 'reading' && doc.status !== 'reading') return false;
+      if (statusFilter === 'done' && doc.status !== 'done') return false;
+      if (statusFilter === 'unread' && (doc.status === 'reading' || doc.status === 'done')) return false;
       return true;
     });
     const direction = sort.reverse ? -1 : 1;
@@ -421,7 +445,12 @@ export function LibraryScreen({
       else delta = a.status.localeCompare(b.status);
       return delta !== 0 ? delta * direction : a.title.localeCompare(b.title, 'zh');
     });
-  }, [rawDocuments, meta.items, view, categoryFilter, tagFilter, sort]);
+  }, [rawDocuments, meta.items, view, categoryFilter, tagFilter, statusFilter, sort]);
+
+  const inspectedDoc = useMemo(
+    () => documents.find((d) => d.id === inspectedDocId) ?? documents.find((d) => d.id === selectedId) ?? documents[0] ?? null,
+    [documents, inspectedDocId, selectedId],
+  );
 
   const toggleSort = (key: SortKey) =>
     setTablePreferences((current) => ({ ...current, sort: current.sort.key === key ? { key, reverse: !current.sort.reverse } : { key, reverse: false } }));
@@ -433,328 +462,378 @@ export function LibraryScreen({
     return { ...current, columns: columns.length ? columns : ['title'] };
   });
 
-  // 导航项右边的数字有两种口径，别混：
-  //   导航里的「书架」= **书架个数**（和「收藏」「回收站」并列的都是条目数）；
-  //   下面「我的书架」每个书架右边的数字 = **该书架里的论文数**。
-  // 原先导航用的是「已被归类的论文数」，读起来就是书架个数，两处数字又不一样，必然误导。
   const countInShelf = useCallback(
     (name: string) => activeDocuments.filter((doc) => (meta.items[doc.key]?.categories ?? []).includes(name)).length,
     [activeDocuments, meta.items],
   );
 
-  const VIEWS: { id: ViewId; label: string; icon: WorkspaceIconName; count?: number; hint?: string }[] = [
-    { id: 'all', label: '全部文档', icon: 'library', count: total - trashCount },
-    { id: 'shelves', label: '书架', icon: 'shelves', count: meta.categories.length, hint: '书架个数' },
-    { id: 'favorite', label: '收藏', icon: 'star', count: favoriteCount },
-    { id: 'trash', label: '回收站', icon: 'trash', count: trashCount },
-    { id: 'graph', label: '知识图谱', icon: 'graph' },
-    { id: 'compare', label: '跨文献对照', icon: 'panel' },
-    { id: 'calendar', label: '阅读日历', icon: 'calendar' },
-  ];
+  const jobsByDocKey = useMemo(() => {
+    const map = new Map<string, DocumentProcessingJob>();
+    for (const j of jobs) map.set(j.documentKey || j.key, j);
+    return map;
+  }, [jobs]);
 
-  const toolbarCommands = () => <>
-    {missingPDFs.length > 0 ? (
-      <button type="button" className="library-toolbar-command" disabled={fetchingArxiv} onClick={() => void fetchMissingArxivPDFs()}>
-        {fetchingArxiv ? '正在自动获取…' : `自动获取缺失 PDF（${missingPDFs.length}）`}
-      </button>
-    ) : null}
-    {fetchingArxiv ? <button type="button" className="library-toolbar-command danger" onClick={() => arxivController.current?.abort()}>停止获取</button> : null}
-    {view === 'trash' ? (
-      <button type="button" className="library-toolbar-command danger" disabled={!Object.values(meta.items).some(item => item.deleted)} onClick={() => setEmptyTrashKeys(Object.values(meta.items).filter(item => item.deleted).map(item => item.key))}>
-        清空回收站
-      </button>
-    ) : null}
-    {view !== 'trash' && view !== 'graph' && view !== 'calendar' ? (
-      <>
-        <button
-          type="button"
-          className="library-toolbar-command"
-          title={categoryFilter ? `导出书架「${categoryFilter}」的书目` : '导出整库书目（不含回收站）'}
-          onClick={() => setCitationOpen(true)}
-        >
-          导出书目
-        </button>
-        <button
-          type="button"
-          className="library-toolbar-command"
-          title={categoryFilter ? `导出书架「${categoryFilter}」为 Obsidian / Notion 双向链接 Markdown ZIP` : '导出整库为 Obsidian / Notion 双向链接 Markdown 知识库 ZIP'}
-          onClick={() => void api.exportMarkdownVault(categoryFilter ? { category: categoryFilter } : undefined)}
-        >
-          导出笔记库
-        </button>
-      </>
-    ) : null}
-    {view !== 'trash' && <button type="button" className="library-toolbar-command" onClick={() => setShareOpen(true)}>只读分享</button>}
-    <button
-      type="button"
-      onClick={() => setDailyOpen((value) => !value)}
-      aria-pressed={dailyOpen}
-      title="每日论文推荐单独占一个侧栏；宽度可拖拽，双击分隔线复位"
-      className={`discovery-toggle${dailyOpen ? ' active' : ''}`}
-    >
-      <WorkspaceIcon name="sparkles" size={15} /><span>每日推荐</span>
-    </button>
-    {layout === 'grid' ? <div className="view-switch density-switch" role="group" aria-label="网格密度">
-      {(['comfortable', 'compact'] as GridDensity[]).map((density) => <button key={density} type="button" aria-pressed={gridDensity === density} className={gridDensity === density ? 'active' : ''} onClick={() => setGridDensity(density)}>
-        <span>{density === 'comfortable' ? '舒适' : '紧凑'}</span>
-      </button>)}
-    </div> : null}
-  </>;
+  const runningJobsCount = jobs.filter((j) => jobStatus(j) === 'running').length;
+  const readingCount = activeDocuments.filter((d) => d.status === 'reading').length;
+  const doneCount = activeDocuments.filter((d) => d.status === 'done').length;
+
+  const titleLabel =
+    categoryFilter
+      ? categoryFilter
+      : view === 'all'
+        ? '全部文档'
+        : view === 'favorite'
+          ? '收藏'
+          : view === 'trash'
+            ? '回收站'
+            : '我的书架';
 
   return (
-    <div className={`app-shell${dailyOpen ? ' daily-open' : ''}`}>
-      <aside className={`library-sidebar${collapsed ? ' collapsed' : ''}`} style={{ width: sidebarWidth, '--sidebar-width': `${sidebarWidth}px` } as CSSProperties}>
-        <div className="sidebar-brand">
-          <strong>工作区</strong>
-          <span>READX WORKSPACE</span>
+    <div className="flex flex-1 min-w-0 min-h-0 relative overflow-hidden">
+      <aside className={`rx-ctx${collapsed ? ' collapsed' : ''}`} style={{ width: collapsed ? 0 : sidebarWidth }} aria-label="书库上下文侧栏">
+        <div className="rx-ctx-head">
+          <span>个人书库</span>
+          <IconButton
+            size="sm"
+            icon="plus"
+            label="管理书架"
+            onClick={() => setManagingCategories((v) => !v)}
+          />
         </div>
 
-        <div className="library-mode-nav" aria-label="工作区切换">
-          <button type="button" className="nav-item active" aria-current="page" title="个人书库">
-            <WorkspaceIcon name="library" /><span className="nav-label">个人书库</span>
-          </button>
-          <button type="button" className="nav-item" onClick={onOpenAcademic} title="学术工作台">
-            <WorkspaceIcon name="graduation" /><span className="nav-label">学术工作台</span>
-          </button>
-        </div>
-        <div className="library-view-heading">书库视图</div>
-
-        <nav className="flex flex-col gap-1" aria-label="书库视图">
-          {VIEWS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => {
-                if (item.id === 'shelves') { setCategoryFilter(''); setTagFilter(''); }
-                onViewChange(item.id);
-              }}
-              aria-current={view === item.id ? 'page' : undefined}
-              title={item.hint ? `${item.label}（${item.hint}）` : item.label}
-              className={`nav-item${view === item.id ? ' active' : ''}`}
-            >
-              <WorkspaceIcon name={item.icon} /><span className="nav-label">{item.label}</span>
-              {item.count != null && item.count > 0 ? <span className="nav-count">{item.count}</span> : null}
-            </button>
-          ))}
-        </nav>
-
-        {meta.categories.length || managingCategories ? (
-          <div className="sidebar-shelves flex flex-col gap-1 px-1">
-              <span className="px-2 text-[10px] uppercase tracking-wide text-ink-faint">
-                我的书架{meta.categories.length ? `（${meta.categories.length}）` : ''}
-              </span>
-            {meta.categories.map((item) => (
-              <button
-                key={item.name}
-                type="button"
-              onClick={() => { setCategoryFilter(categoryFilter === item.name ? '' : item.name); onViewChange('all'); }}
-                className={`nav-item${categoryFilter === item.name ? ' active' : ''}`}
-                style={{ minHeight: 32 }}
-              >
-                <span className="ann-color-dot" style={{ background: categoryDot(item.color) }} />
-                <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>
-                {countInShelf(item.name) > 0 ? <span className="nav-count">{countInShelf(item.name)}</span> : null}
-              </button>
-            ))}
-            <button
-              type="button"
-              onClick={() => setManagingCategories((value) => !value)}
-              className="px-2 py-1 text-left text-[11px] text-ink-faint hover:text-accent"
-            >
-              {managingCategories ? '收起书架管理' : '+ 管理书架'}
-            </button>
-          </div>
-        ) : (
+        <div className="rx-ctx-group">
           <button
             type="button"
-            onClick={() => setManagingCategories(true)}
-            className="sidebar-shelves px-3 py-1 text-left text-[11px] text-ink-faint hover:text-accent"
+            className="rx-ctx-item"
+            aria-current={view === 'all' && !categoryFilter && statusFilter === '' ? 'true' : undefined}
+            onClick={() => { setCategoryFilter(''); setTagFilter(''); setStatusFilter(''); onViewChange('all'); }}
           >
-            + 新建书架
+            <Icon name="file" size={15} />
+            <span>全部文档</span>
+            <span className="rx-count">{Math.max(0, total - trashCount)}</span>
           </button>
-        )}
+          <button
+            type="button"
+            className="rx-ctx-item"
+            aria-current={view === 'all' && statusFilter === 'reading' ? 'true' : undefined}
+            onClick={() => { setCategoryFilter(''); setStatusFilter(statusFilter === 'reading' ? '' : 'reading'); onViewChange('all'); }}
+          >
+            <Icon name="book" size={15} />
+            <span>在读</span>
+            <span className="rx-count">{readingCount}</span>
+          </button>
+          <button
+            type="button"
+            className="rx-ctx-item"
+            aria-current={view === 'favorite' ? 'true' : undefined}
+            onClick={() => { setCategoryFilter(''); setStatusFilter(''); onViewChange('favorite'); }}
+          >
+            <Icon name="star" size={15} />
+            <span>收藏</span>
+            <span className="rx-count">{favoriteCount}</span>
+          </button>
+          <button
+            type="button"
+            className="rx-ctx-item"
+            aria-current={view === 'shelves' ? 'true' : undefined}
+            onClick={() => { setCategoryFilter(''); setTagFilter(''); onViewChange('shelves'); }}
+          >
+            <Icon name="folder" size={15} />
+            <span>书架总览</span>
+            <span className="rx-count">{meta.categories.length}</span>
+          </button>
+        </div>
+
+        <div className="rx-ctx-group">
+          <div className="rx-ctx-label">书架</div>
+          {meta.categories.map((item) => (
+            <button
+              key={item.name}
+              type="button"
+              className="rx-ctx-item"
+              aria-current={categoryFilter === item.name ? 'true' : undefined}
+              onClick={() => { setCategoryFilter(categoryFilter === item.name ? '' : item.name); onViewChange('all'); }}
+            >
+              <span className="rx-dot" style={{ background: categoryDot(item.color) }} />
+              <span className="min-w-0 flex-1 truncate">{item.name}</span>
+              {countInShelf(item.name) > 0 ? <span className="rx-count">{countInShelf(item.name)}</span> : null}
+            </button>
+          ))}
+          <button
+            type="button"
+            onClick={() => setManagingCategories((value) => !value)}
+            className="rx-ctx-item text-ink-faint"
+          >
+            <Icon name="plus" size={14} />
+            <span>{managingCategories ? '收起管理' : '管理书架'}</span>
+          </button>
+        </div>
 
         {managingCategories ? <CategoryManager meta={meta} onDone={() => setManagingCategories(false)} /> : null}
 
-        <div className="sidebar-bottom">
-          <UpdateControl />
-          {/* 左下角：AI 助手设置。放在持久可见的侧栏底部，不再占顶栏空间。 */}
-          <button type="button" className="nav-item" onClick={onOpenSettings} title="AI 助手设置">
-            <WorkspaceIcon name="settings" /><span className="nav-label">AI 助手设置</span>
+        <div className="rx-ctx-foot">
+          <button type="button" className="rx-ctx-item" onClick={onOpenImport}>
+            <Icon name="import" size={15} />
+            <span>Zotero / 链接导入</span>
           </button>
-          {meta.error ? <p className="px-3 text-[10px] leading-relaxed text-bad">{meta.error}</p> : null}
+          <button
+            type="button"
+            className="rx-ctx-item"
+            aria-current={view === 'trash' ? 'true' : undefined}
+            onClick={() => { setCategoryFilter(''); onViewChange('trash'); }}
+          >
+            <Icon name="trash" size={15} />
+            <span>回收站</span>
+            <span className="rx-count">{trashCount}</span>
+          </button>
+          <UpdateControl />
+          {meta.error ? <p className="px-2 py-1 text-xs text-bad">{meta.error}</p> : null}
         </div>
       </aside>
 
-      {!collapsed ? <ResizeHandle
-        label="书架侧栏宽度"
-        value={sidebarWidth}
-        onStart={() => {
-          const start = sidebarWidth;
-          return (delta) => setSidebarWidth(Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, start + delta)));
-        }}
-        onStep={(delta) => setSidebarWidth((value) => Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, value + delta)))}
-        onReset={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
-      /> : null}
+      {!collapsed ? (
+        <ResizeHandle
+          label="书架侧栏宽度"
+          value={sidebarWidth}
+          onStart={() => {
+            const start = sidebarWidth;
+            return (delta) => setSidebarWidth(Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, start + delta)));
+          }}
+          onStep={(delta) => setSidebarWidth((value) => Math.min(MAX_SIDEBAR_WIDTH, Math.max(MIN_SIDEBAR_WIDTH, value + delta)))}
+          onReset={() => setSidebarWidth(DEFAULT_SIDEBAR_WIDTH)}
+        />
+      ) : null}
 
-      <section className="library-main">
-        <header className="library-topbar">
-          <div className="library-heading">
-            <button
-              type="button"
-              onClick={() => setCollapsed((value) => !value)}
-              className="sidebar-toggle"
-              title={collapsed ? '展开侧栏' : '收起侧栏'}
-              aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
-              aria-expanded={!collapsed}
+      <main className="rx-main">
+        <header className="rx-topbar">
+          <IconButton
+            size="md"
+            icon="sidebar"
+            label={collapsed ? '展开侧栏 (Ctrl+\\)' : '折叠侧栏 (Ctrl+\\)'}
+            active={!collapsed}
+            onClick={() => setCollapsed((v) => !v)}
+          />
+          <h3>{titleLabel}</h3>
+
+          <SearchInput
+            id="library-search-input"
+            value={input}
+            onChange={setInput}
+            placeholder={searchMode === 'meta' ? '搜索标题、作者或标签' : '全文正文检索（多词或短语）'}
+            shortcut="Ctrl F"
+            className="w-[300px] max-w-[36vw]"
+            aria-label={searchMode === 'meta' ? '搜索文献标题、作者或标签' : '在全库正文里检索'}
+          />
+
+          <Segmented
+            ariaLabel="搜索范围"
+            value={searchMode}
+            onChange={(item) => {
+              setSearchMode(item);
+              if (item === 'fulltext') setFilters({ q: '' });
+            }}
+            options={[
+              { value: 'meta', label: '元信息', title: '按标题、作者、会场筛选' },
+              { value: 'fulltext', label: '全文', title: '在已索引的逐页正文里检索' },
+            ]}
+          />
+
+          <div className="rx-grow" />
+
+          {view === 'trash' ? (
+            <Button
+              variant="danger"
+              disabled={!Object.values(meta.items).some((item) => item.deleted)}
+              onClick={() => setEmptyTrashKeys(Object.values(meta.items).filter((item) => item.deleted).map((item) => item.key))}
             >
-              <WorkspaceIcon name="panel" size={17} />
-            </button>
-            <div className="min-w-0">
-            <h1>
-              {view === 'all' ? '全部文档' : view === 'favorite' ? '收藏' : view === 'trash' ? '回收站' : view === 'shelves' ? '我的书架' : view === 'graph' ? '知识图谱' : '阅读日历'}
-            </h1>
-            </div>
-            {view !== 'trash' && view !== 'graph' && view !== 'calendar' ? (
-              <button type="button" className="library-toolbar-command sync-command" onClick={() => setSyncSettingsOpen(true)} title="设置书库、阅读进度和笔记的跨设备同步">
-                ⇄ 同步
-              </button>
-            ) : null}
-          </div>
-          <div className="library-view-actions">
-            <div className="library-toolbar-inline">{toolbarCommands()}</div>
-            <div className="view-switch" role="group" aria-label="文献布局">
-            {(['grid', 'list', 'table'] as Layout[]).map((item) => (
-              <button
-                key={item}
-                type="button"
-                onClick={() => setLayout(item)}
-                aria-pressed={layout === item}
-                className={layout === item ? 'active' : ''}
+              <Icon name="trash" size={14} />清空回收站
+            </Button>
+          ) : (
+            <>
+              <Button
+                variant="secondary"
+                onClick={() => setCitationOpen(true)}
+                title={categoryFilter ? `导出书架「${categoryFilter}」的书目` : '导出整库书目（不含回收站）'}
               >
-                <WorkspaceIcon name={item} size={15} /><span>{item === 'grid' ? '网格' : item === 'list' ? '列表' : '表格'}</span>
-              </button>
-            ))}
-            </div>
-            <div className="library-more" ref={moreRef}>
-              <button ref={moreButtonRef} type="button" className="library-more-trigger" aria-label="更多书库操作" aria-expanded={moreOpen} aria-controls="library-more-panel" onClick={() => setMoreOpen((value) => !value)}>⋯</button>
-              {moreOpen ? <div id="library-more-panel" className="library-more-panel" aria-label="更多书库操作" onClick={() => setMoreOpen(false)}>{toolbarCommands()}</div> : null}
-            </div>
-          </div>
-        </header>
-
-        <div className="library-content">
-          {arxivProgress ? <p role="status" className="mb-2 rounded-md bg-accent-soft px-3 py-2 text-xs text-accent">{arxivProgress}</p> : null}
-          {arxivSummary ? <p role="status" className="mb-2 rounded-md bg-surface-sunk px-3 py-2 text-xs text-ink-soft">{arxivSummary}</p> : null}
-          {view === 'trash' ? <div className="mb-3 text-xs leading-relaxed text-ink-soft"><p>清空会删除 library 文件夹中未被其他论文引用的导入副本，原始位置文件保留。</p>{phase.kind === 'ready' ? <p className="break-all">导入副本位置：{phase.meta.dataRoot.replace(/[\\/]$/, '')}/library</p> : null}</div> : null}
-          {!fulltextActive && phase.kind === 'ready' && view !== 'trash' ? (
-            <div className="library-metrics" aria-label="当前列表概览">
-              <div className="library-metric"><span className="metric-icon"><WorkspaceIcon name="file" /></span><strong>{documents.length}</strong><span>当前文献</span></div>
-              <div className="library-metric"><span className="metric-icon"><WorkspaceIcon name="library" /></span><strong>{documents.filter(doc => doc.status === 'reading').length}</strong><span>正在阅读</span></div>
-              <div className="library-metric"><span className="metric-icon"><WorkspaceIcon name="check" /></span><strong>{documents.filter(doc => doc.status === 'done').length}</strong><span>已精读</span></div>
-            </div>
-          ) : null}
-          <div className="library-controls">
-            <div className="view-switch" role="group" aria-label="搜索范围">
-              {(['meta', 'fulltext'] as const).map((item) => (
-                <button
-                  key={item}
-                  type="button"
-                  aria-pressed={searchMode === item}
-                  className={searchMode === item ? 'active' : ''}
-                  title={item === 'meta' ? '按标题、作者、会场筛选' : '在已索引的逐页正文里检索'}
-                  onClick={() => {
-                    setSearchMode(item);
-                    if (item === 'fulltext') setFilters({ q: '' });
-                  }}
-                >
-                  {item === 'meta' ? '题录' : '全文'}
-                </button>
-              ))}
-            </div>
-            <label className="search-field">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <circle cx="11" cy="11" r="7" />
-                <path d="m21 21-4.3-4.3" />
-              </svg>
-              <input
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                placeholder={searchMode === 'meta' ? '搜索标题 / 作者 / 会场' : '在全文里找（支持空格多词或短语）'}
-                aria-label={searchMode === 'meta' ? '搜索文献标题、作者或会场' : '在全库正文里检索'}
+                <Icon name="export" size={14} />导出书目
+              </Button>
+              <IconButton
+                size="md"
+                icon="sync"
+                label="跨设备同步设置"
+                onClick={() => setSyncSettingsOpen(true)}
               />
-            </label>
-            {searchMode === 'fulltext' ? (
-              <div className="view-switch" role="group" aria-label="全文匹配模式">
-                {([
-                  { id: 'terms', label: '多词' },
-                  { id: 'phrase', label: '短语' },
-                ] as const).map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    aria-pressed={fulltextQueryMode === item.id}
-                    className={fulltextQueryMode === item.id ? 'active' : ''}
-                    title={item.id === 'terms' ? '空格分隔多词同时命中（FTS5 BM25 排序）' : '按完整连续短语精确匹配'}
-                    onClick={() => setFulltextQueryMode(item.id)}
-                  >
-                    {item.label}
+            </>
+          )}
+
+          <div className="relative" ref={moreRef}>
+            <IconButton
+              ref={moreButtonRef}
+              size="md"
+              icon="more"
+              label="更多书库工具"
+              active={moreOpen}
+              aria-expanded={moreOpen}
+              onClick={() => setMoreOpen((v) => !v)}
+            />
+            {moreOpen ? (
+              <div className="rx-menu absolute right-0 top-[calc(100%+6px)] z-40 min-w-[210px]" role="menu" onClick={() => setMoreOpen(false)}>
+                <button type="button" className="rx-menu-item" onClick={() => setRagOpen(true)}>
+                  <Icon name="chat" size={14} /><span>跨库 RAG 问答</span>
+                </button>
+                <button type="button" className="rx-menu-item" onClick={() => setFlashcardsOpen(true)}>
+                  <Icon name="star" size={14} /><span>记忆闪卡复习</span>
+                </button>
+                <button type="button" className="rx-menu-item" onClick={() => void api.exportMarkdownVault(categoryFilter ? { category: categoryFilter } : undefined)}>
+                  <Icon name="export" size={14} /><span>导出笔记库 ZIP</span>
+                </button>
+                <button type="button" className="rx-menu-item" onClick={() => setShareOpen(true)}>
+                  <Icon name="link" size={14} /><span>只读分享 / 局域网浏览</span>
+                </button>
+                {missingPDFs.length > 0 ? (
+                  <button type="button" className="rx-menu-item" disabled={fetchingArxiv} onClick={() => void fetchMissingArxivPDFs()}>
+                    <Icon name="import" size={14} /><span>{fetchingArxiv ? '正在获取缺失 PDF…' : `自动补全缺失 PDF（${missingPDFs.length}）`}</span>
                   </button>
-                ))}
+                ) : null}
+                {fetchingArxiv ? (
+                  <button type="button" className="rx-menu-item text-bad" onClick={() => arxivController.current?.abort()}>
+                    <Icon name="x" size={14} /><span>停止自动获取</span>
+                  </button>
+                ) : null}
               </div>
             ) : null}
-            <button
-              type="button"
-              className="library-rag-trigger"
-              onClick={() => setRagOpen(true)}
-              title="跨多篇论文/按书架向 AI 提问并附页码出处"
-            >
-              跨库问答
-            </button>
-            <button
-              type="button"
-              className="library-rag-trigger"
-              onClick={() => setFlashcardsOpen(true)}
-              title="复习术语表、精读要点与批注闪卡（SM-2 间隔重复 / Anki 导出）"
-            >
-              记忆闪卡
-            </button>
-            <LibraryProcessingControl documents={allDocuments} onOpenDocument={onOpenDocument} onReload={onReload} />
-            <span style={{ flex: 1 }} />
-            {meta.tags.map((tag) => (
-              <button
-                key={tag}
-                type="button"
-                onClick={() => setTagFilter(tagFilter === tag ? '' : tag)}
-                className={`rounded-pill px-2 py-1 text-[11px] transition ${tagFilter === tag ? 'bg-accent-soft font-medium text-accent' : 'bg-surface-sunk text-ink-soft hover:text-ink'}`}
-              >
-                {tag}
-              </button>
-            ))}
           </div>
+
+          <IconButton
+            size="md"
+            icon="panel"
+            label={inspectorOpen ? '关闭检查器 (Ctrl+.)' : '打开检查器 (Ctrl+.)'}
+            active={inspectorOpen}
+            onClick={() => setInspectorOpen((v) => !v)}
+          />
+        </header>
+
+        {!fulltextActive && phase.kind === 'ready' && view !== 'trash' ? (
+          <div className="rx-lib-summary num" aria-label="书库概览">
+            <span><b>{activeDocuments.length}</b>在库</span>
+            <span><b>{runningJobsCount}</b>处理中</span>
+            <span><b>{doneCount}</b>已精读</span>
+            <span><b>{readingCount}</b>在读</span>
+          </div>
+        ) : null}
+
+        <div className="rx-lib-filters">
+          {searchMode === 'fulltext' ? (
+            <Segmented
+              ariaLabel="全文匹配模式"
+              value={fulltextQueryMode}
+              onChange={setFulltextQueryMode}
+              options={[
+                { value: 'terms', label: '多词匹配' },
+                { value: 'phrase', label: '完整短语' },
+              ]}
+            />
+          ) : (
+            <Segmented
+              ariaLabel="阅读状态筛选"
+              value={statusFilter}
+              onChange={setStatusFilter}
+              options={[
+                { value: '', label: '全部' },
+                { value: 'reading', label: '在读' },
+                { value: 'unread', label: '未读' },
+                { value: 'done', label: '已精读' },
+              ]}
+            />
+          )}
+
+          <span className="rx-sep" />
+
+          {meta.tags.length > 0 ? (
+            <select
+              aria-label="标签筛选"
+              value={tagFilter}
+              onChange={(e) => setTagFilter(e.target.value)}
+              className="rx-menu-btn bg-transparent border-0 outline-0 cursor-pointer"
+            >
+              <option value="">全部标签</option>
+              {meta.tags.map((tag) => (
+                <option key={tag} value={tag}>{tag}</option>
+              ))}
+            </select>
+          ) : null}
+
+          <select
+            aria-label="排序方式"
+            value={`${sort.key}:${sort.reverse ? 'desc' : 'asc'}`}
+            onChange={(e) => {
+              const [k, dir] = e.target.value.split(':');
+              setTablePreferences((cur) => ({ ...cur, sort: { key: k as SortKey, reverse: dir === 'desc' } }));
+            }}
+            className="rx-menu-btn bg-transparent border-0 outline-0 cursor-pointer"
+          >
+            <option value="title:asc">标题 A–Z</option>
+            <option value="year:desc">最新年份</option>
+            <option value="year:asc">最早年份</option>
+            <option value="status:asc">按阅读状态</option>
+          </select>
+
+          <div className="flex-1" />
+
+          {layout === 'grid' ? (
+            <Segmented
+              ariaLabel="封面密度"
+              value={gridDensity}
+              onChange={setGridDensity}
+              options={[
+                { value: 'comfortable', label: '舒适' },
+                { value: 'compact', label: '紧凑' },
+              ]}
+            />
+          ) : null}
+
+          <Segmented
+            ariaLabel="视图模式"
+            value={layout}
+            onChange={setLayout}
+            options={[
+              { value: 'list', label: <><Icon name="list" size={14} /><span>列表</span></> },
+              { value: 'grid', label: <><Icon name="grid" size={14} /><span>封面</span></> },
+              { value: 'table', label: <><Icon name="compare" size={14} /><span>表格</span></> },
+            ]}
+          />
+        </div>
+
+        <div className="rx-lib-body">
+          {arxivProgress ? <p role="status" className="mx-5 mt-3 rounded-md bg-accent-soft px-3 py-2 text-xs text-accent">{arxivProgress}</p> : null}
+          {arxivSummary ? <p role="status" className="mx-5 mt-3 rounded-md bg-surface-sunk px-3 py-2 text-xs text-ink-soft">{arxivSummary}</p> : null}
+          {view === 'trash' ? (
+            <div className="mx-5 mt-3 rounded-lg bg-surface-sunk px-3 py-2 text-xs leading-relaxed text-ink-soft">
+              <p className="m-0">清空会删除 library 文件夹中未被其他论文引用的导入副本，原始位置文件保留。</p>
+              {phase.kind === 'ready' ? <p className="m-0 break-all">导入副本位置：{phase.meta.dataRoot.replace(/[\\/]$/, '')}/library</p> : null}
+            </div>
+          ) : null}
 
           {fulltextActive ? (
             <section className="fulltext-results" aria-label="全文检索结果">
               {fulltextError ? (
                 <p className="text-bad" role="alert">{fulltextError}</p>
               ) : fulltextLoading && !fulltext ? (
-                <p role="status" className="text-[13px] text-ink-soft">正在检索正文…</p>
+                <p role="status" className="text-sm text-ink-soft">正在检索正文…</p>
               ) : fulltext ? (
                 <>
                   <p className="fulltext-summary">
-                    命中 <strong>{fulltext.matches}</strong> 处，分布在 {fulltext.documents} 篇论文
+                    命中 <strong>{fulltext.matches}</strong> 处，分布在 <span className="num">{fulltext.documents}</span> 篇论文
                     {fulltext.truncated ? '（结果已截断，请用更具体的关键词）' : ''}
                   </p>
-                  {/* 覆盖度必须显示：未索引的论文搜不到，不能让人以为库里没有。 */}
-                  <p className="fulltext-coverage">
-                    已索引 {fulltext.coverage.indexedDocuments} / {fulltext.coverage.documents} 篇 ·{' '}
-                    {fulltext.coverage.indexedPages} 页
+                  <p className="fulltext-coverage num">
+                    已索引 {fulltext.coverage.indexedDocuments} / {fulltext.coverage.documents} 篇 · {fulltext.coverage.indexedPages} 页
                     {fulltext.coverage.unindexedDocuments > 0
                       ? ` · ${fulltext.coverage.unindexedDocuments} 篇还没有正文索引（未翻译且没在阅读器里打开过，或整篇是扫描页）`
                       : ''}
                   </p>
                   {!fulltextGroups.length ? (
-                    <p className="text-[13px] leading-relaxed text-ink-soft">
+                    <p className="text-sm leading-relaxed text-ink-soft">
                       已索引的正文里没有「{fulltext.query}」。可以换关键词，或把这篇论文导入翻译后再搜。
                     </p>
                   ) : null}
@@ -765,8 +844,8 @@ export function LibraryScreen({
                           <button type="button" onClick={() => onOpenAtPage(group.key, group.hits[0]!.page, fulltext.query)}>
                             {group.title}
                           </button>
-                          {group.year ? <span className="tabular-nums">{group.year}</span> : null}
-                          <span>{group.hits.length} 页命中</span>
+                          {group.year ? <span className="num">{group.year}</span> : null}
+                          <span className="num">{group.hits.length} 页命中</span>
                         </div>
                         <ul className="fulltext-hits">
                           {group.hits.map((hit) => (
@@ -778,7 +857,7 @@ export function LibraryScreen({
                                   <mark>{hit.match}</mark>
                                   {hit.after}
                                 </span>
-                                {hit.count > 1 ? <span className="fulltext-count">本页 {hit.count} 处</span> : null}
+                                {hit.count > 1 ? <span className="fulltext-count num">本页 {hit.count} 处</span> : null}
                               </button>
                             </li>
                           ))}
@@ -788,61 +867,71 @@ export function LibraryScreen({
                   </ul>
                 </>
               ) : (
-                <p className="text-[13px] text-ink-soft">输入至少 2 个字开始全文检索。</p>
+                <p className="text-sm text-ink-soft">输入至少 2 个字开始全文检索。</p>
               )}
             </section>
           ) : null}
 
-          {!fulltextActive && phase.kind === 'loading' ? <SkeletonGrid /> : null}
+          {!fulltextActive && phase.kind === 'loading' ? <SkeletonList /> : null}
           {!fulltextActive && phase.kind === 'error' ? (
-            <p className="py-6 text-[13px] leading-relaxed text-ink-soft">{phase.message}</p>
+            <p className="p-6 text-sm leading-relaxed text-ink-soft">{phase.message}</p>
           ) : null}
 
           {!fulltextActive && phase.kind === 'ready' && documents.length === 0 ? (
-            <div className="empty-state">
-              {view === 'trash' ? (
-                <>
-                  <h2>回收站为空</h2>
-                  <p>点击文章右上角的垃圾桶即可移入，移入后可以恢复到书库。</p>
-                </>
-              ) : total === 0 ? (
-                <>
-                  <h2>库里还没有论文</h2>
-                  <p>
-                    点右上「＋ 导入 PDF / EPUB」选择本地文件，或从每日推荐卡片一键导入公开全文。
-                    <br />
-                    导入时会先识别题目、作者、期刊/会议与中文题名，并完成全文翻译再入库。
-                  </p>
-                  <button
-                    type="button"
-                    onClick={onOpenImport}
-                    className="rounded-lg bg-accent px-3 py-1.5 text-[13px] font-medium text-surface shadow-sm transition hover:brightness-105"
-                  >
-                    导入 PDF / EPUB
-                  </button>
-                </>
-              ) : (
-                <>
-                  <h2>没有符合条件的文档</h2>
-                  <p>调整搜索或清空书架/标签筛选后再看。</p>
-                </>
-              )}
-            </div>
+            view === 'trash' ? (
+              <EmptyState title="回收站为空" description="点击文章右侧的删除按钮即可移入，移入后可以随时恢复到书库。" />
+            ) : total === 0 ? (
+              <EmptyState
+                title="这个书库还没有论文"
+                description="拖入 PDF 或 EPUB 到窗口任意位置，也可以用 arXiv 编号、DOI 或链接导入。"
+                action={<Button variant="primary" onClick={onOpenImport}><Icon name="plus" size={14} />导入论文</Button>}
+              />
+            ) : (
+              <EmptyState
+                title="没有符合条件的文档"
+                description="调整状态筛选、清空书架或更换关键词后再看。"
+                action={<Button variant="secondary" onClick={() => { setInput(''); setStatusFilter(''); setCategoryFilter(''); setTagFilter(''); }}>重置筛选</Button>}
+              />
+            )
           ) : null}
 
           {!fulltextActive && view === 'shelves' && phase.kind === 'ready' ? (
-            <ShelfOverview
-              documents={documents}
-              categories={meta.categories}
-              meta={meta.items}
-              selectedId={selectedId}
-              onSelect={onOpenDocument}
-              onOpenProcessing={onOpenProcessing}
-              onRetranslate={onRetranslate}
-              onOpenReproduction={onOpenReproduction}
-              onToggleTrash={toggleTrash}
-              onSetShelves={(key, categories) => meta.patch(key, { categories })}
-            />
+            <div className="p-5">
+              <ShelfOverview
+                documents={documents}
+                categories={meta.categories}
+                meta={meta.items}
+                selectedId={selectedId}
+                onSelect={onOpenDocument}
+                onOpenProcessing={onOpenProcessing}
+                onRetranslate={onRetranslate}
+                onOpenReproduction={onOpenReproduction}
+                onToggleTrash={toggleTrash}
+                onSetShelves={(key, categories) => meta.patch(key, { categories })}
+              />
+            </div>
+          ) : null}
+
+          {!fulltextActive && view !== 'shelves' && phase.kind === 'ready' && documents.length > 0 && layout === 'list' ? (
+            <ul className="rx-lib-list">
+              {documents.map((doc) => (
+                <ListRow
+                  key={doc.id}
+                  doc={doc}
+                  job={jobsByDocKey.get(doc.key)}
+                  meta={meta.items[doc.key]}
+                  categories={meta.categories}
+                  selected={doc.id === (inspectedDoc?.id ?? selectedId)}
+                  onInspect={() => setInspectedDocId(doc.id)}
+                  onOpen={() => onOpenDocument(doc.id)}
+                  onOpenProcessing={() => onOpenProcessing(doc)}
+                  onRetranslate={() => onRetranslate(doc)}
+                  onOpenReproduction={onOpenReproduction}
+                  onToggleFavorite={() => void meta.patch(doc.key, { favorite: !meta.items[doc.key]?.favorite }).catch(() => undefined)}
+                  onToggleTrash={() => toggleTrash(doc.key)}
+                />
+              ))}
+            </ul>
           ) : null}
 
           {!fulltextActive && view !== 'shelves' && phase.kind === 'ready' && documents.length > 0 && layout === 'grid' ? (
@@ -853,7 +942,7 @@ export function LibraryScreen({
                   doc={doc}
                   meta={meta.items[doc.key]}
                   categories={meta.categories}
-                  selected={doc.id === selectedId}
+                  selected={doc.id === (inspectedDoc?.id ?? selectedId)}
                   onSelect={() => onOpenDocument(doc.id)}
                   onOpenProcessing={() => onOpenProcessing(doc)}
                   onRetranslate={() => onRetranslate(doc)}
@@ -863,26 +952,6 @@ export function LibraryScreen({
                 />
               ))}
             </div>
-          ) : null}
-
-          {!fulltextActive && view !== 'shelves' && phase.kind === 'ready' && documents.length > 0 && layout === 'list' ? (
-            <ul className="flex flex-col gap-1.5">
-              {documents.map((doc) => (
-                <ListRow
-                  key={doc.id}
-                  doc={doc}
-                  meta={meta.items[doc.key]}
-                  categories={meta.categories}
-                  selected={doc.id === selectedId}
-                  onSelect={() => onOpenDocument(doc.id)}
-                  onOpenProcessing={() => onOpenProcessing(doc)}
-                  onRetranslate={() => onRetranslate(doc)}
-                  onOpenReproduction={onOpenReproduction}
-                  onToggleFavorite={() => void meta.patch(doc.key, { favorite: !meta.items[doc.key]?.favorite }).catch(() => undefined)}
-                  onToggleTrash={() => toggleTrash(doc.key)}
-                />
-              ))}
-            </ul>
           ) : null}
 
           {!fulltextActive && view !== 'shelves' && phase.kind === 'ready' && documents.length > 0 && layout === 'table' ? (
@@ -903,43 +972,152 @@ export function LibraryScreen({
           ) : null}
 
           {!fulltextActive && duplicates.length > 0 ? (
-            <p className="mt-4 rounded-lg bg-warn/10 px-3 py-2 text-[11px] leading-relaxed text-warn">
+            <p className="mx-5 my-4 rounded-lg bg-warn-soft px-3 py-2 text-xs leading-relaxed text-warn">
               检测到 {duplicates.length} 组疑似重复（arXiv 号 / DOI / 标题+作者）。仅提示，不自动合并——逐篇核对后再手动取舍。
             </p>
           ) : null}
         </div>
-      </section>
+      </main>
 
-      {dailyOpen ? (
+      {inspectorOpen ? (
         <>
           <ResizeHandle
-            label="每日推荐栏宽度"
-            value={dailyWidth}
+            label="检查器宽度"
+            value={inspectorWidth}
             onStart={() => {
-              const start = dailyWidth;
-              return (delta: number) => setDailyWidth(Math.min(DAILY_MAX_WIDTH, Math.max(DAILY_MIN_WIDTH, start - delta)));
+              const start = inspectorWidth;
+              return (delta: number) => setInspectorWidth(Math.min(DAILY_MAX_WIDTH, Math.max(DAILY_MIN_WIDTH, start - delta)));
             }}
-            onStep={(delta: number) => setDailyWidth((value) => Math.min(DAILY_MAX_WIDTH, Math.max(DAILY_MIN_WIDTH, value - delta)))}
-            onReset={() => setDailyWidth(DAILY_DEFAULT_WIDTH)}
+            onStep={(delta: number) => setInspectorWidth((value) => Math.min(DAILY_MAX_WIDTH, Math.max(DAILY_MIN_WIDTH, value - delta)))}
+            onReset={() => setInspectorWidth(DAILY_DEFAULT_WIDTH)}
           />
-          <aside className="daily-sidebar" style={{ width: dailyWidth }} aria-label="每日论文推荐">
-            <header className="daily-sidebar-head">
-              <span className="flex items-center gap-2 truncate text-[14px] font-semibold text-ink"><WorkspaceIcon name="sparkles" size={17} />每日论文推荐</span>
-              <button
-                type="button"
-                onClick={() => setDailyOpen(false)}
-                className="rounded-md border border-line px-2 py-0.5 text-[11px] text-ink-soft transition hover:text-ink"
-                title="收起每日推荐侧栏"
-              >
-                »
-              </button>
-            </header>
-            <div className="daily-sidebar-body">
-              <DailyRecommendations documents={rawDocuments} onReload={onReload} embedded />
+          <aside className="rx-inspector rx-inspector--drawer" style={{ width: inspectorWidth }} aria-label="书库检查器">
+            <div className="flex items-center border-b border-line pr-2">
+              <div className="flex-1 min-w-0">
+                <Tabs
+                  value={inspectorTab}
+                  onChange={setInspectorTab}
+                  ariaLabel="书库检查器标签"
+                  className="border-b-0"
+                  items={[
+                    { value: 'detail', label: '详情' },
+                    { value: 'discover', label: '发现', badge: discoverCount },
+                    { value: 'jobs', label: '任务', badge: runningJobsCount },
+                  ]}
+                />
+              </div>
+              <IconButton size="sm" icon="x" label="关闭检查器" onClick={() => setInspectorOpen(false)} />
+            </div>
+
+            <div className="rx-insp-body">
+              {inspectorTab === 'discover' ? (
+                <DailyRecommendations
+                  documents={rawDocuments}
+                  onReload={onReload}
+                  embedded
+                  onVisibleCountChange={setDiscoverCount}
+                />
+              ) : inspectorTab === 'jobs' ? (
+                <div className="flex flex-col gap-3">
+                  <p className="rx-insp-hint">后台文档识别、翻译与论文记忆任务</p>
+                  <LibraryProcessingControl documents={allDocuments} onOpenDocument={onOpenDocument} onReload={onReload} />
+                  {jobs.length === 0 ? (
+                    <p className="text-xs text-ink-faint">暂无后台处理任务记录。</p>
+                  ) : (
+                    <ul className="flex flex-col gap-2 m-0 p-0 list-none">
+                      {jobs.slice(0, 12).map((job) => {
+                        const st = jobStatus(job);
+                        const doc = allDocuments.find((d) => d.key === (job.documentKey || job.key));
+                        const tone = st === 'done' ? 'good' : st === 'running' ? 'info' : st === 'failed' ? 'bad' : 'mute';
+                        return (
+                          <li key={job.key} className="rx-card p-3 flex flex-col gap-2">
+                            <div className="flex items-start justify-between gap-2">
+                              <strong className="text-xs font-medium text-ink line-clamp-2">{doc?.title || job.name || job.key}</strong>
+                              <Chip tone={tone} icon={st === 'done' ? 'check' : st === 'running' ? 'loader' : st === 'failed' ? 'alert' : 'queue'} spin={st === 'running'}>
+                                {st === 'done' ? '完成' : st === 'running' ? '处理中' : st === 'failed' ? '失败' : st === 'interrupted' ? '中断' : '队列'}
+                              </Chip>
+                            </div>
+                            {doc ? (
+                              <div className="flex gap-2">
+                                <Button size="sm" variant="secondary" onClick={() => onOpenProcessing(doc)}>查看详情</Button>
+                                <Button size="sm" variant="ghost" onClick={() => onOpenDocument(doc.id)}>打开阅读</Button>
+                              </div>
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  )}
+                </div>
+              ) : inspectedDoc ? (
+                <div className="flex flex-col gap-4">
+                  <div>
+                    <span className="rx-tag">{formatBadgeLabel(inspectedDoc.format)}</span>
+                    <h4 className="mt-2 mb-1 text-base font-semibold leading-snug text-ink">{inspectedDoc.title || '（无标题）'}</h4>
+                    {inspectedDoc.translatedTitle ? <p className="m-0 text-xs text-ink-soft">{inspectedDoc.translatedTitle}</p> : null}
+                  </div>
+                  <dl className="grid grid-cols-[64px_1fr] gap-y-2 gap-x-2 text-xs m-0">
+                    <dt className="text-ink-faint">作者</dt>
+                    <dd className="m-0 text-ink-soft">{inspectedDoc.authors.join(' · ') || '—'}</dd>
+                    <dt className="text-ink-faint">来源</dt>
+                    <dd className="m-0 text-ink-soft">{[inspectedDoc.venue, inspectedDoc.year].filter(Boolean).join(' · ') || '—'}</dd>
+                    <dt className="text-ink-faint">状态</dt>
+                    <dd className="m-0 text-ink-soft">{statusLabel(inspectedDoc.status)}</dd>
+                    {inspectedDoc.doi ? (
+                      <>
+                        <dt className="text-ink-faint">DOI</dt>
+                        <dd className="m-0 text-ink-soft break-all">{inspectedDoc.doi}</dd>
+                      </>
+                    ) : null}
+                  </dl>
+                  <div className="flex flex-wrap gap-2">
+                    <Button variant="primary" size="sm" onClick={() => onOpenDocument(inspectedDoc.id)}>
+                      <Icon name="book" size={14} />打开阅读
+                    </Button>
+                    {!isSectionFormat(inspectedDoc.format) && inspectedDoc.hasPdf ? (
+                      <>
+                        <Button variant="secondary" size="sm" onClick={() => onOpenProcessing(inspectedDoc)}>处理详情</Button>
+                        <Button variant="ghost" size="sm" onClick={() => onRetranslate(inspectedDoc)}>重新翻译</Button>
+                      </>
+                    ) : null}
+                    <Button variant="ghost" size="sm" onClick={() => onOpenReproduction(inspectedDoc.key)}>代码复现</Button>
+                  </div>
+                  {meta.categories.length > 0 ? (
+                    <div className="border-t border-line pt-3">
+                      <p className="m-0 mb-2 text-xs font-medium text-ink-soft">所属书架</p>
+                      <div className="flex flex-wrap gap-1.5">
+                        {meta.categories.map((cat) => {
+                          const assigned = (meta.items[inspectedDoc.key]?.categories ?? []).includes(cat.name);
+                          return (
+                            <button
+                              key={cat.name}
+                              type="button"
+                              onClick={() => {
+                                const cur = meta.items[inspectedDoc.key]?.categories ?? [];
+                                const next = assigned ? cur.filter((x) => x !== cat.name) : [...cur, cat.name];
+                                void meta.patch(inspectedDoc.key, { categories: next });
+                              }}
+                              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs transition ${
+                                assigned ? 'border-accent bg-accent-soft text-accent font-medium' : 'border-line bg-surface text-ink-soft hover:border-line-strong'
+                              }`}
+                            >
+                              <span className="ann-color-dot" style={{ background: categoryDot(cat.color) }} />
+                              <span>{cat.name}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <p className="rx-insp-hint">从左侧列表中选择一篇论文查看详情。</p>
+              )}
             </div>
           </aside>
         </>
       ) : null}
+
       {emptyTrashKeys ? <EmptyTrashDialog keysToDelete={emptyTrashKeys} onClose={() => setEmptyTrashKeys(null)} onCleared={async () => { setEmptyTrashKeys(null); onTrashEmptied(); await meta.reload(); }} /> : null}
       {citationOpen ? (
         <CitationExportDialog
@@ -975,7 +1153,7 @@ export function UpdateControl() {
   const [status, setStatus] = useState<DesktopUpdateStatus>(() => (
     window.__READX_DESKTOP_UPDATES__
       ? { state: 'idle' }
-      : { state: 'unsupported', message: '应用内更新仅在 Windows 或 macOS 桌面安装版中提供。' }
+      : { state: 'unsupported', message: '应用内更新仅在桌面安装版中提供。' }
   ));
   const [confirmingUpdate, setConfirmingUpdate] = useState(false);
   const dismissedVersion = useRef<string | null>(null);
@@ -989,7 +1167,6 @@ export function UpdateControl() {
       receivedStatus = true;
       if (active) setStatus(next);
     });
-    // Subscribe first, so a slow initial snapshot cannot overwrite a new event.
     void bridge.getStatus().then(next => {
       if (active && !receivedStatus) setStatus(next);
     }).catch(() => {
@@ -997,6 +1174,7 @@ export function UpdateControl() {
     });
     return () => { active = false; unsubscribe(); };
   }, [bridge]);
+
   useEffect(() => {
     if (status.state !== 'available') {
       setConfirmingUpdate(false);
@@ -1006,6 +1184,7 @@ export function UpdateControl() {
       setConfirmingUpdate(true);
     }
   }, [status.state, status.version]);
+
   const postpone = () => {
     if (status.version) dismissedVersion.current = status.version;
     setConfirmingUpdate(false);
@@ -1031,23 +1210,17 @@ export function UpdateControl() {
 
   const busy = status.state === 'checking' || status.state === 'downloading';
   const label = status.state === 'checking' ? '正在检查更新…'
-    : status.state === 'current' ? (status.version === status.currentVersion
-      ? `已是最新版本 · v${status.version}`
-      : `当前版本 · v${status.currentVersion}`)
+    : status.state === 'current' ? `已是最新 · v${status.version ?? status.currentVersion}`
       : status.state === 'available' ? `下载更新 · v${status.version}`
         : status.state === 'downloading' ? `正在下载 · ${Math.round(status.percent ?? 0)}%`
-          : status.state === 'downloaded' ? `${status.installMode === 'manual-dmg' ? '打开安装包' : '重启并安装'}${status.version ? ` · v${status.version}` : ''}`
-            : status.state === 'error' ? '更新失败 · 点击重试'
-              : status.state === 'unavailable' ? (status.version ? `最新发布 · v${status.version}` : '暂无此平台更新 · 点击重查')
+          : status.state === 'downloaded' ? `${status.installMode === 'manual-dmg' ? '打开安装包' : '重启并安装'}`
+            : status.state === 'error' ? '更新失败 · 重试'
+              : status.state === 'unavailable' ? '检查更新'
                 : status.state === 'unsupported' ? '桌面版更新'
                   : '检查更新';
   const detail = status.installMode === 'manual-dmg' && status.message
     ? status.message
-    : status.state === 'unavailable'
-    ? `${status.currentVersion ? `当前版本 v${status.currentVersion}。` : ''}${status.message ?? ''}`
-    : status.state === 'current' && status.version !== status.currentVersion
-      ? `更新源最新版本 v${status.version}；当前版本 v${status.currentVersion}。`
-      : status.state === 'error' || status.state === 'unsupported' ? status.message : undefined;
+    : status.state === 'error' || status.state === 'unsupported' ? status.message : undefined;
   const disabled = !bridge || busy;
 
   return (
@@ -1055,17 +1228,19 @@ export function UpdateControl() {
       <div className={`sidebar-update${busy ? ' is-busy' : ''}`}>
         <button
           type="button"
-          className="nav-item sidebar-update-button"
+          className="rx-ctx-item sidebar-update-button"
           onClick={() => void run()}
           disabled={disabled}
           title={detail ?? label}
-          aria-label={detail ? `${label}：${detail}` : label}
         >
-          <WorkspaceIcon name="reset" />
-          <span className="nav-label">{label}</span>
+          <Icon name="sync" size={15} />
+          <span>{label}</span>
         </button>
-        {status.state === 'downloading' ? <div className="sidebar-update-progress" role="progressbar" aria-valuenow={Math.round(status.percent ?? 0)} aria-valuemin={0} aria-valuemax={100}><span style={{ width: `${Math.round(status.percent ?? 0)}%` }} /></div> : null}
-        {detail ? <p className="sidebar-update-detail nav-label" title={detail}>{detail}</p> : null}
+        {status.state === 'downloading' ? (
+          <div className="sidebar-update-progress" role="progressbar" aria-valuenow={Math.round(status.percent ?? 0)} aria-valuemin={0} aria-valuemax={100}>
+            <span style={{ width: `${Math.round(status.percent ?? 0)}%` }} />
+          </div>
+        ) : null}
       </div>
       <AppDialog open={confirmingUpdate} onClose={postpone} className="update-confirm-dialog" aria-labelledby="update-confirm-title">
         <header>
@@ -1109,30 +1284,34 @@ function ShelfOverview({
     docs: documents.filter((doc) => (meta[doc.key]?.categories ?? []).includes(shelf.name)),
   }));
 
-  if (!documents.length) return <div className="empty-state"><h2>书架里还没有论文</h2><p>在全部文档中给论文选择所属书架，按研究领域整理阅读。</p></div>;
+  if (!documents.length) return <EmptyState title="书架里还没有论文" description="在全部文档中给论文选择所属书架，按研究领域整理阅读。" />;
 
   return (
     <div className="space-y-5">
-      {!categories.length ? <p className="rounded-lg border border-line bg-surface px-3 py-2 text-xs text-ink-soft">先在左侧点击「+ 新建书架」，再用论文卡片上的「归入书架」整理同领域论文。</p> : null}
+      {!categories.length ? <p className="rounded-lg border border-line bg-surface px-3 py-2 text-xs text-ink-soft">先在左侧点击「管理书架」，再用论文卡片上的「归入书架」整理同领域论文。</p> : null}
       {groups.map((shelf, index) => (
         <section key={shelf.name} className="shelf-collection">
           <ShelfCover name={shelf.name} color={shelf.color} documents={shelf.docs} index={index} />
           <div className="shelf-collection-body">
-          {shelf.docs.length ? <div className="book-grid">
-            {shelf.docs.map((doc) => <LibraryCard
-              key={`${shelf.name}-${doc.id}`}
-              doc={doc}
-              meta={meta[doc.key]}
-              categories={categories}
-              selected={doc.id === selectedId}
-              onSelect={() => onSelect(doc.id)}
-              onOpenProcessing={() => onOpenProcessing(doc)}
-              onRetranslate={() => onRetranslate(doc)}
-              onOpenReproduction={onOpenReproduction}
-              onToggleTrash={() => onToggleTrash(doc.key)}
-              onSetShelves={(names) => onSetShelves(doc.key, names)}
-            />)}
-          </div> : <p className="text-xs text-ink-faint">这个书架还没有论文，可以在全部文档卡片上选择该书架。</p>}
+            {shelf.docs.length ? (
+              <div className="book-grid p-0">
+                {shelf.docs.map((doc) => (
+                  <LibraryCard
+                    key={`${shelf.name}-${doc.id}`}
+                    doc={doc}
+                    meta={meta[doc.key]}
+                    categories={categories}
+                    selected={doc.id === selectedId}
+                    onSelect={() => onSelect(doc.id)}
+                    onOpenProcessing={() => onOpenProcessing(doc)}
+                    onRetranslate={() => onRetranslate(doc)}
+                    onOpenReproduction={onOpenReproduction}
+                    onToggleTrash={() => onToggleTrash(doc.key)}
+                    onSetShelves={(names) => onSetShelves(doc.key, names)}
+                  />
+                ))}
+              </div>
+            ) : <p className="text-xs text-ink-faint">这个书架还没有论文。</p>}
           </div>
         </section>
       ))}
@@ -1142,10 +1321,12 @@ function ShelfOverview({
 
 function ListRow({
   doc,
+  job,
   meta,
   categories,
   selected,
-  onSelect,
+  onInspect,
+  onOpen,
   onOpenProcessing,
   onRetranslate,
   onOpenReproduction,
@@ -1153,53 +1334,94 @@ function ListRow({
   onToggleTrash,
 }: {
   doc: DocumentSummary;
+  job?: DocumentProcessingJob;
   meta: DocumentMeta | undefined;
   categories: Category[];
   selected: boolean;
-  onSelect: () => void;
+  onInspect: () => void;
+  onOpen: () => void;
   onOpenProcessing: () => void;
   onRetranslate: (doc: DocumentSummary) => void;
   onOpenReproduction: (key: string) => void;
   onToggleFavorite: () => void;
   onToggleTrash: () => Promise<unknown>;
 }) {
-  const tone = STATUS_TONE[doc.status] ?? 'bg-surface-sunk text-ink-soft';
+  const jStatus = job ? jobStatus(job) : '';
+  const translateStage = job?.stages.find((s) => s.key === 'translate');
+  const pct = translateStage && translateStage.total > 0 ? Math.round((translateStage.completed / translateStage.total) * 100) : 0;
+
+  const statusChip =
+    jStatus === 'running' ? (
+      <>
+        <Chip tone="info" icon="loader" spin>
+          <span className="num">
+            {translateStage && translateStage.total > 0 ? `${translateStage.completed}/${translateStage.total} 段` : '处理中'}
+          </span>
+        </Chip>
+        {translateStage && translateStage.total > 0 ? (
+          <div className="w-16"><ProgressBar value={pct} /></div>
+        ) : null}
+      </>
+    ) : jStatus === 'failed' || jStatus === 'interrupted' ? (
+      <>
+        <Chip tone="bad" icon="alert">{jStatus === 'failed' ? '处理失败' : '已中断'}</Chip>
+        <Button size="sm" variant="secondary" onClick={onOpenProcessing}>重新处理</Button>
+      </>
+    ) : doc.status === 'done' ? (
+      <Chip tone="good" icon="check">已精读</Chip>
+    ) : doc.status === 'reading' ? (
+      <Chip tone="accent" icon="book">在读</Chip>
+    ) : (
+      <Chip tone="mute" icon="queue">{statusLabel(doc.status)}</Chip>
+    );
+
   return (
     <li
-      className={`flex items-start gap-2 rounded-lg border px-3 py-2 transition ${selected ? 'border-accent/40 bg-accent-soft/60' : 'border-line hover:bg-surface-sunk'}`}
+      className="rx-lib-row"
+      aria-selected={selected ? 'true' : undefined}
+      onClick={onInspect}
     >
-      <button type="button" onClick={onSelect} className="min-w-0 flex-1 text-left">
-        <p className="truncate text-[13px] font-medium text-ink">{doc.title || '（无标题）'}</p>
-        {doc.translatedTitle && <p className="truncate text-xs text-ink-faint">{doc.translatedTitle}</p>}
-        <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-ink-faint">
-          <span className={`rounded-pill px-1.5 py-0.5 font-medium ${tone}`}>{statusLabel(doc.status)}</span>
-          <span className="truncate">{doc.authors[0] ?? '作者未知'}{doc.authors.length > 1 ? ' 等' : ''}{doc.year ? ` · ${doc.year}` : ''}</span>
-        </p>
-        {meta?.categories.length ? (
-          <p className="mt-1 flex flex-wrap gap-1">
-            {meta.categories.map((name) => {
-              const definition = categories.find((item) => item.name === name);
-              return (
-                <span key={name} className="flex items-center gap-1 rounded-pill bg-surface-sunk px-1.5 py-0.5 text-[10px] text-ink-soft">
-                  <span className="ann-color-dot" style={{ background: categoryDot(definition?.color ?? 'slate') }} />
-                  {name}
-                </span>
-              );
-            })}
-          </p>
-        ) : null}
+      <div className="rx-fmt">{formatBadgeLabel(doc.format)}</div>
+
+      <button type="button" onClick={onOpen} className="rx-lib-row-main">
+        <h4>{doc.title || '（无标题）'}</h4>
+        {doc.translatedTitle ? <p className="rx-lib-row-sub">{doc.translatedTitle}</p> : null}
+        <div className="rx-lib-row-meta">
+          <span>{doc.authors[0] ?? '作者未知'}{doc.authors.length > 1 ? ' 等' : ''}</span>
+          {doc.venue || doc.year ? <span className="num">{[doc.venue, doc.year].filter(Boolean).join(' ')}</span> : null}
+          {(meta?.categories ?? []).map((name) => {
+            const definition = categories.find((item) => item.name === name);
+            return (
+              <span key={name} className="rx-tag gap-1">
+                <span className="ann-color-dot" style={{ background: categoryDot(definition?.color ?? 'slate') }} />
+                {name}
+              </span>
+            );
+          })}
+        </div>
       </button>
-      <span className="flex shrink-0 items-center gap-1 text-[11px]">
-        <button type="button" onClick={onToggleFavorite} className={meta?.favorite ? 'text-accent' : 'text-ink-faint hover:text-ink'}>
-          {meta?.favorite ? '★' : '☆'}
-        </button>
-        {!isSectionFormat(doc.format) && doc.hasPdf && doc.paperMemoryStatus && doc.paperMemoryStatus !== 'done' ? <button type="button" onClick={onOpenProcessing} className="text-accent hover:underline" title={doc.paperMemoryMessage || '查看论文记忆处理进度'}>处理</button> : null}
-        {!isSectionFormat(doc.format) && doc.hasPdf ? <button type="button" onClick={() => onRetranslate(doc)} className="text-ink-faint hover:text-accent">重新翻译</button> : null}
-        <button type="button" onClick={() => onOpenReproduction(doc.key)} className="text-ink-faint hover:text-accent">
-          复现
-        </button>
-        <LibraryTrashButton title={doc.title || doc.key} deleted={Boolean(meta?.deleted)} onToggle={onToggleTrash} />
-      </span>
+
+      <div className="rx-lib-row-end">
+        {statusChip}
+        <div className="rx-lib-row-hover-acts">
+          <IconButton
+            size="sm"
+            icon="star"
+            label={meta?.favorite ? '取消收藏' : '收藏'}
+            active={Boolean(meta?.favorite)}
+            onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
+          />
+          {!isSectionFormat(doc.format) && doc.hasPdf ? (
+            <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); onRetranslate(doc); }}>
+              重新翻译
+            </Button>
+          ) : null}
+          <Button size="sm" variant="ghost" onClick={(e) => { e.stopPropagation(); onOpenReproduction(doc.key); }}>
+            复现
+          </Button>
+          <LibraryTrashButton title={doc.title || doc.key} deleted={Boolean(meta?.deleted)} onToggle={onToggleTrash} />
+        </div>
+      </div>
     </li>
   );
 }
@@ -1236,75 +1458,73 @@ function DocumentTable({
   const labels: Record<TableColumn, string> = { title: '标题', author: '作者', year: '年份', status: '状态', shelves: '书架' };
   return (
     <div className="library-table-wrap">
-    <div className="library-table-options" role="group" aria-label="表格列显示">
-      <span>显示列</span>
-      {DEFAULT_TABLE_COLUMNS.map((column) => <label key={column}>
-        <input type="checkbox" checked={visible(column)} disabled={visible(column) && columns.length === 1} onChange={() => onToggleColumn(column)} />{labels[column]}
-      </label>)}
-    </div>
-    <table className="w-full border-collapse text-left text-[12px]">
-      <thead>
-        <tr className="border-b border-line text-[11px] text-ink-faint">
-          {visible('title') ? <th className="cursor-pointer px-2 py-2 font-medium hover:text-ink" onClick={() => onSort('title')}>标题{arrow('title')}</th> : null}
-          {visible('author') ? <th className="px-2 py-2 font-medium">作者</th> : null}
-          {visible('year') ? <th className="cursor-pointer px-2 py-2 font-medium hover:text-ink" onClick={() => onSort('year')}>年份{arrow('year')}</th> : null}
-          {visible('status') ? <th className="cursor-pointer px-2 py-2 font-medium hover:text-ink" onClick={() => onSort('status')}>状态{arrow('status')}</th> : null}
-          {visible('shelves') ? <th className="px-2 py-2 font-medium">书架</th> : null}
-          <th className="px-2 py-2 font-medium" />
-        </tr>
-      </thead>
-      <tbody>
-        {documents.map((doc) => {
-          const item = meta[doc.key];
-          return (
-            <tr
-              key={doc.id}
-              className={`border-b border-line/60 align-top transition ${doc.id === selectedId ? 'bg-accent-soft/50' : 'hover:bg-surface-sunk'}`}
-            >
-              {visible('title') ? <td className="px-2 py-2">
-                <button type="button" onClick={() => onSelect(doc.id)} className="text-left font-medium text-ink hover:text-accent">
-                  {item?.favorite ? <span className="mr-1 text-accent">★</span> : null}
-                  {doc.title || '（无标题）'}
-                  {doc.translatedTitle && <small className="block text-ink-faint">{doc.translatedTitle}</small>}
-                </button>
-              </td> : null}
-              {visible('author') ? <td className="px-2 py-2 text-ink-soft">{doc.authors[0] ?? '作者未知'}{doc.authors.length > 1 ? ' 等' : ''}</td> : null}
-              {visible('year') ? <td className="px-2 py-2 tabular-nums text-ink-soft">{doc.year ?? '—'}</td> : null}
-              {visible('status') ? <td className="px-2 py-2">
-                <span className={`rounded-pill px-1.5 py-0.5 text-[10px] font-medium ${STATUS_TONE[doc.status] ?? 'bg-surface-sunk text-ink-soft'}`}>
-                  {statusLabel(doc.status)}
-                </span>
-              </td> : null}
-              {visible('shelves') ? <td className="px-2 py-2">
-                {(item?.categories ?? []).length ? (
-                  <span className="flex flex-wrap gap-1">
-                    {(item?.categories ?? []).map((name) => (
-                      <span key={name} className="rounded-pill bg-surface-sunk px-1.5 py-0.5 text-[10px] text-ink-soft">{name}</span>
-                    ))}
-                  </span>
-                ) : (
-                  <span className="text-ink-faint">—</span>
-                )}
-              </td> : null}
-              <td className="px-2 py-2">
-                <div className="flex items-center gap-2">
-                {doc.format !== 'epub' && doc.hasPdf && doc.paperMemoryStatus && doc.paperMemoryStatus !== 'done' ? <button type="button" onClick={() => onOpenProcessing(doc)} title={doc.paperMemoryMessage || '查看论文记忆处理进度'} className="rounded-md border border-accent/30 bg-accent-soft/40 px-2 py-0.5 text-[10px] text-accent transition hover:border-accent">处理</button> : null}
-                {doc.format !== 'epub' && doc.hasPdf ? <button type="button" onClick={() => onRetranslate(doc)} className="rounded-md border border-line bg-surface px-2 py-0.5 text-[10px] text-ink-soft transition hover:border-accent hover:text-accent">重新翻译</button> : null}
-                <button
-                  type="button"
-                  onClick={() => onOpenReproduction(doc.key)}
-                  className="rounded-md border border-line bg-surface px-2 py-0.5 text-[10px] text-ink-soft transition hover:border-accent hover:text-accent"
-                >
-                  复现
-                </button>
-                <LibraryTrashButton title={doc.title || doc.key} deleted={Boolean(item?.deleted)} onToggle={() => onToggleTrash(doc.key)} />
-                </div>
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+      <div className="library-table-options" role="group" aria-label="表格列显示">
+        <span>显示列</span>
+        {DEFAULT_TABLE_COLUMNS.map((column) => (
+          <label key={column}>
+            <input type="checkbox" checked={visible(column)} disabled={visible(column) && columns.length === 1} onChange={() => onToggleColumn(column)} />{labels[column]}
+          </label>
+        ))}
+      </div>
+      <table className="w-full border-collapse text-left text-sm">
+        <thead>
+          <tr className="border-b border-line-strong text-xs text-ink-faint">
+            {visible('title') ? <th className="cursor-pointer px-3 py-2 font-medium hover:text-ink" onClick={() => onSort('title')}>标题{arrow('title')}</th> : null}
+            {visible('author') ? <th className="px-3 py-2 font-medium">作者</th> : null}
+            {visible('year') ? <th className="cursor-pointer px-3 py-2 font-medium hover:text-ink" onClick={() => onSort('year')}>年份{arrow('year')}</th> : null}
+            {visible('status') ? <th className="cursor-pointer px-3 py-2 font-medium hover:text-ink" onClick={() => onSort('status')}>状态{arrow('status')}</th> : null}
+            {visible('shelves') ? <th className="px-3 py-2 font-medium">书架</th> : null}
+            <th className="px-3 py-2 font-medium" />
+          </tr>
+        </thead>
+        <tbody>
+          {documents.map((doc) => {
+            const item = meta[doc.key];
+            return (
+              <tr
+                key={doc.id}
+                className={`border-b border-line align-top transition ${doc.id === selectedId ? 'bg-accent-soft/50' : 'hover:bg-surface-hover'}`}
+              >
+                {visible('title') ? (
+                  <td className="px-3 py-2.5">
+                    <button type="button" onClick={() => onSelect(doc.id)} className="text-left font-medium text-ink hover:text-accent">
+                      {item?.favorite ? <span className="mr-1 text-accent">★</span> : null}
+                      {doc.title || '（无标题）'}
+                      {doc.translatedTitle ? <small className="block text-xs text-ink-faint">{doc.translatedTitle}</small> : null}
+                    </button>
+                  </td>
+                ) : null}
+                {visible('author') ? <td className="px-3 py-2.5 text-xs text-ink-soft">{doc.authors[0] ?? '作者未知'}{doc.authors.length > 1 ? ' 等' : ''}</td> : null}
+                {visible('year') ? <td className="px-3 py-2.5 num text-xs text-ink-soft">{doc.year ?? '—'}</td> : null}
+                {visible('status') ? (
+                  <td className="px-3 py-2.5">
+                    <Chip tone={doc.status === 'done' ? 'good' : doc.status === 'reading' ? 'accent' : 'mute'}>{statusLabel(doc.status)}</Chip>
+                  </td>
+                ) : null}
+                {visible('shelves') ? (
+                  <td className="px-3 py-2.5">
+                    {(item?.categories ?? []).length ? (
+                      <span className="flex flex-wrap gap-1">
+                        {(item?.categories ?? []).map((name) => (
+                          <span key={name} className="rx-tag">{name}</span>
+                        ))}
+                      </span>
+                    ) : <span className="text-ink-faint">—</span>}
+                  </td>
+                ) : null}
+                <td className="px-3 py-2.5">
+                  <div className="flex items-center gap-1.5">
+                    {doc.format !== 'epub' && doc.hasPdf && doc.paperMemoryStatus && doc.paperMemoryStatus !== 'done' ? <Button size="sm" variant="secondary" onClick={() => onOpenProcessing(doc)}>处理</Button> : null}
+                    {doc.format !== 'epub' && doc.hasPdf ? <Button size="sm" variant="ghost" onClick={() => onRetranslate(doc)}>重译</Button> : null}
+                    <Button size="sm" variant="ghost" onClick={() => onOpenReproduction(doc.key)}>复现</Button>
+                    <LibraryTrashButton title={doc.title || doc.key} deleted={Boolean(item?.deleted)} onToggle={() => onToggleTrash(doc.key)} />
+                  </div>
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -1330,27 +1550,18 @@ function CategoryManager({ meta, onDone }: { meta: ReturnType<typeof useLibraryM
   };
 
   return (
-    <div className="mx-2 rounded-lg border border-line bg-surface-sunk/50 px-2 py-2">
-      <div className="flex items-center gap-1">
+    <div className="mt-2 rounded-lg border border-line bg-surface p-2.5">
+      <div className="flex items-center gap-1.5">
         <input
           value={name}
           onChange={(event) => setName(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') void create();
-          }}
-          placeholder="领域书架名称（如：图像重建）"
-          className="min-w-0 flex-1 rounded-md border border-line bg-surface px-2 py-1 text-[12px] focus:border-accent focus:outline-none"
+          onKeyDown={(event) => { if (event.key === 'Enter') void create(); }}
+          placeholder="书架名称"
+          className="rx-field-control h-7 min-w-0 flex-1 text-xs"
         />
-        <button
-          type="button"
-          onClick={() => void create()}
-          disabled={busy || !name.trim()}
-          className="rounded-md bg-accent px-2 py-1 text-[11px] font-medium text-surface disabled:opacity-40"
-        >
-          添加
-        </button>
+        <Button size="sm" variant="primary" onClick={() => void create()} disabled={busy || !name.trim()}>添加</Button>
       </div>
-      <div className="mt-1 flex items-center gap-1">
+      <div className="mt-2 flex items-center gap-1">
         {CATEGORY_COLORS.map((value) => (
           <button
             key={value}
@@ -1365,38 +1576,34 @@ function CategoryManager({ meta, onDone }: { meta: ReturnType<typeof useLibraryM
         ))}
       </div>
       {meta.categories.length ? (
-        <ul className="mt-1.5 space-y-1">
+        <ul className="mt-2 space-y-1">
           {meta.categories.map((item) => (
-            <li key={item.name} className="flex items-center gap-1.5 text-[11px]">
+            <li key={item.name} className="flex items-center gap-1.5 text-xs">
               <span className="ann-color-dot" style={{ background: categoryDot(item.color) }} />
               <span className="min-w-0 flex-1 truncate">{item.name}</span>
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void meta.deleteCategory(item.name).catch(() => undefined)}
-                className="text-ink-faint hover:text-bad"
-              >
+              <button type="button" disabled={busy} onClick={() => void meta.deleteCategory(item.name).catch(() => undefined)} className="text-ink-faint hover:text-bad">
                 删除
               </button>
             </li>
           ))}
         </ul>
       ) : null}
-      {error ? <p className="mt-1 text-[11px] text-bad">{error}</p> : null}
-      <button type="button" onClick={onDone} className="mt-1 text-[11px] text-ink-faint underline">
-        完成
-      </button>
+      {error ? <p className="mt-1 text-xs text-bad">{error}</p> : null}
+      <button type="button" onClick={onDone} className="mt-2 text-xs text-ink-faint underline">完成</button>
     </div>
   );
 }
 
-function SkeletonGrid() {
+function SkeletonList() {
   return (
-    <div className="book-grid">
-      {[0, 1, 2, 3, 4, 5].map((index) => (
-        <div key={index}>
-          <div className="h-[263px] animate-pulse rounded-[7px] bg-surface-sunk" />
-          <div className="mt-3 h-3 w-3/4 animate-pulse rounded bg-surface-sunk" />
+    <div className="p-5 flex flex-col gap-4">
+      {[0, 1, 2, 3, 4].map((index) => (
+        <div key={index} className="flex items-center gap-4 border-b border-line pb-4">
+          <div className="h-11 w-9 rounded bg-surface-sunk" />
+          <div className="flex-1 flex flex-col gap-2">
+            <Skeleton width="68%" />
+            <Skeleton width="42%" />
+          </div>
         </div>
       ))}
     </div>

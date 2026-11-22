@@ -149,7 +149,7 @@ func (s *Server) prepareOCRLayoutTranslations(ctx context.Context, pdf []byte, s
 	if len(sizes) > 0 && len(pages) != len(sizes) {
 		return false, fmt.Errorf("OCR 返回 %d 页，原 PDF 有 %d 页，无法可靠对齐页面", len(pages), len(sizes))
 	}
-	config, configErr := s.aiConfig()
+	config, configErr := s.workflowAIConfig(WorkflowTranslation)
 	if configErr == nil && config.Ready() {
 		if err := annotateContinuationGroups(ctx, pages, ai.NewClient(config)); err != nil && ctx.Err() != nil {
 			return false, err
@@ -1159,7 +1159,7 @@ func (s *Server) translatePageItemsMode(ctx context.Context, key string, items [
 	if err := attachTranslationTerms(ctx, s, items); err != nil {
 		return nil, err
 	}
-	config, configErr := s.aiConfig()
+	config, configErr := s.workflowAIConfig(WorkflowTranslation)
 	var cacheConfig *ai.Config
 	if configErr == nil {
 		cacheConfig = &config

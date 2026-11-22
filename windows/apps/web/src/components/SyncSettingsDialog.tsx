@@ -5,7 +5,15 @@ import { captureBrowserBackup } from '../lib/browserBackup';
 
 type SyncProvider = 'folder' | 'jianguoyun';
 
-export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () => void; onSyncComplete: () => void }) {
+export function SyncSettingsPane({
+  onSyncComplete,
+  onProviderChange,
+  onBusyChange,
+}: {
+  onSyncComplete?: () => void;
+  onProviderChange?: (provider: SyncProvider) => void;
+  onBusyChange?: (busy: boolean) => void;
+}) {
   const [provider, setProvider] = useState<SyncProvider>('folder');
   const [folderPath, setFolderPath] = useState('');
   const [webdavUsername, setWebdavUsername] = useState('');
@@ -16,6 +24,9 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
   const [conflicts, setConflicts] = useState<SyncConflictPair[]>([]);
   const [customDrafts, setCustomDrafts] = useState<Record<string, string>>({});
   const [resolvingId, setResolvingId] = useState('');
+
+  useEffect(() => { onProviderChange?.(provider); }, [provider, onProviderChange]);
+  useEffect(() => { onBusyChange?.(busy); }, [busy, onBusyChange]);
 
   const refreshConflicts = useCallback(async () => {
     try {
@@ -128,7 +139,7 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
       setNotice(`同步完成：${result.documents} 篇文档、${result.readingPositions} 条阅读位置、${result.annotations} 条笔记。`);
       await refreshConflicts();
       window.dispatchEvent(new Event('readx-sync-complete'));
-      onSyncComplete();
+      onSyncComplete?.();
     } catch (cause) {
       setNotice(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -137,13 +148,7 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
   };
 
   return (
-    <AppDialog open onClose={onClose} busy={busy} className="ai-settings" aria-labelledby="sync-settings-title">
-      <header className="ai-settings-head">
-        <button type="button" className="ai-back" onClick={onClose} aria-label="关闭同步设置">←</button>
-        <h2 id="sync-settings-title">跨设备同步</h2>
-        <span className={`ai-chip${provider === 'jianguoyun' ? ' ok' : ''}`}>{provider === 'jianguoyun' ? '坚果云' : '本地目录'}</span>
-      </header>
-      <div className="ai-settings-body">
+    <div className="sync-settings-pane">
         {window.__READX_BACKUP__ && <section className="ai-card">
           <header>完整备份与恢复</header>
           <p className="ai-hint">保存论文、数据库、译文、LaTeX 项目、聊天、研究工作台及独立文库。备份在应用关闭后执行，完成后自动重启；恢复前校验文件并保留当前数据。备份可能包含服务密钥，请妥善保管。</p>
@@ -206,7 +211,7 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
                       ...(decision === 'custom' ? { mergedNote: draft } : {}),
                     });
                     await refreshConflicts();
-                    onSyncComplete();
+                    onSyncComplete?.();
                   } catch (cause) {
                     setNotice(cause instanceof Error ? cause.message : String(cause));
                   } finally {
@@ -251,6 +256,23 @@ export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () =>
             </div>
           </section>
         ) : null}
+    </div>
+  );
+}
+
+export function SyncSettingsDialog({ onClose, onSyncComplete }: { onClose: () => void; onSyncComplete: () => void }) {
+  const [provider, setProvider] = useState<SyncProvider>('folder');
+  const [busy, setBusy] = useState(false);
+
+  return (
+    <AppDialog open onClose={onClose} busy={busy} className="ai-settings" aria-labelledby="sync-settings-title">
+      <header className="ai-settings-head">
+        <button type="button" className="ai-back" onClick={onClose} aria-label="关闭同步设置">←</button>
+        <h2 id="sync-settings-title">跨设备同步</h2>
+        <span className={`ai-chip${provider === 'jianguoyun' ? ' ok' : ''}`}>{provider === 'jianguoyun' ? '坚果云' : '本地目录'}</span>
+      </header>
+      <div className="ai-settings-body">
+        <SyncSettingsPane onSyncComplete={onSyncComplete} onProviderChange={setProvider} onBusyChange={setBusy} />
       </div>
       <footer className="ai-settings-foot">
         <button type="button" className="ai-save-button" disabled={busy} onClick={onClose}>完成</button>

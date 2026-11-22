@@ -87,7 +87,7 @@ func (s *Server) handlePaperPage(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 404, "没有这篇文档")
 		return
 	}
-	cfg, err := s.aiConfig()
+	cfg, err := s.workflowAIConfig(WorkflowQA)
 	if err != nil {
 		writeError(w, 503, err.Error())
 		return

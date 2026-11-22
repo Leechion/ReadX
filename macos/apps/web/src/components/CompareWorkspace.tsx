@@ -334,7 +334,7 @@ export function CompareWorkspace({ documents, onBack, onOpenAtPage, onOpenDocume
                               />
                             ) : phase?.kind === 'empty' ? (
                               <div className="compare-cell-actions">
-                                <span className="compare-none">{generating[doc.key] ? '后台生成中' : '未抽取'}</span>
+                                <span className="compare-none">{generating[doc.key] ? '⏳ 后台生成中…' : '◌ 未抽取'}</span>
                                 <button
                                   type="button"
                                   disabled={Boolean(generating[doc.key])}
@@ -396,7 +396,7 @@ function GroupCell({ fields, onCite }: { fields: ReadingField[]; onCite: (page: 
       ))}
       {declaredUnknown.length ? (
         <p className="compare-declared">
-          {declaredUnknown.map((field) => field.v.trim()).join(' / ')}
+          — {declaredUnknown.map((field) => field.v.trim()).join(' / ')}
         </p>
       ) : null}
     </div>

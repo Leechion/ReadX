@@ -191,7 +191,7 @@ func (s *Server) runComparisonExperiment(ctx context.Context, key string, report
 		}
 		return nil
 	}
-	cfg, err := s.aiConfig()
+	cfg, err := s.workflowAIConfig(WorkflowReading)
 	if err != nil {
 		return err
 	}

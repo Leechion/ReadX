@@ -1,27 +1,23 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { formatBadgeLabel, isSectionFormat } from '@cbct/shared';
-import type { CalendarDay, CalendarPaper, CalendarResponse } from '../api/client';
+import type { CalendarDay, CalendarPaper, CalendarResponse, StatsResponse, TrendsResponse } from '../api/client';
 import { api } from '../api/client';
 import type { WorkspacePhase } from '../hooks/useWorkspace';
+import { Icon } from './ui/Icon';
+import { Segmented } from './ui/Primitives';
 import { WorkspaceIcon } from './WorkspaceIcon';
 import { LibraryStatsPanel } from './LibraryStatsPanel';
 
 /**
- * 阅读日历 —— GitHub 贡献热力图形态。
- *
- * 结构：列=周（Mon 起头），行=周一..周日；格子颜色深浅编码「该天读了多少篇」。
- * 与 GitHub 一致的做法：全年一张图、横向滚动、月份标在顶部按列对齐、
- * 悬停给出当天摘要，点某天在右侧看论文清单并可跳回文献。
+ * 阅读日历 —— GitHub 贡献热力图形态（对齐 #s-cal）。
  *
  * 口径（后端 basis 字段，照实展示）：一篇论文落在它**最近一次**被阅读的那天。
- * 数据库只存最新阅读位置，没有完整流水；热力图呈现的是这份聚合结果，
- * 不假装它是精确历史。
+ * 数据库只存最新阅读位置，没有完整流水；热力图呈现的是这份聚合结果，不采集页面停留时长。
  */
 
 const WEEKDAYS = ['一', '二', '三', '四', '五', '六', '日'] as const;
 const MONTHS = ['1月', '2月', '3月', '4月', '5月', '6月', '7月', '8月', '9月', '10月', '11月', '12月'] as const;
 
-/** 颜色档位（与 GitHub 相同的 5 档思路）：0 / 1 / 2 / 3 / ≥4 篇。 */
 const LEVELS = [0, 1, 2, 3, 4] as const;
 function levelOf(count: number): number {
   if (count <= 0) return 0;
@@ -45,10 +41,23 @@ function addDays(date: Date, days: number): Date {
   return next;
 }
 
-/**
- * 热力图的周列：从 targetYear 的第一天所在周的周一开始，
- * 到 targetYear 最后一天所在周的周日结束（与 GitHub 全年图一致）。
- */
+/** 滚动最近 52 周（从约 52 周前的周一开始，到本周周日结束）。 */
+function buildRecentWeeks(): Date[][] {
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const thisMonday = addDays(today, -((today.getDay() + 6) % 7));
+  const start = addDays(thisMonday, -51 * 7);
+  const end = addDays(thisMonday, 6);
+  const weeks: Date[][] = [];
+  for (let cursor = start; cursor <= end; cursor = addDays(cursor, 7)) {
+    const week: Date[] = [];
+    for (let d = 0; d < 7; d += 1) week.push(addDays(cursor, d));
+    weeks.push(week);
+  }
+  return weeks;
+}
+
+/** 自然年周列：从 targetYear 的第一天所在周的周一开始，到最后一天所在周的周日结束。 */
 function buildYearWeeks(year: number): Date[][] {
   const first = new Date(year, 0, 1);
   const start = addDays(first, -((first.getDay() + 6) % 7));
@@ -63,7 +72,6 @@ function buildYearWeeks(year: number): Date[][] {
   return weeks;
 }
 
-/** 未来不画：GitHub 也会把今天之后的格子留白。 */
 function isFuture(date: Date): boolean {
   const now = new Date();
   const a = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -80,10 +88,16 @@ interface Props {
 }
 
 export function ReadingCalendarSection({ phase, onBack, onOpenDocument, documents }: Props) {
+  const currentYear = new Date().getFullYear();
   const [data, setData] = useState<CalendarResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [year, setYear] = useState(() => new Date().getFullYear());
+  const [rangeMode, setRangeMode] = useState<'recent' | 'year'>('recent');
+  const [year, setYear] = useState(() => currentYear);
   const [selected, setSelected] = useState<string | null>(() => todayKey());
+  const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [trends, setTrends] = useState<TrendsResponse | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState('');
   const scrollRef = useRef<HTMLDivElement>(null);
 
   const load = useCallback(async () => {
@@ -91,7 +105,6 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
       const result = await api.calendar();
       setData(result);
       setError(null);
-      // 默认选中最近有阅读的一天；没有就选今天。
       setSelected((current) => {
         if (current && result.days.some((day) => day.date === current)) return current;
         return result.days.length ? result.days[result.days.length - 1]!.date : todayKey();
@@ -105,38 +118,77 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
     void load();
   }, [load]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    setStatsLoading(true);
+    setStatsError('');
+    Promise.all([
+      api.stats(controller.signal),
+      api.trends(controller.signal).catch(() => null),
+    ])
+      .then(([value, trendValue]) => {
+        setStats(value);
+        setTrends(trendValue);
+      })
+      .catch((cause: unknown) => {
+        if (cause instanceof DOMException && cause.name === 'AbortError') return;
+        setStatsError(cause instanceof Error ? cause.message : String(cause));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setStatsLoading(false);
+      });
+    return () => controller.abort();
+  }, []);
+
   const byDate = useMemo(() => {
     const map = new Map<string, CalendarDay>();
     for (const day of data?.days ?? []) map.set(day.date, day);
     return map;
   }, [data]);
 
-  const weeks = useMemo(() => buildYearWeeks(year), [year]);
+  const weeks = useMemo(
+    () => (rangeMode === 'recent' ? buildRecentWeeks() : buildYearWeeks(year)),
+    [rangeMode, year],
+  );
 
-  /** 月份标签：按列对齐（这一列里出现该月的第一天就标一次，与 GitHub 相同）。 */
+  const validDayKeys = useMemo(() => {
+    const set = new Set<string>();
+    for (const week of weeks) {
+      for (const date of week) {
+        if (!isFuture(date)) set.add(dayKeyOf(date));
+      }
+    }
+    return set;
+  }, [weeks]);
+
+  /** 月份标签：按周列对齐。 */
   const monthLabels = useMemo(() => {
     const out: { week: number; name: string }[] = [];
     weeks.forEach((week, index) => {
-      const first = week.find(date => date.getFullYear() === year && date.getDate() === 1);
+      const first = week.find((date) =>
+        date.getDate() === 1 && (rangeMode === 'recent' || date.getFullYear() === year),
+      );
       if (first) out.push({ week: index, name: MONTHS[first.getMonth()]! });
     });
     return out;
-  }, [weeks, year]);
+  }, [weeks, rangeMode, year]);
 
-  /** 年度汇总：GitHub 图右上角的「N 篇 in X」。 */
-  const yearTotal = useMemo(
+  const rangeTotal = useMemo(
     () =>
       (data?.days ?? [])
-        .filter((day) => day.date.startsWith(String(year)))
+        .filter((day) => (rangeMode === 'recent' ? validDayKeys.has(day.date) : day.date.startsWith(String(year))))
         .reduce((sum, day) => sum + day.count, 0),
-    [data, year],
-  );
-  const activeDays = useMemo(
-    () => (data?.days ?? []).filter((day) => day.date.startsWith(String(year))).length,
-    [data, year],
+    [data, rangeMode, validDayKeys, year],
   );
 
-  /** 今天在图里滚动到可视区（挂载后一次性）。 */
+  const activeDays = useMemo(
+    () =>
+      (data?.days ?? []).filter((day) =>
+        rangeMode === 'recent' ? validDayKeys.has(day.date) : day.date.startsWith(String(year)),
+      ).length,
+    [data, rangeMode, validDayKeys, year],
+  );
+
   useEffect(() => {
     const node = scrollRef.current;
     if (!node) return;
@@ -145,12 +197,11 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
       const target = today as HTMLElement;
       node.scrollTo({ left: Math.max(0, target.offsetLeft - node.clientWidth / 2), behavior: 'auto' });
     }
-  }, [year]);
+  }, [rangeMode, year]);
 
   const selectedDay = selected ? byDate.get(selected) ?? null : null;
   const idByKey = useMemo(() => new Map(documents.map((doc) => [doc.key, doc.id])), [documents]);
 
-  /** 点格子：选中当天；点文献：打开。 */
   const openPaper = (paper: CalendarPaper) => {
     const id = idByKey.get(paper.key);
     if (id) onOpenDocument(id);
@@ -158,46 +209,101 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
 
   return (
     <div className="heat-section">
-      <header className="heat-toolbar">
-        <div className="heat-heading">
-          {onBack ? (
-            <button type="button" className="heat-back" onClick={onBack} aria-label="返回书库">←</button>
-          ) : null}
-          <div><p className="section-eyebrow">READING ACTIVITY</p><h1>阅读日历</h1><p className="library-description">回看阅读足迹，找到下一条研究线索。</p></div>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <button type="button" className="heat-nav" title="上一年" onClick={() => setYear((value) => value - 1)}>‹</button>
-          <span className="heat-year">{year}</span>
+      <header className="rx-topbar">
+        {onBack ? (
           <button
             type="button"
-            className="heat-nav"
-            title="下一年"
-            disabled={year >= new Date().getFullYear()}
-            onClick={() => setYear((value) => value + 1)}
+            className="rx-btn rx-btn-icon rx-btn-ghost"
+            onClick={onBack}
+            aria-label="返回书库"
+            title="返回书库"
           >
-            ›
+            <Icon name="left" size={14} />
           </button>
-        </div>
+        ) : null}
+        <h1 className="rx-topbar-title">阅读日历</h1>
+
+        <Segmented<'recent' | 'year'>
+          ariaLabel="阅读日历范围"
+          value={rangeMode}
+          onChange={setRangeMode}
+          options={[
+            { value: 'recent', label: '近一年' },
+            { value: 'year', label: String(year) },
+          ]}
+        />
+
+        {rangeMode === 'year' ? (
+          <div className="heat-year-nav" role="group" aria-label="切换年份">
+            <button
+              type="button"
+              className="rx-btn rx-btn-icon rx-btn-ghost"
+              title="上一年"
+              aria-label="上一年"
+              onClick={() => setYear((v) => v - 1)}
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              className="rx-btn rx-btn-icon rx-btn-ghost"
+              title="下一年"
+              aria-label="下一年"
+              disabled={year >= currentYear}
+              onClick={() => setYear((v) => v + 1)}
+            >
+              ›
+            </button>
+          </div>
+        ) : null}
+
+        <div className="rx-topbar-spacer" />
+        <span className="rx-cal-notice">不统计阅读时长：页面停留时间没有采集</span>
       </header>
 
       {error ? <p className="heat-banner">{error}</p> : null}
 
       <div className="heat-body">
-        <div className="heat-main">
-          <div className="heat-metrics" aria-label="阅读记录概览">
-            <div><WorkspaceIcon name="file" /><strong>{data ? yearTotal : '—'}<small>篇</small></strong><span>{year} 年覆盖文献</span></div>
-            <div><WorkspaceIcon name="calendar" /><strong>{data ? activeDays : '—'}<small>天</small></strong><span>当年有阅读记录</span></div>
-            <div><WorkspaceIcon name="library" /><strong>{data ? data.totalPapers : '—'}<small>篇</small></strong><span>全部年份覆盖文献</span></div>
-          </div>
-          <div className="heat-card">
-            <div className="heat-summary">
-              <h2>年度阅读分布</h2>
-              <span>每个格子代表一天 · 每篇计入最近一次阅读当天</span>
+        <div className="rx-cal-body">
+          {/* 顶行 KPI：#s-cal .statline + .vr */}
+          <div className="rx-statline" aria-label="阅读记录概览">
+            <div>
+              <b>{stats ? stats.library.active : '—'}</b>
+              <span>在库</span>
             </div>
+            <div className="vr" />
+            <div>
+              <b>{stats ? stats.library.reading : '—'}</b>
+              <span>在读</span>
+            </div>
+            <div className="vr" />
+            <div>
+              <b>{stats ? stats.library.done : '—'}</b>
+              <span>已精读</span>
+            </div>
+            <div className="vr" />
+            <div>
+              <b>{stats ? stats.reading.activeMonth : (data ? rangeTotal : '—')}</b>
+              <span>最近 30 天读过的论文</span>
+            </div>
+            <div className="vr" />
+            <div>
+              <b>{stats ? stats.reading.annotations : '—'}</b>
+              <span>批注与笔记</span>
+            </div>
+          </div>
+
+          {/* 平铺 5 级热力图 */}
+          <section className="heat-block" aria-label="阅读热力图">
+            <h4 className="rx-cal-h4">
+              <span>{rangeMode === 'recent' ? '近一年每天打开过的论文' : `${year} 年每天打开过的论文`}</span>
+              <span className="rx-cal-sub">
+                {data ? `共 ${rangeTotal} 篇 · 活跃 ${activeDays} 天 · 点击日期查看清单` : '加载中…'}
+              </span>
+            </h4>
 
             <div className="heat-scroll" ref={scrollRef}>
               <div className="heat-table">
-                {/* 月份行：按周列对齐 */}
                 <div className="heat-months" style={{ gridTemplateColumns: `repeat(${weeks.length}, var(--heat-cell-size))` }}>
                   {monthLabels.map((item) => (
                     <span key={`${item.week}-${item.name}`} className="heat-month" style={{ gridColumn: item.week + 1 }}>
@@ -206,7 +312,6 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
                   ))}
                 </div>
                 <div className="heat-grid-row">
-                  {/* 星期标签列 */}
                   <div className="heat-weekdays">
                     {WEEKDAYS.map((name, index) => (
                       <span key={name} className="heat-weekday" style={{ gridRow: index + 1 }}>
@@ -214,7 +319,6 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
                       </span>
                     ))}
                   </div>
-                  {/* 格子：列=周，行=星期 */}
                   <div className="heat-grid" style={{ gridTemplateColumns: `repeat(${weeks.length}, var(--heat-cell-size))` }}>
                     {weeks.map((week, weekIndex) =>
                       week.map((date, dayIndex) => {
@@ -233,41 +337,38 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
                             className={[
                               'heat-cell',
                               `l${level}`,
-                              isSelected ? ' selected' : '',
-                              isToday ? ' today' : '',
-                            ].join(' ')}
+                              isSelected ? 'selected' : '',
+                              isToday ? 'today' : '',
+                            ].filter(Boolean).join(' ')}
                             style={{ gridColumn: weekIndex + 1, gridRow: dayIndex + 1 }}
                             onClick={() => setSelected(key)}
                             title={`${key} · 读了 ${day?.count ?? 0} 篇`}
                             aria-label={`${key}，${day?.count ?? 0} 篇`}
                             aria-pressed={isSelected}
-                          >
-                            <span className="heat-cell-dot" />
-                          </button>
+                          />
                         );
                       }),
                     )}
                   </div>
                 </div>
-                {/* 图例 */}
+
                 <div className="heat-legend">
                   <span>少</span>
                   {LEVELS.map((level) => (
-                    <span key={level} className={`heat-cell l${level} static`}>
-                      <span className="heat-cell-dot" />
-                    </span>
+                    <span key={level} className={`heat-cell l${level} static`} />
                   ))}
                   <span>多</span>
+                  <span className="heat-legend-note">· 每格是一天打开过的论文数</span>
                 </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* 选中那天的论文清单（横排在图下方，避免右侧再竖一栏挤占热力图宽度） */}
-          <div className="heat-detail">
+          {/* 选中日期的论文清单 */}
+          <section className="heat-detail" aria-label="当日阅读清单">
             <div className="heat-detail-head">
               <h2>{formatDayTitle(selected)}</h2>
-              {selectedDay ? <span className="text-[11px] text-ink-faint">{selectedDay.count} 篇</span> : null}
+              {selectedDay ? <span className="rx-cal-sub">{selectedDay.count} 篇</span> : null}
             </div>
             {selectedDay ? (
               <ul className="heat-papers">
@@ -280,32 +381,36 @@ export function ReadingCalendarSection({ phase, onBack, onOpenDocument, document
                       onClick={() => openPaper(paper)}
                       title={idByKey.get(paper.key) ? '打开这篇文献' : '书库里没有这篇文献'}
                     >
-                      <span className="heat-paper-icon"><WorkspaceIcon name="file" size={22} /></span>
+                      <span className="heat-paper-icon"><WorkspaceIcon name="file" size={16} /></span>
                       <span className="heat-paper-body">
-                      <span className="heat-paper-title">{paper.title || paper.key}</span>
-                      <span className="heat-paper-meta">
-                        {new Date(paper.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
-                        {' · '}
-                        {isSectionFormat(paper.format) ? formatBadgeLabel(paper.format) : `第 ${paper.page || 1} 页`}
-                        {paper.hasReading ? ' · 精读' : ''}
-                        {paper.hasAnnotation ? ' · 批注' : ''}
+                        <span className="heat-paper-title">{paper.title || paper.key}</span>
+                        <span className="heat-paper-meta">
+                          {new Date(paper.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })}
+                          {' · '}
+                          {isSectionFormat(paper.format) ? formatBadgeLabel(paper.format) : `第 ${paper.page || 1} 页`}
+                          {paper.hasReading ? ' · 精读' : ''}
+                          {paper.hasAnnotation ? ' · 批注' : ''}
+                        </span>
                       </span>
-                      </span>
-                      <WorkspaceIcon name="arrow" />
+                      <WorkspaceIcon name="arrow" size={14} />
                     </button>
                   </li>
                 ))}
               </ul>
             ) : (
-              <p className="text-[11.5px] text-ink-faint">这一天没有阅读记录。</p>
+              <p className="heat-detail-empty">这一天没有阅读记录。</p>
             )}
-          </div>
-          <p className="heat-basis">{data?.basis || '按每篇论文最近一次阅读的时间归入当天；这里展示最新阅读位置快照，并非完整历史。'}</p>
-          {/* 日历回答「哪天读了什么」，统计回答「整体读了多少、处理花了多久」。 */}
-          <LibraryStatsPanel />
+          </section>
+
+          <p className="rx-src" style={{ marginTop: -12 }}>
+            {data?.basis || `口径说明：每篇论文按最近一次阅读的时间归入当天（全部年份累计 ${data?.totalPapers ?? 0} 篇），非逐日完整流水。`}
+          </p>
+
+          <LibraryStatsPanel stats={stats} trends={trends} loading={statsLoading} error={statsError} />
+
+          {phase.kind !== 'ready' ? <p className="rx-src">书库尚未就绪。</p> : null}
         </div>
       </div>
-      {phase.kind !== 'ready' ? <p className="heat-basis">书库尚未就绪。</p> : null}
     </div>
   );
 }

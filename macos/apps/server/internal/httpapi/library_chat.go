@@ -80,7 +80,7 @@ func (s *Server) handleLibraryChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	config, err := s.aiConfig()
+	config, err := s.workflowAIConfig(WorkflowQA)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return

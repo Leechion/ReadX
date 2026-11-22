@@ -69,6 +69,8 @@ function mount(relative, exported, api, dependencies = {}, args = ['p'], options
     location: { search: options.search ?? '' },
     setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
     clearTimeout(id) { timers.delete(id); },
+    setInterval(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
+    clearInterval(id) { timers.delete(id); },
     addEventListener() {},
     removeEventListener() {},
   };
@@ -298,15 +300,20 @@ test('the application keeps LaTeX mounted until its leave guard succeeds', async
     './components/LibraryScreen': { LibraryScreen: 'library' },
     './components/ResearchWorkbench': { ResearchWorkbench: 'research-workbench' },
     './components/research/FocusPendant': { FocusPendant: 'focus-pendant' },
+    './components/ActivityRail': { ActivityRail: 'activity-rail', RAIL_ITEMS: [{ id: 'library' }, { id: 'reader' }, { id: 'graph' }, { id: 'compare' }, { id: 'presentation' }, { id: 'latex' }, { id: 'calendar' }, { id: 'reproduction' }, { id: 'research' }] },
+    './components/CommandPalette': { CommandPalette: 'command-palette' },
+    './components/ui/Icon': { Icon: 'ui-icon' },
     './components/WorkspaceIcon': { WorkspaceIcon: 'icon' },
     './components/slack/ModePendant': { ModePendant: 'pendant' },
     './components/slack/slack.css': {},
     './hooks/useWorkspace': { useWorkspace: () => ({ phase: { kind: 'ready', documents: { documents: [] } }, allDocuments: [], filters: {} }) },
     './hooks/useResearchWorkbench': { useResearchWorkbench: () => ({ data: {}, setData() {} }) },
+    './hooks/useLauncherCatalog': { useLauncherCatalog: () => {} },
     './hooks/useDocument': { useDocument: () => ({ phase: { kind: 'idle' } }) },
     './hooks/useAnnotations': { useAnnotations: () => ({}) },
     './hooks/useLibraryMeta': { useLibraryMeta: () => ({ items: {} }) },
-    './hooks/useTheme': { useTheme: () => ({ choice: 'light' }) },
+    './hooks/useTheme': { useTheme: () => ({ choice: 'light', density: 'comfortable', readingFont: 'sans', readingSize: 15, setTheme() {}, setAppearance() {} }) },
+    './api/client': { api: { documentJobs: async () => ({ jobs: [] }), syncSettings: async () => ({ enabled: false }) } },
   }, []);
   const findNode = (node, predicate) => {
     if (!node || typeof node !== 'object') return null;
@@ -337,15 +344,20 @@ test('reader popups pass the requested page as an explicit citation target', () 
     './components/LibraryScreen': { LibraryScreen: 'library' },
     './components/ResearchWorkbench': { ResearchWorkbench: 'research-workbench' },
     './components/research/FocusPendant': { FocusPendant: 'focus-pendant' },
+    './components/ActivityRail': { ActivityRail: 'activity-rail', RAIL_ITEMS: [{ id: 'library' }, { id: 'reader' }, { id: 'graph' }, { id: 'compare' }, { id: 'presentation' }, { id: 'latex' }, { id: 'calendar' }, { id: 'reproduction' }, { id: 'research' }] },
+    './components/CommandPalette': { CommandPalette: 'command-palette' },
+    './components/ui/Icon': { Icon: 'ui-icon' },
     './components/WorkspaceIcon': { WorkspaceIcon: 'icon' },
     './components/slack/ModePendant': { ModePendant: 'pendant' },
     './components/slack/slack.css': {},
     './hooks/useWorkspace': { useWorkspace: () => ({ phase: { kind: 'ready', documents: { documents: [paper] } }, allDocuments: [paper], filters: {} }) },
     './hooks/useResearchWorkbench': { useResearchWorkbench: () => ({ data: {}, setData() {} }) },
+    './hooks/useLauncherCatalog': { useLauncherCatalog: () => {} },
     './hooks/useDocument': { useDocument: () => ({ phase: { kind: 'ready', detail: { pages: [] } } }) },
     './hooks/useAnnotations': { useAnnotations: () => ({}) },
     './hooks/useLibraryMeta': { useLibraryMeta: () => ({ items: {} }) },
-    './hooks/useTheme': { useTheme: () => ({ choice: 'light' }) },
+    './hooks/useTheme': { useTheme: () => ({ choice: 'light', density: 'comfortable', readingFont: 'sans', readingSize: 15, setTheme() {}, setAppearance() {} }) },
+    './api/client': { api: { documentJobs: async () => ({ jobs: [] }), syncSettings: async () => ({ enabled: false }) } },
   }, [], { search: '?readxWindow=reader&documentId=paper&page=10' });
   const findReader = node => {
     if (!node || typeof node !== 'object') return null;

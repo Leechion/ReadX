@@ -64,7 +64,7 @@ func (s *Server) runLeeTranslationInBackground(ctx context.Context, jobKey, docu
 		fail(fmt.Errorf("读取逐页排版原文失败: %w", sourceErr))
 		return
 	}
-	config, err := s.aiConfig()
+	config, err := s.workflowAIConfig(WorkflowTranslation)
 	if err != nil || !config.Ready() {
 		fail(errors.New("AI 模型配置不可用，原文已入库，可从文库重新翻译"))
 		return

@@ -3,16 +3,17 @@ import type { DocumentSummary } from '@cbct/shared';
 import { api, type ResearchFeedItem } from '../../api/client';
 import type { WorkbenchData } from '../../lib/researchWorkbench';
 import { DailyRecommendations } from '../DailyRecommendations';
-import { WorkspaceIcon } from '../WorkspaceIcon';
+import { Icon } from '../ui/Icon';
+import { Button, EmptyState, IconButton, SearchInput } from '../ui/Primitives';
 
 type Source = 'arxiv' | 'journals' | 'weekly' | 'saved' | 'recommendations';
 const sources = {
-  arxiv: { label: 'arXiv', description: '计算机视觉 · cs.CV', icon: 'file' },
-  journals: { label: 'Nature', description: '期刊 RSS 更新', icon: 'rss' },
-  weekly: { label: '科技爱好者周刊', description: '阮一峰的网络日志', icon: 'code' },
-  saved: { label: '稍后阅读', description: '收藏值得继续阅读的内容', icon: 'star' },
-  recommendations: { label: '论文发现', description: '按研究领域与关键词检索', icon: 'sparkles' },
-} as const;
+  arxiv: { label: '计算机视觉 · cs.CV', icon: 'rss' as const },
+  journals: { label: '期刊 RSS 更新', icon: 'rss' as const },
+  weekly: { label: '科技爱好者周刊', icon: 'rss' as const },
+  recommendations: { label: '论文发现', icon: 'search' as const },
+  saved: { label: '稍后阅读', icon: 'star' as const },
+};
 
 function publishedDate(value: string) {
   const date = new Date(value);
@@ -55,35 +56,197 @@ export function ResearchNews({ data, setData, documents, onReload }: {
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setTranslating(current => current.filter(id => id !== item.id)); }
   };
-  const toggleSaved = (item: ResearchFeedItem) => setData(current => ({ ...current, savedArticles: current.savedArticles.some(article => article.id === item.id) ? current.savedArticles.filter(article => article.id !== item.id) : [item, ...current.savedArticles] }));
-  const markRead = (id: string) => setData(current => current.readArticleIds.includes(id) ? current : { ...current, readArticleIds: [...current.readArticleIds, id] });
-  const list = (source === 'saved' ? data.savedArticles : items).filter(item => !query.trim() || `${item.title} ${data.translations[item.id] ?? ''} ${item.summary} ${item.source}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()));
 
-  return <div className="rw-news-layout">
-    <div className="rw-news-main">
-      {source === 'recommendations' ? <section className="rw-card rw-recommendations"><DailyRecommendations documents={documents} onReload={onReload} /></section> : <>
-        <div className="rw-news-toolbar"><label className="rw-search"><WorkspaceIcon name="search" size={17} /><input aria-label="搜索当前资讯" placeholder="搜索标题、摘要或关键词…" value={query} onChange={event => setQuery(event.target.value)} />{query && <button className="rw-icon-button" aria-label="清空资讯搜索" onClick={() => setQuery('')}><WorkspaceIcon name="close" size={14} /></button>}</label>{source !== 'saved' && <button className="rw-button" disabled={loading} onClick={() => setRevision(value => value + 1)}><WorkspaceIcon name="reset" size={15} />{loading ? '更新中' : '刷新'}</button>}</div>
-        <div className="rw-feed-heading"><div><h2>{sources[source].label}{source !== 'saved' && <span>最新更新</span>}</h2><span>{loading ? '正在获取内容…' : `${list.length} 条${query ? '匹配' : '内容'}`}</span></div>{fetchedAt && source !== 'saved' && <small>更新于 {new Date(fetchedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</small>}</div>
-        {error && <div className="rw-error" role="alert"><WorkspaceIcon name="rss" size={17} /><span>{error}</span>{source !== 'saved' && <button onClick={() => setRevision(value => value + 1)}>重试</button>}</div>}
-        <div className="rw-feed-list" aria-busy={loading}>
-          {loading ? <div className="rw-feed-skeleton" role="status" aria-label="正在加载资讯">{[0, 1, 2].map(index => <div key={index}><i /><i /><i /></div>)}</div> : list.map((item, index) => {
-            const saved = data.savedArticles.some(article => article.id === item.id);
-            const read = data.readArticleIds.includes(item.id);
-            return <article className={`rw-feed-item${index === 0 ? ' rw-feed-featured' : ''}${read ? ' is-read' : ''}`} key={item.id}>
-              <div className="rw-feed-meta"><span><i />{item.source}</span><time>{publishedDate(item.published)}</time>{read && <small><WorkspaceIcon name="check" size={11} />已读</small>}<button className={`rw-icon-button${saved ? ' is-saved' : ''}`} aria-pressed={saved} aria-label={`${saved ? '取消收藏' : '稍后阅读'}：${item.title}`} title={saved ? '取消收藏' : '稍后阅读'} onClick={() => toggleSaved(item)}><WorkspaceIcon name="star" size={17} /></button></div>
-              <h3><a href={item.url} target="_blank" rel="noreferrer" onClick={() => markRead(item.id)}>{data.translations[item.id] || item.title}</a></h3>
-              {data.translations[item.id] && <p className="rw-feed-original">{item.title}</p>}
-              {item.summary && <p className={`rw-feed-summary${expanded.includes(item.id) ? ' expanded' : ''}`}>{item.summary}</p>}
-              <div className="rw-feed-actions"><a href={item.url} target="_blank" rel="noreferrer" onClick={() => markRead(item.id)}>阅读原文<WorkspaceIcon name="external" size={13} /></a><button disabled={Boolean(data.translations[item.id]) || translating.includes(item.id)} onClick={() => void translate(item)}><WorkspaceIcon name="sparkles" size={13} />{translating.includes(item.id) ? '翻译中…' : data.translations[item.id] ? '已译为中文' : '翻译标题'}</button>{item.summary.length > 240 && <button onClick={() => setExpanded(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])}>{expanded.includes(item.id) ? '收起摘要' : '展开摘要'}</button>}</div>
-            </article>;
-          })}
+  const toggleSaved = (item: ResearchFeedItem) => setData(current => ({
+    ...current,
+    savedArticles: current.savedArticles.some(article => article.id === item.id)
+      ? current.savedArticles.filter(article => article.id !== item.id)
+      : [item, ...current.savedArticles],
+  }));
+
+  const markRead = (id: string) => setData(current =>
+    current.readArticleIds.includes(id) ? current : { ...current, readArticleIds: [...current.readArticleIds, id] },
+  );
+
+  const list = (source === 'saved' ? data.savedArticles : items).filter(item =>
+    !query.trim() || `${item.title} ${data.translations[item.id] ?? ''} ${item.summary} ${item.source}`.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
+  );
+
+  return (
+    <div className="rx-desk">
+      <div className="rx-desk-col">
+        {source === 'recommendations' ? (
+          <DailyRecommendations documents={documents} onReload={onReload} />
+        ) : (
+          <>
+            <div className="rx-desk-hd" style={{ marginBottom: 8 }}>
+              <SearchInput
+                value={query}
+                onChange={setQuery}
+                placeholder="搜索标题、摘要或关键词"
+                aria-label="搜索当前资讯"
+                style={{ flex: 1 }}
+              />
+              {source !== 'saved' ? (
+                <Button variant="secondary" size="sm" disabled={loading} onClick={() => setRevision(value => value + 1)}>
+                  <Icon name="sync" size={14} />
+                  <span>{loading ? '更新中…' : '刷新'}</span>
+                </Button>
+              ) : null}
+            </div>
+
+            <div className="flex items-center justify-between text-[12px] text-ink-faint mb-2">
+              <span>{sources[source].label} · <span className="tabular-nums">{loading ? '获取中' : list.length}</span> 条</span>
+              {fetchedAt && source !== 'saved' ? (
+                <span className="tabular-nums">更新于 {new Date(fetchedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</span>
+              ) : null}
+            </div>
+
+            {error ? (
+              <div className="rx-banner bad mb-3" role="alert">
+                <Icon name="alert" size={15} />
+                <span className="flex-1">{error}</span>
+                {source !== 'saved' ? (
+                  <Button variant="ghost" size="sm" onClick={() => setRevision(v => v + 1)}>重试</Button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {loading ? (
+              <div className="flex flex-col gap-3 py-3" aria-busy="true">
+                {[0, 1, 2].map(n => <div key={n} className="rx-skel" style={{ height: 64 }} />)}
+              </div>
+            ) : list.length > 0 ? (
+              <div className="rx-feed">
+                {list.map(item => {
+                  const saved = data.savedArticles.some(article => article.id === item.id);
+                  const read = data.readArticleIds.includes(item.id);
+                  const translated = data.translations[item.id];
+                  const isTranslating = translating.includes(item.id);
+                  const isExpanded = expanded.includes(item.id);
+
+                  return (
+                    <article key={item.id} className={`rx-feed-item${read ? ' read' : ''}`}>
+                      <h5>
+                        <a href={item.url} target="_blank" rel="noreferrer" onClick={() => markRead(item.id)}>
+                          {item.title}
+                        </a>
+                      </h5>
+                      <div className="acts">
+                        <IconButton
+                          size="sm"
+                          icon="star"
+                          label={saved ? '取消收藏' : '稍后阅读'}
+                          className={saved ? 'rx-star-on' : ''}
+                          aria-pressed={saved}
+                          onClick={() => toggleSaved(item)}
+                        />
+                        <a
+                          href={item.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          onClick={() => markRead(item.id)}
+                          aria-label="阅读原文"
+                          title="阅读原文"
+                          className="rx-ibtn sm"
+                        >
+                          <Icon name="ext" size={14} />
+                        </a>
+                      </div>
+
+                      <div className="zh">
+                        {translated ? (
+                          <>
+                            <span>{translated}</span>
+                            <span className="rx-chip" style={{ height: 20, marginLeft: 6 }}>
+                              <Icon name="translate" size={12} /> 已译为中文
+                            </span>
+                          </>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={isTranslating}
+                            onClick={() => void translate(item)}
+                            style={{ height: 24, padding: '0 6px' }}
+                          >
+                            <Icon name="translate" size={13} />
+                            <span>{isTranslating ? '翻译中…' : '翻译标题'}</span>
+                          </Button>
+                        )}
+                      </div>
+
+                      {item.summary && isExpanded ? (
+                        <p className="rx-feed-summary">{item.summary}</p>
+                      ) : null}
+
+                      <div className="mt2">
+                        <span>{item.source}</span>
+                        <span>{publishedDate(item.published)}</span>
+                        {read ? <span className="rx-chip" style={{ height: 18 }}>已读</span> : null}
+                        {item.summary ? (
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            style={{ height: 20, padding: '0 4px' }}
+                            onClick={() => setExpanded(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id])}
+                          >
+                            {isExpanded ? '收起摘要' : '展开摘要'}
+                          </Button>
+                        ) : null}
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            ) : (
+              <EmptyState
+                icon={source === 'saved' ? 'star' : 'search'}
+                title={query ? '没有找到匹配内容' : source === 'saved' ? '还没有收藏资讯' : '暂时没有更新'}
+                description={query ? '尝试更换关键词或清空搜索。' : source === 'saved' ? '点击资讯右侧星标即可收入稍后阅读。' : '请稍后刷新或切换其他订阅来源。'}
+                action={query ? <Button variant="secondary" size="sm" onClick={() => setQuery('')}>清空搜索</Button> : undefined}
+              />
+            )}
+          </>
+        )}
+      </div>
+
+      <aside className="rx-desk-side" aria-label="订阅来源与阅读空间">
+        <div>
+          <div className="rx-ctx-label" style={{ padding: '0 0 6px' }}>订阅来源</div>
+          {(['arxiv', 'journals', 'weekly', 'recommendations'] as const).map(id => (
+            <button
+              key={id}
+              type="button"
+              className="rx-ctx-item"
+              aria-current={source === id ? 'page' : undefined}
+              onClick={() => setSource(id)}
+            >
+              <Icon name={sources[id].icon} size={15} />
+              <span>{sources[id].label}</span>
+              {source === id && id !== 'recommendations' ? <span className="rx-ctx-count tabular-nums">{items.length}</span> : null}
+            </button>
+          ))}
         </div>
-        {!loading && !list.length && !error && <div className="rw-card rw-empty rw-feed-empty"><span><WorkspaceIcon name={source === 'saved' ? 'star' : 'search'} size={29} /></span><h3>{query ? '没有找到匹配的内容' : source === 'saved' ? '把想继续读的内容留在这里' : '这个来源暂时没有更新'}</h3><p>{query ? '换个关键词，或清空搜索查看全部内容。' : source === 'saved' ? '点击资讯右上角的星标，即可加入稍后阅读。' : '稍后刷新，或选择其他资讯来源。'}</p>{query && <button className="rw-text-button" onClick={() => setQuery('')}>清空搜索<WorkspaceIcon name="arrow" size={14} /></button>}</div>}
-      </>}
+
+        <div>
+          <div className="rx-ctx-label" style={{ padding: '0 0 6px' }}>阅读空间</div>
+          <button
+            type="button"
+            className="rx-ctx-item"
+            aria-current={source === 'saved' ? 'page' : undefined}
+            onClick={() => setSource('saved')}
+          >
+            <Icon name="star" size={15} />
+            <span>稍后阅读</span>
+            <span className="rx-ctx-count tabular-nums">{data.savedArticles.length}</span>
+          </button>
+        </div>
+
+        <div className="rx-privacy">
+          标题按需翻译：只有你点了「翻译标题」的那一条会发送到 Google 翻译，译文保存在本机。
+        </div>
+      </aside>
     </div>
-    <aside className="rw-news-sidebar">
-      <section className="rw-card rw-source-card"><span className="rw-kicker">YOUR RESEARCH RADAR</span><h2>订阅与发现</h2><p>在更新之间，找到与你的研究相关的线索。</p><div className="rw-source-label">订阅来源</div>{(['arxiv', 'journals', 'weekly'] as const).map(id => <button key={id} className={source === id ? 'selected' : ''} aria-pressed={source === id} onClick={() => setSource(id)}><span className={`rw-source-icon ${id}`}><WorkspaceIcon name={sources[id].icon} size={17} /></span><span><strong>{sources[id].label}</strong><small>{sources[id].description}</small></span><WorkspaceIcon name="chevronRight" size={14} /></button>)}<div className="rw-source-label">阅读空间</div>{(['saved', 'recommendations'] as const).map(id => <button key={id} className={source === id ? 'selected' : ''} aria-pressed={source === id} onClick={() => setSource(id)}><span className="rw-source-icon"><WorkspaceIcon name={sources[id].icon} size={17} /></span><span><strong>{sources[id].label}</strong><small>{id === 'saved' ? `${data.savedArticles.length} 条已收藏` : sources[id].description}</small></span><WorkspaceIcon name="chevronRight" size={14} /></button>)}</section>
-      <div className="rw-news-note"><WorkspaceIcon name="sparkles" size={18} /><div><strong>按需翻译标题</strong><p>需要时再翻译。仅所选标题会发送至 Google 翻译，译文将保存在本机。</p></div></div>
-    </aside>
-  </div>;
+  );
 }

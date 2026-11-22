@@ -86,7 +86,7 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		images = append(images, image)
 	}
 
-	config, err := s.aiConfig()
+	config, err := s.workflowAIConfig(WorkflowQA)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -414,7 +414,7 @@ func (s *Server) handleAIGenerate(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	config, err := s.aiConfig()
+	config, err := s.workflowAIConfig(WorkflowReading)
 	if err != nil {
 		writeError(w, http.StatusServiceUnavailable, err.Error())
 		return

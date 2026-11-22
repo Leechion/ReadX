@@ -46,7 +46,7 @@ func (s *Server) runLeePDFImport(ctx context.Context, jobKey, name string, pdf [
 	if metadata == nil {
 		return "", errors.New("导入元数据不可用")
 	}
-	aiConfig, err := s.aiConfig()
+	aiConfig, err := s.workflowAIConfig(WorkflowTranslation)
 	if err != nil || !aiConfig.Ready() {
 		return "", errors.New("请先在 AI 助手设置中配置可用的模型")
 	}

@@ -192,7 +192,7 @@ func (s *Server) reusableOCRDocument(ctx context.Context, key string) []byte {
 
 // reidentifyPreflight 是「重新识别」的硬前提，与导入同源但措辞针对重新识别。
 func (s *Server) reidentifyPreflight() error {
-	config, err := s.aiConfig()
+	config, err := s.workflowAIConfig(WorkflowTranslation)
 	if err != nil {
 		return fmt.Errorf("需要先配置 AI 助手：%w", err)
 	}

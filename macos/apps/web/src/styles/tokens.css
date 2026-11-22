@@ -1,0 +1,267 @@
+/* ==========================================================================
+   Design Tokens v2 — "安静的书房"
+   ========================================================================== */
+
+@font-face {
+  font-family: 'Instrument Sans';
+  src: url('/fonts/InstrumentSans.ttf') format('truetype');
+  font-weight: 400 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'ReadX Handwriting';
+  src: url('/fonts/MaShanZheng-Regular.ttf') format('truetype');
+  font-display: swap;
+}
+
+@theme {
+  /* 字体族 */
+  --font-sans: 'Instrument Sans', 'PingFang SC', 'Microsoft YaHei UI', 'Microsoft YaHei', system-ui, sans-serif;
+  --font-reading: 'Source Han Serif SC', 'Noto Serif SC', 'Songti SC', 'SimSun', Georgia, serif;
+  --font-serif: var(--font-reading);
+  --font-mono: 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
+
+  /* 颜色语义 token（默认浅色 light） */
+  --color-canvas: #F6F7F4;
+  --color-surface: #FFFFFF;
+  --color-surface-raised: #FFFFFF;
+  --color-surface-sunk: #EFF2EE;
+  --color-surface-hover: #F1F4F0;
+  --color-sheet: #FFFFFF;
+  --color-line: #E3E8E2;
+  --color-line-strong: #C9D3CA;
+
+  --color-ink: #1C2A23;
+  --color-ink-soft: #4A5A50;
+  --color-ink-faint: #5F6E64;
+  --color-ink-muted: #5F6E64;
+
+  --color-accent: #2B6651;
+  --color-accent-hover: #235645;
+  --color-accent-soft: #E4EFE8;
+  --color-on-accent: #FFFFFF;
+  --color-focus: color-mix(in oklab, var(--color-accent) 45%, transparent);
+
+  --color-good: #2F7A4B;
+  --color-good-soft: color-mix(in oklab, var(--color-good) 12%, var(--color-surface));
+  --color-warn: #9A6A1F;
+  --color-warn-soft: color-mix(in oklab, var(--color-warn) 12%, var(--color-surface));
+  --color-bad: #B03A2E;
+  --color-bad-soft: color-mix(in oklab, var(--color-bad) 12%, var(--color-surface));
+  --color-info: #2F6690;
+  --color-info-soft: color-mix(in oklab, var(--color-info) 12%, var(--color-surface));
+
+  /* 知识图谱实体色 */
+  --color-entity-1: #2B6651;
+  --color-entity-2: #2F6690;
+  --color-entity-3: #9A6A1F;
+  --color-entity-4: #7454A8;
+  --color-stage: #101211;
+
+  /* 书封色板 & 旧语义别名 */
+  --cover-1: #E4EFE8;
+  --cover-1-ink: #1F4436;
+  --cover-2: #DDE9EC;
+  --cover-2-ink: #243B43;
+  --cover-3: #F0E3D8;
+  --cover-3-ink: #503D30;
+  --cover-4: #304E40;
+  --cover-4-ink: #F0F5EC;
+
+  --color-sage: var(--cover-1);
+  --color-blue: var(--cover-2);
+  --color-clay: var(--cover-3);
+  --color-forest: var(--cover-4);
+
+  /* 层级阴影 */
+  --elev-0: none;
+  --elev-1: 0 1px 2px rgb(20 30 25 / .05);
+  --elev-2: 0 4px 16px -4px rgb(20 30 25 / .12), 0 0 0 1px var(--color-line);
+  --elev-3: 0 24px 48px -16px rgb(20 30 25 / .28), 0 0 0 1px var(--color-line);
+  --shadow-sm: var(--elev-1);
+  --shadow-md: var(--elev-2);
+  --shadow-lg: var(--elev-3);
+
+  /* 间距 */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-10: 40px;
+  --space-12: 48px;
+
+  /* 字号阶梯（收敛成 7 档 + 2xs 角标专用） */
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px;
+  --text-md: 16px;
+  --text-lg: 20px;
+  --text-xl: 24px;
+  --text-2xl: 32px;
+
+  /* 旧字号变量别名（确保最低可读性 ≥12px） */
+  --type-xs: 12px;
+  --type-sm: 12px;
+  --type-md: 13px;
+  --type-lg: 16px;
+  --type-xl: 20px;
+  --type-2xl: 24px;
+
+  /* 圆角 */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+  --radius-xl: 16px;
+  --radius-card: 12px;
+  --radius-pill: 999px;
+
+  /* 动效 */
+  --ease-out: cubic-bezier(.2, .8, .2, 1);
+  --ease-in-out: cubic-bezier(.65, 0, .35, 1);
+  --dur-fast: 120ms;
+  --dur-base: 180ms;
+  --dur-slow: 260ms;
+
+  /* 布局与阅读偏好 */
+  --rail-width: 56px;
+  --bar-height: 48px;
+  --ctl-height: 32px;
+  --reading-font: var(--font-sans);
+  --reading-font-size: 15px;
+
+  /* 摸鱼小说独立阅读主题（不跟随应用主题） */
+  --reader-paper-bg: #F4ECD8;
+  --reader-paper-ink: #3B3024;
+  --reader-paper-soft: #76674F;
+  --reader-eink-bg: #EDEDE8;
+  --reader-eink-ink: #1E1E1E;
+  --reader-eink-soft: #5A5A5A;
+  --reader-night-bg: #15120F;
+  --reader-night-ink: #B9AF9D;
+  --reader-night-soft: #8A8273;
+
+  /* 断点 */
+  --breakpoint-sm: 520px;
+  --breakpoint-md: 760px;
+  --breakpoint-lg: 900px;
+  --breakpoint-xl: 1100px;
+}
+
+@layer base {
+  :root[data-theme='dark'] {
+    --color-canvas: #111714;
+    --color-surface: #171F1B;
+    --color-surface-raised: #1D2722;
+    --color-surface-sunk: #0D120F;
+    --color-surface-hover: #202B25;
+    --color-sheet: #1B2420;
+    --color-line: #27332C;
+    --color-line-strong: #3A4A40;
+
+    --color-ink: #E6EDE8;
+    --color-ink-soft: #B4C2B8;
+    --color-ink-faint: #8A9A8F;
+    --color-ink-muted: #8A9A8F;
+
+    --color-accent: #8CCBA6;
+    --color-accent-hover: #A3D8B9;
+    --color-accent-soft: #1F3A2C;
+    --color-on-accent: #0F2118;
+
+    --color-good: #6EC08A;
+    --color-warn: #D3A75F;
+    --color-bad: #E07A6F;
+    --color-info: #7FB3DA;
+
+    --color-entity-1: #8CCBA6;
+    --color-entity-2: #7FB3DA;
+    --color-entity-3: #D3A75F;
+    --color-entity-4: #B9A3E6;
+
+    --cover-1: #283A30;
+    --cover-1-ink: #E5EEE7;
+    --cover-2: #24363C;
+    --cover-2-ink: #E0ECEE;
+    --cover-3: #3D322A;
+    --cover-3-ink: #F0E4D8;
+    --cover-4: #30493B;
+    --cover-4-ink: #EDF3E8;
+
+    --elev-1: 0 0 0 1px var(--color-line);
+    --elev-2: 0 6px 20px -6px rgb(0 0 0 / .5), 0 0 0 1px var(--color-line-strong);
+    --elev-3: 0 28px 56px -16px rgb(0 0 0 / .6), 0 0 0 1px var(--color-line-strong);
+  }
+
+  :root[data-theme='paper'] {
+    --color-canvas: #F3ECDD;
+    --color-surface: #FBF7EE;
+    --color-surface-raised: #FFFCF5;
+    --color-surface-sunk: #ECE3D0;
+    --color-surface-hover: #F2EBDC;
+    --color-sheet: #FFFCF5;
+    --color-line: #E0D4BC;
+    --color-line-strong: #CBBB9C;
+
+    --color-ink: #2B2219;
+    --color-ink-soft: #5F523F;
+    --color-ink-faint: #6E5F48;
+    --color-ink-muted: #6E5F48;
+
+    --color-accent: #4A6A4F;
+    --color-accent-hover: #3D5A42;
+    --color-accent-soft: #E3E7D2;
+    --color-on-accent: #FFFFFF;
+
+    --color-good: #4E7A45;
+    --color-warn: #946421;
+    --color-bad: #A8412F;
+    --color-info: #3C6283;
+
+    --color-entity-1: #4A6A4F;
+    --color-entity-2: #3C6283;
+    --color-entity-3: #946421;
+    --color-entity-4: #6E5594;
+
+    --cover-1: #E3E7D2;
+    --cover-1-ink: #2B2219;
+    --cover-2: #DCE4E2;
+    --cover-2-ink: #253639;
+    --cover-3: #ECDCC8;
+    --cover-3-ink: #4A3828;
+    --cover-4: #3F5743;
+    --cover-4-ink: #FBF7EE;
+
+    --elev-1: 0 1px 2px rgb(60 40 20 / .06);
+    --elev-2: 0 4px 16px -4px rgb(60 40 20 / .14), 0 0 0 1px var(--color-line);
+    --elev-3: 0 24px 48px -16px rgb(60 40 20 / .3), 0 0 0 1px var(--color-line);
+  }
+
+  :root[data-density='compact'] {
+    --ctl-height: 28px;
+  }
+
+  :root[data-reading='serif'] {
+    --reading-font: var(--font-reading);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-fast: 0ms;
+    --dur-base: 0ms;
+    --dur-slow: 0ms;
+  }
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

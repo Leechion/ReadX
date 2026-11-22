@@ -1,18 +1,18 @@
-.rw-focus-pendant { position:fixed; top:0; z-index:65; width:172px; max-width:calc(100vw - 16px); color:#2b6651; font-family:var(--font-sans); }
-.rw-focus-pendant-string { display:block; width:2px; height:16px; margin:auto; background:#a9c6b3; }
-.rw-focus-pendant-card { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; border:1px solid #cbded0; border-radius:11px; background:#fff; box-shadow:0 6px 22px #193d2820; }
-.rw-focus-pendant-clock { display:flex; flex:1; align-items:center; min-width:0; padding:0; border:0; background:transparent; color:#2b6651; text-align:left; cursor:grab; touch-action:none; }
+.rw-focus-pendant { position:fixed; top:0; z-index:65; width:172px; max-width:calc(100vw - 16px); color:var(--color-accent); font-family:var(--font-sans); }
+.rw-focus-pendant-string { display:block; width:2px; height:16px; margin:auto; background:var(--color-line-strong); }
+.rw-focus-pendant-card { display:flex; align-items:center; gap:8px; padding:8px 10px 8px 14px; border:1px solid var(--color-line); border-radius:11px; background:var(--color-surface); box-shadow:0 6px 22px rgb(20 30 25 / .12); }
+.rw-focus-pendant-clock { display:flex; flex:1; align-items:center; min-width:0; padding:0; border:0; background:transparent; color:var(--color-accent); text-align:left; cursor:grab; touch-action:none; }
 .rw-focus-pendant-clock:active { cursor:grabbing; }
-.rw-focus-pendant-clock strong { color:#2b6651; font-size:23px; font-weight:550; line-height:1.15; letter-spacing:-.025em; font-variant-numeric:tabular-nums; }
-.rw-focus-hourglass { display:grid; flex:0 0 28px; width:28px; height:36px; padding:0; place-items:center; border:0; border-radius:6px; background:transparent; color:#2b6651; cursor:pointer; }
-.rw-focus-hourglass:hover { background:#edf5ef; }
+.rw-focus-pendant-clock strong { color:var(--color-accent); font-size:23px; font-weight:550; line-height:1.15; letter-spacing:-.025em; font-variant-numeric:tabular-nums; }
+.rw-focus-hourglass { display:grid; flex:0 0 28px; width:28px; height:36px; padding:0; place-items:center; border:0; border-radius:6px; background:transparent; color:var(--color-accent); cursor:pointer; }
+.rw-focus-hourglass:hover { background:var(--color-accent-soft); }
 .rw-focus-hourglass svg { display:block; width:28px; height:36px; }
 .rw-focus-hourglass-turn { transform-origin:14px 18px; animation:rw-hourglass-turn 4s ease-in-out infinite; }
 .rw-focus-hourglass-upper { transform-origin:14px 16px; animation:rw-hourglass-empty 4s linear infinite; }
 .rw-focus-hourglass-lower { transform-origin:14px 28px; animation:rw-hourglass-fill 4s linear infinite; }
 .rw-focus-hourglass-stream { animation:rw-hourglass-stream 4s linear infinite; }
 .rw-focus-hourglass:not(.is-running) svg * { animation-play-state:paused; }
-.rw-focus-pendant button:focus-visible { outline:2px solid #2b6651; outline-offset:3px; }
+.rw-focus-pendant button:focus-visible { outline:2px solid var(--color-accent); outline-offset:3px; }
 @keyframes rw-hourglass-turn { 0%,82% { transform:rotate(0); } 100% { transform:rotate(180deg); } }
 @keyframes rw-hourglass-empty { 0% { transform:scaleY(1); } 78%,100% { transform:scaleY(0); } }
 @keyframes rw-hourglass-fill { 0% { transform:scaleY(0); } 78%,100% { transform:scaleY(1); } }

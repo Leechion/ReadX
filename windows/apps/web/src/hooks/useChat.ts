@@ -1,17 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { api, streamChat, type ChatChunk, type LatexAIEditProposal } from '../api/client';
+import { api, streamChat, type AgentTaskStep, type AgentToolTrace, type ChatChunk, type LatexAIEditProposal } from '../api/client';
 import { STORAGE_KEYS } from '../lib/storage';
 
 type ChatTransport = (
-  request: { key: string; mode?: string; question: string; scope?: string; history?: Array<{ role: string; text: string }>; images?: string[] },
+  request: { key: string; mode?: string; question: string; scope?: string; history?: Array<{ role: string; text: string }>; images?: string[]; agentMode?: string },
   onChunk: (chunk: ChatChunk) => void,
   signal?: AbortSignal,
 ) => Promise<void>;
 
 export interface ChatEditRequest {
   proposal: LatexAIEditProposal;
+  proposals?: LatexAIEditProposal[];
   status: 'pending' | 'applying' | 'applied' | 'rejected';
   notice?: string;
+  autoApplied?: boolean;
+  snapshotId?: string;
 }
 
 export interface ChatTurn {
@@ -25,6 +28,11 @@ export interface ChatTurn {
   model?: string;
   reasoningEffort?: string;
   edit?: ChatEditRequest;
+  agentMode?: string;
+  agentRole?: string;
+  thinking?: string;
+  taskPlan?: AgentTaskStep[];
+  toolCalls?: AgentToolTrace[];
 }
 interface Conversation { id: string; title: string; updatedAt: string; turns: ChatTurn[] }
 const fresh = (): Conversation => ({ id: crypto.randomUUID(), title: '新对话', updatedAt: new Date().toISOString(), turns: [] });
@@ -82,7 +90,7 @@ export function useChat(key: string | null, transport: ChatTransport = streamCha
     catch { setStorageError('本机历史保存失败；请及时复制需要保留的回答。'); }
   }, [data, dataKey, busy, key]);
 
-  const send = useCallback(async (question: string, mode = '', regenerate = false, images: string[] = []) => {
+  const send = useCallback(async (question: string, mode = '', regenerate = false, images: string[] = [], agentMode?: string) => {
     if (!key || controller.current || !question.trim()) return;
     const snapshot = dataRef.current;
     const conversation = snapshot.conversations.find((c) => c.id === snapshot.active)!;
@@ -109,12 +117,58 @@ export function useChat(key: string | null, transport: ChatTransport = streamCha
     update(turns);
     let streaming = '';
     let finished = false;
+    let toolCalls: AgentToolTrace[] = [];
     try {
-      await transport({ key, question, mode, history, images: images.length ? images : undefined }, (chunk) => {
+      await transport({ key, question, mode, history, images: images.length ? images : undefined, agentMode }, (chunk) => {
         if (epoch.current !== requestEpoch) return;
         if (chunk.meta) patch({ scope: { included: chunk.meta.included, total: chunk.meta.total, unit: chunk.meta.unit }, provider: chunk.meta.provider, model: chunk.meta.model, reasoningEffort: chunk.meta.reasoningEffort });
+        if (chunk.agentMode || chunk.agentRole) {
+          const nextMeta: Partial<ChatTurn> = {};
+          if (chunk.agentMode) nextMeta.agentMode = chunk.agentMode;
+          if (chunk.agentRole) nextMeta.agentRole = chunk.agentRole;
+          patch(nextMeta);
+        }
+        if (chunk.taskPlan) {
+          patch({ taskPlan: chunk.taskPlan });
+        }
+        if (chunk.thinking) {
+          patch({ thinking: chunk.thinking });
+        }
+        if (chunk.toolCall) {
+          const incoming = chunk.toolCall;
+          const idx = toolCalls.findIndex((item) => item.id === incoming.id);
+          if (idx >= 0) {
+            toolCalls = toolCalls.map((item, i) => (i === idx ? incoming : item));
+          } else {
+            toolCalls = [...toolCalls, incoming];
+          }
+          patch({ toolCalls });
+        }
         if (chunk.delta) { streaming += chunk.delta; patch({ text: streaming }); }
-        if (chunk.done) { finished = true; streaming = chunk.text ?? streaming; patch({ text: streaming, completed: !!streaming, edit: chunk.edit ? { proposal: chunk.edit, status: 'pending' } : undefined }); }
+        if (chunk.done) {
+          finished = true;
+          streaming = chunk.text ?? streaming;
+          const proposals = chunk.edits && chunk.edits.length > 0 ? chunk.edits : chunk.edit ? [chunk.edit] : undefined;
+          const primaryProposal = chunk.edit ?? proposals?.[0];
+          const editReq: ChatEditRequest | undefined = primaryProposal
+            ? {
+                proposal: primaryProposal,
+                proposals,
+                status: chunk.autoApplied ? 'applied' : 'pending',
+                autoApplied: chunk.autoApplied,
+                snapshotId: chunk.snapshotId,
+                notice: chunk.autoApplied
+                  ? `智能体已直接写入并保存 ${proposals?.length ?? 1} 个文件（写前快照已自动保存）`
+                  : undefined,
+              }
+            : undefined;
+          patch({
+            text: streaming,
+            completed: !!streaming,
+            edit: editReq,
+            ...(chunk.agentMode ? { agentMode: chunk.agentMode } : {}),
+          });
+        }
         if (chunk.error) { finished = true; patch({ text: chunk.partial ?? streaming, error: chunk.error, completed: false }); }
       }, abort.signal);
       if (!finished || !streaming) patch({ error: '连接结束，未收到完整回答。可重新回答。', completed: false });
@@ -148,9 +202,19 @@ export function useChat(key: string | null, transport: ChatTransport = streamCha
     };
     updateEdit({ ...turn.edit, status: 'applying', notice: '' });
     try {
-      const notice = await apply(turn.edit.proposal, abort.signal);
-      const saved = notice.startsWith('已应用并保存');
-      updateEdit({ ...turn.edit, status: saved ? 'applied' : 'pending', notice }, saved ? notice : '');
+      const targets = turn.edit.proposals && turn.edit.proposals.length > 0 ? turn.edit.proposals : [turn.edit.proposal];
+      const notices: string[] = [];
+      let allSaved = true;
+      for (const proposal of targets) {
+        const notice = await apply(proposal, abort.signal);
+        notices.push(notice);
+        if (!notice.startsWith('已应用并保存')) {
+          allSaved = false;
+          break;
+        }
+      }
+      const combinedNotice = notices.join('；');
+      updateEdit({ ...turn.edit, status: allSaved ? 'applied' : 'pending', notice: combinedNotice }, allSaved ? combinedNotice : '');
     } catch (cause) {
       updateEdit({ ...turn.edit, status: 'pending', notice: cause instanceof Error ? cause.message : String(cause) });
     } finally {

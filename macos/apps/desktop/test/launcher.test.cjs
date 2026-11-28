@@ -66,3 +66,85 @@ test('outer ring selection follows project sectors for full and partial pages', 
   assert.equal(projectSlotAt(640, 360, 8), null);
   assert.equal(projectSlotAt(360, 107, 0), null);
 });
+
+test('DesktopLauncher respects enabled flag and toggles uIOhook/window visibility', t => {
+  const Module = require('node:module');
+  const origLoad = Module._load;
+  let hookStarts = 0;
+  let hookStops = 0;
+  let windowShown = false;
+  const listeners = new Map();
+  const fakeWindow = {
+    setAlwaysOnTop() {},
+    setVisibleOnAllWorkspaces() {},
+    setMenu() {},
+    on() {},
+    loadURL: () => Promise.resolve(),
+    isVisible: () => windowShown,
+    isDestroyed: () => false,
+    setBounds() {},
+    getBounds: () => ({ x: 0, y: 0, width: 720, height: 720 }),
+    showInactive() { windowShown = true; },
+    hide() { windowShown = false; },
+    destroy() {},
+    webContents: { send() {} },
+  };
+  let readyCb = null;
+  const fakeElectron = {
+    BrowserWindow: function () { return fakeWindow; },
+    ipcMain: {
+      on(ch, fn) { if (ch === 'readx-launcher:ready') readyCb = fn; },
+      removeListener() {},
+    },
+    screen: {
+      getCursorScreenPoint: () => ({ x: 400, y: 400 }),
+      getDisplayNearestPoint: () => ({ workArea: { x: 0, y: 0, width: 1920, height: 1080 } }),
+    },
+    systemPreferences: { isTrustedAccessibilityClient: () => true },
+  };
+  const fakeUiohook = {
+    UiohookKey: { Alt: 56, AltRight: 3640 },
+    uIOhook: {
+      on(ev, fn) { listeners.set(ev, fn); },
+      removeListener(ev) { listeners.delete(ev); },
+      start() { hookStarts++; },
+      stop() { hookStops++; },
+    },
+  };
+  Module._load = function (request, parent, isMain) {
+    if (request === 'electron') return fakeElectron;
+    if (request === 'uiohook-napi') return fakeUiohook;
+    return origLoad.apply(this, arguments);
+  };
+  t.after(() => { Module._load = origLoad; });
+  delete require.cache[require.resolve('../dist/launcher.js')];
+  const { DesktopLauncher } = require('../dist/launcher.js');
+  const inst = new DesktopLauncher({
+    url: 'http://127.0.0.1:8080',
+    preload: 'preload.js',
+    apiBase: 'http://127.0.0.1:8080',
+    token: 'tok',
+    enabled: false,
+    main: () => null,
+    restore() {},
+    log() {},
+  });
+  t.after(() => inst.dispose());
+  readyCb({ sender: fakeWindow.webContents });
+
+  assert.equal(inst.isEnabled(), false);
+  assert.equal(hookStarts, 0);
+  inst.show();
+  assert.equal(windowShown, false);
+
+  inst.setEnabled(true);
+  assert.equal(inst.isEnabled(), true);
+  assert.equal(hookStarts, 1);
+  inst.show();
+  assert.equal(windowShown, true);
+
+  inst.setEnabled(false);
+  assert.equal(inst.isEnabled(), false);
+  assert.equal(hookStops, 1);
+  assert.equal(windowShown, false);
+});

@@ -250,6 +250,8 @@ export interface DesktopLauncherBridge {
   publish(catalog: LauncherCatalog): void;
   activate(target: LauncherTarget): void;
   dismiss(): void;
+  getEnabled?(): Promise<boolean>;
+  setEnabled?(enabled: boolean): Promise<boolean>;
   onEvent(callback: (event: LauncherEvent) => void): () => void;
   onRequestCatalog(callback: () => void): () => void;
   onNavigate(callback: (target: LauncherTarget) => void): () => void;

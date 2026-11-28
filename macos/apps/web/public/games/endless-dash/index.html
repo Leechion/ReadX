@@ -1,0 +1,619 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: 宽容的跳跃 + 看形状就知道怎么过的障碍,满速穿缝能不能一直爽下去? -->
+<!-- Date: 2026-11-26 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>狂奔</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-variant-numeric: tabular-nums; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script src="config.js"></script>
+<script>
+'use strict';
+// 《狂奔》— 一根手指的生死时速:一个键,越跑越快,满速穿缝。
+// 矮石一跳、悬岩一滑;按住跳更高,松手截断成短跳;土狼时间 + 预按缓存让晚跳早按都算数。
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.gravity is CONFIG.gravity.value
+const STEP = 1 / 60;            // simulation step in seconds; motion is per second, never per frame
+const W = 1280, H = 720;        // logical size
+const PIXEL = false;
+const FONT = 'sans-serif';
+const TITLE = '狂奔';
+const CONTROLS = ['空格 / ↑ :跳(按住跳更高,松手=短跳)', '↓ :滑铲 · 空中按下加速落地', 'P :暂停 · M :静音'];
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 };
+const CHEAP = params.get('render') === 'cheap';
+let seed;
+function rng() { // mulberry32; every gameplay random call reads this, never Math.random
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = [];
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() {
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center') {
+  ctx.fillStyle = c; ctx.font = `${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+function overlap(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
+
+// ---- Input ----------------------------------------------------------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code);
+const tp = { x: -1, y: -1, click: false };
+function toLogical(e) {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
+}
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('pointermove', e => { const [x, y] = toLogical(e); tp.x = x; tp.y = y; });
+addEventListener('pointerdown', e => { startAudio(); const [x, y] = toLogical(e); tp.x = x; tp.y = y; tp.click = true; });
+addEventListener('blur', () => down.clear());
+
+// ---- Audio ----------------------------------------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted));
+function tone(freq, dur, type = 'square', vol = 0.3, delay = 0) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime + delay, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- 世界常量 --------------------------------------------------------------------------
+const GROUND = 560;   // 地面顶(跑者脚底)
+const RUNX = 360;     // 跑者屏幕 x(固定,世界向左滚)
+
+// 障碍尺寸:kind → 宽高(gate 的碰撞盒悬空,梁下留 74px 滑铲空隙)
+const OBS = {
+  rock:   { w: 46, h: 48 },
+  pillar: { w: 40, h: 64 },
+  gate:   { w: 46 },
+};
+
+// 手工路段:dx 为路段内偏移 px;coins 为 [dx, 离地高度]。
+// 形状即操作:矮石/石柱一跳,悬岩一滑。首段 runway 必安全。
+const CHUNKS = {
+  runway: { len: 1100, obs: [], coins: [[300, 500], [370, 500], [440, 500], [510, 500], [580, 500]] },
+  rock1:  { len: 420, minTier: 0, obs: [[260, 'rock']], coins: [[200, 455], [260, 415], [320, 455]] },
+  gate1:  { len: 460, minTier: 0, obs: [[300, 'gate']], coins: [[240, 520], [300, 520], [360, 520]] },
+  rock2:  { len: 640, minTier: 1, obs: [[240, 'rock'], [480, 'rock']],
+            coins: [[180, 455], [240, 415], [300, 455], [420, 455], [480, 415], [540, 455]] },
+  pillars:{ len: 950, minTier: 1, obs: [[260, 'pillar'], [540, 'pillar'], [820, 'pillar']],
+            coins: [[200, 455], [260, 415], [320, 455], [480, 455], [540, 415], [600, 455],
+                    [760, 455], [820, 415], [880, 455]] },
+  combo:  { len: 680, minTier: 2, obs: [[220, 'rock'], [460, 'gate']],
+            coins: [[160, 455], [220, 415], [280, 455], [400, 520], [460, 520], [520, 520]] },
+  arc:    { len: 460, minTier: 0, obs: [[300, 'rock']],
+            coins: [[200, 470], [250, 430], [300, 415], [350, 430], [400, 470]] },
+  safe:   { len: 320, obs: [], coins: [[140, 500], [210, 500], [280, 500]] },
+};
+const FIRST = ['runway', 'rock1', 'gate1', 'rock2']; // 教学顺序:先安全,再教跳,再教滑
+const POOL = ['rock1', 'gate1', 'rock2', 'arc', 'safe', 'pillars', 'combo', 'safe', 'rock1', 'arc'];
+
+// ---- 状态 -----------------------------------------------------------------------------
+let scene, state, dunes = [], specks = [];
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  let best = 0;
+  try { best = Number(localStorage.getItem('dash_best')) || 0; } catch (e) {}
+  state = {
+    t: 0, dist: 0, coins: 0, tier: 0, speed: tune.speed0, worldX: 0,
+    y: GROUND, vy: 0, onGround: true, slideT: 0, slideQueued: false, fastfall: false, cut: false,
+    coyoteT: tune.coyote, bufferT: 0, runT: 0, squashT: 0,
+    streak: 0, streakT: 0, nextX: 0, queueIdx: 0,
+    obs: [], coinsArr: [], dust: [],
+    best, newBest: false, bestFlagDone: false, flashT: 0, gained: '',
+  };
+  makeScenery();
+  spawnAhead();
+}
+function makeScenery() { // 三层沙丘 + 地面碎屑,seeded rng,同一 seed 每次一致
+  dunes = [];
+  const layers = [
+    { par: 0.15, col: '#7a4038', n: 7, hMin: 60, hMax: 130, base: 470 },
+    { par: 0.35, col: '#57302c', n: 6, hMin: 90, hMax: 180, base: 520 },
+    { par: 0.6,  col: '#3a1f1c', n: 5, hMin: 120, hMax: 220, base: 560 },
+  ];
+  for (const L of layers) {
+    const humps = [];
+    for (let i = 0; i < L.n; i++) {
+      humps.push({ c: rng() * 2400, r: 220 + rng() * 260, h: L.hMin + rng() * (L.hMax - L.hMin) });
+    }
+    dunes.push({ par: L.par, col: L.col, base: L.base, humps, span: 2400 });
+  }
+  specks = [];
+  for (let i = 0; i < 40; i++) specks.push({ x: rng() * 2400, y: 578 + rng() * 130, w: 6 + rng() * 22 });
+}
+
+// ---- 路段生成 --------------------------------------------------------------------------
+function pickChunk() {
+  if (state.queueIdx < FIRST.length) return FIRST[state.queueIdx++];
+  const cands = POOL.filter(n => (CHUNKS[n].minTier || 0) <= state.tier);
+  return cands[Math.floor(rng() * cands.length)] || 'safe';
+}
+function spawnAhead() {
+  while (state.nextX < state.worldX + W + 600) {
+    const c = CHUNKS[pickChunk()];
+    for (const [dx, kind] of c.obs) {
+      state.obs.push({ wx: state.nextX + dx, kind, w: OBS[kind].w, h: OBS[kind].h || 0 });
+    }
+    for (const [dx, cy] of c.coins) state.coinsArr.push({ wx: state.nextX + dx, cy, got: false });
+    state.nextX += c.len + state.speed * tune.gap_base;
+  }
+}
+
+// ---- 跑者动作:跳(宽容)/滑 -------------------------------------------------------------
+function tryJump() { // 土狼时间内离地也能跳;空中按 = 落地前预按缓存
+  const s = state;
+  if (s.onGround || s.coyoteT > 0) doJump();
+  else s.bufferT = tune.buffer;
+}
+function doJump() {
+  const s = state;
+  s.vy = -tune.jump_v; s.onGround = false; s.cut = false;
+  s.coyoteT = 0; s.slideT = 0;
+  tone(420, 0.12, 'square', 0.22);
+}
+function onDownKey() { // 地面 = 滑铲;空中 = 加速落地并落地接滑
+  const s = state;
+  if (s.onGround) startSlide();
+  else if (!s.fastfall) { s.vy += tune.fastfall; s.fastfall = true; s.slideQueued = true; }
+}
+function startSlide() {
+  if (state.slideT <= 0) { tone(200, 0.1, 'sawtooth', 0.12); addDust(3); }
+  state.slideT = tune.slide_time;
+}
+function addDust(n) {
+  if (CHEAP) return;
+  for (let i = 0; i < n; i++) {
+    state.dust.push({ x: RUNX - 10 + rng() * 20, y: GROUND - 4, vx: -60 - rng() * 80, vy: -30 - rng() * 50, life: 0.4 });
+  }
+}
+
+// ---- 碰撞盒(含宽容内缩)---------------------------------------------------------------
+function runnerBox() {
+  const s = state;
+  const h = s.slideT > 0 ? 46 : 92;
+  return { x: s.worldX + RUNX - 12, y: s.y - h + 6, w: 24, h: h - 8 };
+}
+function hitBox(o) {
+  if (o.kind === 'gate') return { x: o.wx + 4, y: GROUND - 186, w: o.w - 8, h: 108 }; // 梁:地面上方 74..190
+  return { x: o.wx + 4, y: GROUND - o.h + 4, w: o.w - 8, h: o.h - 4 };
+}
+function die() {
+  const s = state;
+  const m = Math.floor(s.dist);
+  if (m > s.best) {
+    s.best = m; s.newBest = true;
+    try { localStorage.setItem('dash_best', String(m)); } catch (e) {}
+  }
+  s.gained = `跑了 ${m} m${s.newBest ? ' · 新纪录!' : ''}`;
+  tone(110, 0.4, 'sawtooth', 0.28);
+  events.push({ e: 'death', m, coins: s.coins, tier: s.tier });
+  scene = 'over';
+}
+
+// ---- 场景 -----------------------------------------------------------------------------
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() { // 每种单元并排:跑者三姿 + 三种障碍 + 金币,名字在下
+      drawBackdrop(0, CHEAP);
+      drawGround(0, CHEAP);
+      const gy = GROUND, t = state.t, c = '#ffe9c9';
+      drawRunner(150, gy, 'run', t, false);   text('跑者·奔跑', 150, 640, 22, c);
+      drawRunner(310, gy, 'jump', t, false);  text('跑者·跳', 310, 640, 22, c);
+      drawRunner(470, gy, 'slide', t, false); text('跑者·滑铲', 470, 640, 22, c);
+      drawRock(620, gy, 46, 48);              text('矮石·跳过', 643, 640, 22, c);
+      drawPillar(760, gy, 40, 64);            text('石柱·连跳', 780, 640, 22, c);
+      drawGate(880, gy, 46);                  text('悬岩·滑铲', 903, 640, 22, c);
+      drawCoin(1060, gy - 60, t);             text('金币', 1060, 640, 22, c);
+    },
+  },
+  title: {
+    update(dt) {
+      state.t += dt;
+      const btn = { x: 110, y: 452, w: 310, h: 64 };
+      const hover = tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h;
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      const t = state.t || 0, wx = t * 180;
+      drawBackdrop(wx * 0.45, CHEAP);
+      drawGround(wx, CHEAP);
+
+      // 奔跑剪影与沙丘障碍演示（贴合地面 GROUND = 560）
+      const loopX = (t * 220) % 720;
+      const rockX = 1260 - loopX;
+      drawRock(rockX, GROUND, 46, 48);
+      for (let i = 0; i < 3; i++) drawCoin(rockX - 40 + i * 38, GROUND - 96 - Math.sin(i * 1.1) * 26, t + i);
+      const gateX = 960 - ((t * 220 + 360) % 720);
+      if (gateX > 660) drawGate(gateX, GROUND, 86);
+      const jumpDist = Math.abs(rockX - 880);
+      const jumpArc = jumpDist < 90 ? Math.sin((1 - jumpDist / 90) * Math.PI) * 98 : 0;
+      const slideMode = (gateX > 815 && gateX < 945) ? 'slide' : (jumpArc > 4 ? 'jump' : 'run');
+      drawRunner(880, GROUND - jumpArc, slideMode, t * 1.3, CHEAP);
+
+      // 左侧半透明毛玻璃卡片（留出底部沙地跑道与太阳）
+      const lx = 84, ly = 56, lw = 576, lh = 486;
+      ctx.save();
+      ctx.beginPath(); ctx.roundRect(lx, ly, lw, lh, 22);
+      ctx.fillStyle = 'rgba(26, 12, 10, 0.62)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 198, 128, 0.34)'; ctx.lineWidth = 2; ctx.stroke();
+      ctx.restore();
+
+      const px = lx + 34;
+      ctx.beginPath(); ctx.roundRect(px, ly + 28, 142, 30, 15);
+      ctx.fillStyle = 'rgba(255, 176, 102, 0.18)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255, 176, 102, 0.5)'; ctx.lineWidth = 1.5; ctx.stroke();
+      text('黄昏跑酷 · 无尽', px + 71, ly + 43, 14, '#ffca7a');
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(255, 176, 102, 0.32)'; ctx.shadowBlur = 20;
+      text(TITLE, px, ly + 114, 90, '#ffe9c9', 'left');
+      ctx.restore();
+      text('一根手指的生死时速 —— 长按高跳，松手即落', px, ly + 184, 21, '#f0b98a', 'left');
+
+      if (state.best > 0) {
+        ctx.beginPath(); ctx.roundRect(px, ly + 212, 224, 34, 10);
+        ctx.fillStyle = 'rgba(255, 202, 122, 0.14)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(255, 202, 122, 0.42)'; ctx.lineWidth = 1.5; ctx.stroke();
+        text(`历史最远  ${state.best} m`, px + 112, ly + 229, 17, '#ffca7a');
+      }
+
+      const chips = [
+        ['空格 / ↑ / W', '起跳 · 按住更高 · 半空再按速降'],
+        ['↓ / S', '低头滑铲穿悬岩 · P 暂停 · M 静音'],
+      ];
+      chips.forEach(([key, desc], i) => {
+        const cy = ly + 266 + i * 54;
+        ctx.beginPath(); ctx.roundRect(px, cy, 508, 44, 11);
+        ctx.fillStyle = 'rgba(255,255,255,0.06)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(255,217,168,0.16)'; ctx.lineWidth = 1.2; ctx.stroke();
+        ctx.beginPath(); ctx.roundRect(px + 8, cy + 7, 134, 30, 8);
+        ctx.fillStyle = 'rgba(255,176,102,0.2)'; ctx.fill();
+        text(key, px + 75, cy + 22, 14, '#ffe1b5');
+        text(desc, px + 156, cy + 22, 16, '#ffd9a8', 'left');
+      });
+
+      const btn = { x: 110, y: 452, w: 310, h: 64 };
+      const hover = tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h;
+      ctx.save();
+      ctx.shadowColor = hover ? 'rgba(255, 176, 102, 0.5)' : 'rgba(255, 176, 102, 0.25)'; ctx.shadowBlur = hover ? 24 : 12;
+      ctx.beginPath(); ctx.roundRect(btn.x, btn.y - (hover ? 2 : 0), btn.w, btn.h, 16);
+      ctx.fillStyle = hover ? '#ffc07a' : '#ffaa55'; ctx.fill();
+      ctx.restore();
+      text('开始奔跑  [Enter / 空格]', btn.x + btn.w / 2, btn.y - (hover ? 2 : 0) + btn.h / 2, 21, '#26120a');
+    },
+  },
+  play: {
+    update(dt) {
+      if (pressed('KeyP') || pressed('Escape')) { scene = 'pause'; return; }
+      const s = state;
+      s.t += dt;
+      // 速度阶梯:每 tier_time 秒一档
+      const tier = Math.min(Math.floor(s.t / tune.tier_time), 20);
+      if (tier !== s.tier) {
+        s.tier = tier;
+        tone(480 + tier * 70, 0.18, 'square', 0.22);
+        events.push({ e: 'tier', n: tier });
+      }
+      s.speed = Math.min(tune.speed_max, tune.speed0 * Math.pow(tune.speed_mult, s.tier));
+      s.worldX += s.speed * dt;
+      s.dist = s.worldX / 10;
+
+      // 输入:跳 / 滑
+      if (pressed('Space') || pressed('ArrowUp') || pressed('KeyW')) tryJump();
+      if (pressed('ArrowDown') || pressed('KeyS')) onDownKey();
+
+      // 竖直运动:按住跳更高,松手截断
+      const holding = down.has('Space') || down.has('ArrowUp') || down.has('KeyW');
+      if (!s.onGround) {
+        let g = tune.gravity;
+        if (s.vy < 0 && holding) g *= tune.hold_lift;
+        if (s.vy < 0 && !holding && !s.cut) { s.vy *= tune.jump_cut; s.cut = true; }
+        s.vy += g * dt;
+        s.y += s.vy * dt;
+        s.coyoteT -= dt; s.bufferT -= dt;
+        if (s.y >= GROUND) { // 落地:压缩 + 消费预按
+          s.y = GROUND; s.vy = 0; s.onGround = true; s.cut = false; s.fastfall = false; s.squashT = 0.1;
+          tone(150, 0.07, 'triangle', 0.18); addDust(3);
+          if (s.bufferT > 0) { s.bufferT = 0; doJump(); }
+          else if (s.slideQueued) { s.slideQueued = false; startSlide(); }
+        }
+      } else {
+        s.coyoteT = tune.coyote;
+        if (s.slideT > 0) s.slideT = Math.max(0, s.slideT - dt);
+      }
+      s.runT += dt * s.speed / 340;
+      if (s.squashT > 0) s.squashT -= dt;
+      if (s.streakT > 0) { s.streakT -= dt; if (s.streakT <= 0) s.streak = 0; }
+      if (s.flashT > 0) s.flashT -= dt;
+      // 尘土
+      for (const d of s.dust) { d.x += d.vx * dt; d.y += d.vy * dt; d.vy += 200 * dt; d.life -= dt; }
+      s.dust = s.dust.filter(d => d.life > 0);
+
+      spawnAhead();
+      s.obs = s.obs.filter(o => o.wx > s.worldX - 300);
+      s.coinsArr = s.coinsArr.filter(c2 => c2.wx > s.worldX - 100);
+
+      // 金币拾取(拾取圈略大,宽容)
+      const h = s.slideT > 0 ? 46 : 92;
+      const pcx = s.worldX + RUNX, pcy = s.y - h / 2;
+      const r2 = tune.pickup_r * tune.pickup_r;
+      for (const c2 of s.coinsArr) {
+        if (c2.got) continue;
+        const dx = c2.wx - pcx, dy = c2.cy - pcy;
+        if (dx * dx + dy * dy < r2) {
+          c2.got = true; s.coins++; s.streak++; s.streakT = tune.streak_time;
+          tone(600 + Math.min(s.streak, 10) * 60, 0.08, 'square', 0.18);
+          events.push({ e: 'coin', n: s.coins });
+        }
+      }
+
+      // 越过历史最佳:背景小旗被越过,叮一声
+      if (s.best > 0 && !s.bestFlagDone && s.dist > s.best) {
+        s.bestFlagDone = true; s.newBest = true; s.flashT = 2;
+        tone(660, 0.12, 'square', 0.26); tone(880, 0.2, 'square', 0.26, 0.12);
+        events.push({ e: 'best', m: Math.floor(s.dist) });
+      }
+
+      // 撞上即终
+      const rb = runnerBox();
+      for (const o of s.obs) {
+        if (o.wx > s.worldX + RUNX + 200) break;
+        if (o.wx < s.worldX + RUNX - 200) continue;
+        if (overlap(rb, hitBox(o))) { die(); return; }
+      }
+    },
+    draw() { drawWorld(); },
+  },
+  pause: {
+    update() { if (pressed('KeyP') || pressed('Escape')) scene = 'play'; },
+    draw() { drawWorld(); ctx.fillStyle = 'rgba(20,8,4,0.5)'; ctx.fillRect(0, 0, W, H); text('暂停', W / 2, H / 2, 52, '#ffe9c9'); text('P 继续', W / 2, H / 2 + 50, 24, '#ffd9a8'); },
+  },
+  over: {
+    update() { if (pressed('Enter') || pressed('Space') || pressed('KeyR')) { reset(); scene = 'play'; } },
+    draw() {
+      drawWorld();
+      ctx.fillStyle = 'rgba(20,8,4,0.55)'; ctx.fillRect(0, 0, W, H);
+      text('跑到了尽头', W / 2, 240, 52, '#ffe9c9');
+      text(state.gained, W / 2, 320, 36, '#ffca7a');
+      text(`金币 ${state.coins}`, W / 2, 372, 26, '#ffd9a8');
+      text('Enter / 空格 再跑一次', W / 2, 455, 26, '#f0b98a');
+    },
+  },
+};
+
+// ---- 世界的绘制 ------------------------------------------------------------------------
+function drawBackdrop(wx, cheap) { // 暖色黄昏:绛紫→橘金天际、低垂太阳、三层沙丘视差
+  const sky = ctx.createLinearGradient(0, 0, 0, GROUND);
+  sky.addColorStop(0, '#42275e'); sky.addColorStop(0.55, '#a34a3e');
+  sky.addColorStop(0.8, '#ffb066'); sky.addColorStop(1, '#ffd28a');
+  ctx.fillStyle = sky; ctx.fillRect(0, 0, W, GROUND);
+  ctx.fillStyle = '#ffd9a0'; ctx.beginPath(); ctx.arc(900, 430, 55, 0, 7); ctx.fill();
+  if (!cheap) { ctx.strokeStyle = 'rgba(255,217,160,0.35)'; ctx.lineWidth = 10; ctx.beginPath(); ctx.arc(900, 430, 72, 0, 7); ctx.stroke(); }
+  for (const L of dunes) {
+    const off = -wx * L.par;
+    ctx.fillStyle = L.col;
+    for (const hm of L.humps) {
+      const sx = ((hm.c + off) % L.span + L.span) % L.span - 300;
+      if (sx < -hm.r || sx > W + hm.r) continue;
+      ctx.beginPath(); ctx.ellipse(sx, L.base, hm.r, hm.h, 0, Math.PI, 0); ctx.closePath(); ctx.fill();
+    }
+  }
+}
+function drawGround(wx, cheap) {
+  ctx.fillStyle = '#2a1712'; ctx.fillRect(0, GROUND, W, H - GROUND);
+  ctx.fillStyle = '#53301f'; ctx.fillRect(0, GROUND, W, 4);
+  if (cheap) return;
+  for (const sp of specks) {
+    const sx = ((sp.x - wx) % 2400 + 2400) % 2400 - 100;
+    if (sx > -30 && sx < W + 30) { ctx.fillStyle = 'rgba(120,70,40,0.5)'; ctx.fillRect(sx, sp.y, sp.w, 2); }
+  }
+}
+function drawRock(x, y, w, h) { // 矮石:暖灰石块带裂纹,一跳而过
+  ctx.fillStyle = '#6e5a4e';
+  ctx.beginPath();
+  ctx.moveTo(x, y); ctx.lineTo(x + w * 0.12, y - h * 0.9); ctx.lineTo(x + w * 0.5, y - h);
+  ctx.lineTo(x + w * 0.9, y - h * 0.75); ctx.lineTo(x + w, y); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#4a3a30'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x + w * 0.4, y - h * 0.15); ctx.lineTo(x + w * 0.5, y - h * 0.5); ctx.lineTo(x + w * 0.62, y - h * 0.7); ctx.stroke();
+  ctx.fillStyle = '#7d6a5c'; ctx.beginPath(); ctx.ellipse(x + w * 0.5, y - h + 5, w * 0.3, 4, 0, 0, 7); ctx.fill();
+}
+function drawPillar(x, y, w, h) { // 石柱:更高更窄,连跳阵
+  ctx.fillStyle = '#5f4d42';
+  ctx.beginPath();
+  ctx.moveTo(x + 3, y); ctx.lineTo(x, y - h * 0.85); ctx.lineTo(x + w * 0.5, y - h);
+  ctx.lineTo(x + w, y - h * 0.8); ctx.lineTo(x + w - 3, y); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#3e3029'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x + w * 0.5, y - 6); ctx.lineTo(x + w * 0.5, y - h + 8); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(x + 8, y - h * 0.5); ctx.lineTo(x + w - 8, y - h * 0.45); ctx.stroke();
+}
+function drawGate(x, y, w) { // 悬岩:从天而降的石梁,梁下留 74px,滑铲过;红带提醒低头
+  ctx.fillStyle = '#574438'; ctx.fillRect(x + w / 2 - 9, 0, 18, y - 180);
+  ctx.fillStyle = '#6e5648';
+  ctx.beginPath();
+  ctx.moveTo(x - 14, y - 190); ctx.lineTo(x + w + 14, y - 190);
+  ctx.lineTo(x + w + 8, y - 74); ctx.lineTo(x - 8, y - 74); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#3a2c24'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.moveTo(x - 8, y - 74); ctx.lineTo(x + w + 8, y - 74); ctx.stroke();
+  ctx.fillStyle = '#c8452e'; ctx.fillRect(x - 4, y - 120, w + 8, 10);
+}
+function drawCoin(x, y, t) { // 暖金菱形金币
+  ctx.save(); ctx.translate(x, y); ctx.rotate(Math.sin(t * 4) * 0.15);
+  ctx.fillStyle = '#e8a33d';
+  ctx.beginPath(); ctx.moveTo(0, -12); ctx.lineTo(9, 0); ctx.lineTo(0, 12); ctx.lineTo(-9, 0); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#8a5a18'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.fillStyle = '#ffd98a';
+  ctx.beginPath(); ctx.moveTo(0, -6); ctx.lineTo(4, 0); ctx.lineTo(0, 6); ctx.lineTo(-4, 0); ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawRunner(x, y, mode, t, cheap) { // 深色小剪影 + 飘动围巾;y = 脚底
+  ctx.save(); ctx.translate(x, y);
+  ctx.fillStyle = '#241209'; ctx.strokeStyle = '#241209';
+  if (mode === 'slide') { // 低伏滑铲:身体水平、头抬起、前腿伸出
+    ctx.beginPath(); ctx.ellipse(-8, -24, 32, 16, -0.1, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.arc(20, -36, 10, 0, 7); ctx.fill();
+    ctx.lineWidth = 7; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(24, -14); ctx.lineTo(38, -6); ctx.stroke(); // 前腿
+    ctx.beginPath(); ctx.moveTo(-16, -16); ctx.lineTo(-28, -4); ctx.stroke(); // 后腿
+  } else {
+    const air = mode === 'jump';
+    const ph = Math.sin(t * 14);
+    ctx.beginPath(); ctx.ellipse(0, -52, 11, 26, air ? -0.15 : 0.08, 0, 7); ctx.fill(); // 躯干
+    ctx.beginPath(); ctx.arc(air ? 4 : 2, -84, 10, 0, 7); ctx.fill();                   // 头
+    ctx.lineWidth = 7; ctx.lineCap = 'round';
+    if (air) { // 腿收起
+      ctx.beginPath(); ctx.moveTo(-2, -34); ctx.lineTo(-14, -16); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(2, -34); ctx.lineTo(12, -22); ctx.stroke();
+    } else { // 两腿交替
+      ctx.beginPath(); ctx.moveTo(-2, -32); ctx.lineTo(-6 + ph * 12, -4); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(2, -32); ctx.lineTo(6 - ph * 12, -4); ctx.stroke();
+    }
+    ctx.lineWidth = 6; // 手臂
+    ctx.beginPath(); ctx.moveTo(0, -62); ctx.lineTo(air ? 16 : 8 + ph * 8, air ? -66 : -46 + ph * 6); ctx.stroke();
+  }
+  if (!cheap) { // 围巾:5 节,向左后方飘(大而亮,剪影里也要一眼可见)
+    ctx.fillStyle = '#e0532f';
+    const sx0 = mode === 'slide' ? -30 : -10, sy0 = mode === 'slide' ? -30 : -76;
+    for (let i = 0; i < 5; i++) {
+      const wob = Math.sin(t * 12 - i * 1.1) * (3 + i * 1.6);
+      ctx.beginPath(); ctx.ellipse(sx0 - i * 11, sy0 + wob, 8 - i * 0.9, 4.6 - i * 0.4, 0, 0, 7); ctx.fill();
+    }
+  }
+  ctx.restore();
+}
+function drawWorld() { // play / pause / over 共用
+  const s = state;
+  drawBackdrop(s.worldX, CHEAP);
+  // 历史最佳小旗:跑过它时叮一声
+  if (s.best > 0) {
+    const fx = s.best * 10 - s.worldX;
+    if (fx > -60 && fx < W + 60) {
+      ctx.fillStyle = '#d8cfc0'; ctx.fillRect(fx, GROUND - 110, 4, 110);
+      ctx.fillStyle = '#c8452e';
+      ctx.beginPath(); ctx.moveTo(fx + 4, GROUND - 110); ctx.lineTo(fx + 42, GROUND - 98); ctx.lineTo(fx + 4, GROUND - 86); ctx.closePath(); ctx.fill();
+      text('最佳', fx + 10, GROUND - 124, 16, '#ffe9c9');
+    }
+  }
+  drawGround(s.worldX, CHEAP);
+  // 金币
+  for (const c2 of s.coinsArr) {
+    if (c2.got) continue;
+    const cx = c2.wx - s.worldX;
+    if (cx > -30 && cx < W + 30) drawCoin(cx, c2.cy, s.t + c2.wx * 0.01);
+  }
+  // 障碍
+  for (const o of s.obs) {
+    const ox = o.wx - s.worldX;
+    if (ox < -60 || ox > W + 60) continue;
+    if (o.kind === 'rock') drawRock(ox, GROUND, o.w, o.h);
+    else if (o.kind === 'pillar') drawPillar(ox, GROUND, o.w, o.h);
+    else drawGate(ox, GROUND, o.w);
+  }
+  // 尘土
+  if (!CHEAP) {
+    for (const d of s.dust) {
+      ctx.fillStyle = `rgba(200,150,100,${Math.max(0, d.life) * 1.6})`;
+      ctx.beginPath(); ctx.ellipse(d.x, d.y, 5, 3.5, 0, 0, 7); ctx.fill();
+    }
+  }
+  // 跑者(落地压缩)
+  ctx.save();
+  if (s.squashT > 0) { ctx.translate(RUNX, GROUND); ctx.scale(1.12, 0.85); ctx.translate(-RUNX, -GROUND); }
+  drawRunner(RUNX, s.y, s.slideT > 0 ? 'slide' : (s.onGround ? 'run' : 'jump'), s.runT, CHEAP);
+  ctx.restore();
+  // HUD:距离 / 最佳 / 金币 / 档位信号灯 / 新纪录
+  text(`${Math.floor(s.dist)} m`, W / 2, 44, 40, '#fff3e0');
+  if (s.best > 0) text(`最佳 ${Math.floor(s.best)} m`, 24, 30, 20, '#ffca7a', 'left');
+  drawCoin(W - 64, 32, s.t);
+  text(`${s.coins}`, W - 44, 32, 24, '#ffd98a', 'left');
+  for (let i = 0; i < Math.min(s.tier, 10); i++) { ctx.fillStyle = '#ff9a4d'; ctx.fillRect(W / 2 - 122 + i * 24, 66, 16, 8); }
+  if (s.flashT > 0) text('新纪录!', W / 2, 170, 46, '#ffd98a');
+}
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1;
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP;
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive ---------------------------------------------------
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; },
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }
+
+</script>
+</body>
+</html>

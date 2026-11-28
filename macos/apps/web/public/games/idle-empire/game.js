@@ -1,0 +1,485 @@
+'use strict';
+// 《点点帝国》— 羊皮纸账房里的放置局:点方孔铜钱、雇 6 种帮手、每 25 个翻倍、盖转生印章换声望。
+// 进账走固定步进(update/STEP);Date.now 只用于离线结算与存档时间戳(元数据,不驱动游戏运动)。
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value });
+const STEP = 1 / 60;
+const W = 1280, H = 720;
+const PIXEL = false;
+const FONT = 'sans-serif';
+const TITLE = '点点帝国';
+const CONTROLS = ['点铜钱 :进账', '点帮手行 :雇(价格递增)', '满 25 个产出翻倍 · M :静音'];
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 };
+const CHEAP = params.get('render') === 'cheap';
+let seed;
+function rng() {
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = [];
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() {
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center') {
+  ctx.fillStyle = c; ctx.font = `${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+
+// ---- Input ----------------------------------------------------------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code);
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('blur', () => down.clear());
+
+const tp = { x: -1, y: -1 };
+// 画布点击:换算成游戏坐标,分发给标题页/铜钱/帮手行/转生印章
+canvas.addEventListener('pointermove', e => {
+  const r = canvas.getBoundingClientRect();
+  tp.x = (e.clientX - r.left) / r.width * W;
+  tp.y = (e.clientY - r.top) / r.height * H;
+});
+canvas.addEventListener('pointerdown', e => {
+  startAudio();
+  const r = canvas.getBoundingClientRect();
+  const gx = (e.clientX - r.left) / r.width * W, gy = (e.clientY - r.top) / r.height * H;
+  tp.x = gx; tp.y = gy;
+  tapAt(gx, gy);
+});
+
+// ---- Audio ----------------------------------------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted));
+function tone(freq, dur, type = 'square', vol = 0.3, delay = 0) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime + delay, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- 经济数据:6 种帮手(名字 / 基础价 / 基础每秒) --------------------------------------
+const HELPERS = [
+  { name: '挑夫', cost: 15, rate: 0.5 },
+  { name: '车夫', cost: 120, rate: 4 },
+  { name: '商队', cost: 900, rate: 22 },
+  { name: '工坊', cost: 5200, rate: 120 },
+  { name: '船队', cost: 30000, rate: 700 },
+  { name: '商会', cost: 180000, rate: 4200 },
+];
+
+// ---- 数字短名(万/亿)与格式 -------------------------------------------------------------
+function fmt(n) {
+  if (n < 1e4) return n < 100 && n % 1 !== 0 ? String(Math.round(n * 10) / 10) : String(Math.floor(n)); // 0.5/s 不能显示成 0
+  if (n < 1e8) return (n / 1e4).toFixed(n < 1e6 ? 2 : 1) + '万';
+  if (n < 1e12) return (n / 1e8).toFixed(2) + '亿';
+  return (n / 1e12).toFixed(2) + '兆';
+}
+
+// ---- 状态 -----------------------------------------------------------------------------
+let scene, state;
+function perSec() { // 每秒产出 = Σ 数量×基础速率×里程碑乘数×声望加成
+  let sum = 0;
+  for (let i = 0; i < HELPERS.length; i++) {
+    const c = state.counts[i];
+    if (c > 0) sum += c * HELPERS[i].rate * Math.pow(tune.mile_mult, Math.floor(c / tune.mile_step));
+  }
+  return sum * (1 + state.prestige * tune.prestige_bonus);
+}
+function cost(i) { return Math.ceil(HELPERS[i].cost * Math.pow(tune.cost_mult, state.counts[i])); }
+function prestigeGain() { return Math.floor(Math.pow(state.totalRun / tune.prestige_div, tune.prestige_root)); }
+
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  state = { t: 0, gold: 0, totalRun: 0, prestige: 0, counts: HELPERS.map(() => 0),
+            shown: 0, pressT: 0, floats: [], rowFlash: HELPERS.map(() => 0),
+            awayMsg: '', awayT: 0, lastSave: 0 };
+  // 读档 + 离线结算(半速、上限 4 小时;墙钟只在这里和存档时间戳用)
+  try {
+    const raw = localStorage.getItem('idle_save');
+    if (raw) {
+      const d = JSON.parse(raw);
+      state.gold = Number(d.gold) || 0; state.totalRun = Number(d.totalRun) || 0;
+      state.prestige = Number(d.prestige) || 0;
+      if (Array.isArray(d.counts)) state.counts = HELPERS.map((_, i) => Number(d.counts[i]) || 0);
+      const away = Math.min(Math.max(0, (Date.now() - (Number(d.lastSeen) || 0)) / 1000), tune.away_cap_h * 3600);
+      if (away > 60) {
+        const earned = perSec() * away * tune.away_rate;
+        if (earned > 0) {
+          state.gold += earned; state.totalRun += earned;
+          state.awayMsg = `离开 ${Math.round(away / 60)} 分钟,帮手们赚了 ${fmt(earned)}`;
+          state.awayT = 6;
+          events.push({ e: 'away', sec: Math.round(away), gold: Math.round(earned) });
+        }
+      }
+    }
+  } catch (e) {}
+  state.shown = state.gold;
+}
+function saveGame() {
+  try {
+    localStorage.setItem('idle_save', JSON.stringify({
+      gold: state.gold, totalRun: state.totalRun, prestige: state.prestige,
+      counts: state.counts, lastSeen: Date.now(),
+    }));
+  } catch (e) {}
+}
+
+// ---- 操作 ------------------------------------------------------------------------------
+function tapAt(gx, gy) {
+  if (scene === 'title') {
+    const btn = { x: 96, y: 530, w: 310, h: 64 };
+    const hitBtn = gx >= btn.x && gx <= btn.x + btn.w && gy >= btn.y && gy <= btn.y + btn.h;
+    const hitCoin = Math.hypot(gx - 965, gy - 295) <= 122;
+    if (hitBtn || hitCoin) { canvas.style.cursor = 'default'; tone(660, 0.08, 'triangle', 0.16); scene = 'play'; }
+    return;
+  }
+  if (scene !== 'play') return;
+  // 铜钱
+  const dx = gx - 240, dy = gy - 420;
+  if (dx * dx + dy * dy < 110 * 110) { doClick(gx, gy); return; }
+  // 帮手行
+  for (let i = 0; i < HELPERS.length; i++) {
+    const ry = 130 + i * 92;
+    if (gx >= 620 && gx <= 1220 && gy >= ry && gy <= ry + 84) { tryBuy(i); return; }
+  }
+  // 转生印章
+  if (gx >= 195 && gx <= 285 && gy >= 585 && gy <= 675) doPrestige();
+}
+function doClick(gx, gy) {
+  const gain = tune.click_base + perSec() * 0.1;
+  state.gold += gain; state.totalRun += gain; state.pressT = 0.12;
+  state.floats.push({ x: gx, y: gy, s: `+${fmt(gain)}`, t: 0.8 });
+  tone(660, 0.06, 'triangle', 0.15);
+}
+function tryBuy(i) {
+  const c = cost(i);
+  if (state.gold < c) { tone(140, 0.08, 'sawtooth', 0.08); return; }
+  state.gold -= c;
+  state.counts[i]++;
+  state.rowFlash[i] = 0.5;
+  tone(330, 0.1, 'square', 0.18);
+  events.push({ e: 'buy', kind: i, n: state.counts[i] });
+  if (state.counts[i] % tune.mile_step === 0) { // 里程碑:翻倍
+    tone(880, 0.2, 'square', 0.22); tone(1175, 0.25, 'square', 0.22, 0.12);
+    state.rowFlash[i] = 1;
+    events.push({ e: 'mile', kind: i, n: state.counts[i] });
+  }
+  saveGame();
+}
+function doPrestige() {
+  const g = prestigeGain();
+  if (g < 1) { tone(140, 0.08, 'sawtooth', 0.08); return; }
+  state.prestige += g;
+  state.gold = 0; state.totalRun = 0; state.counts = HELPERS.map(() => 0);
+  state.awayMsg = `转生!+${g} 声望 · 全局产出 +${Math.round(state.prestige * tune.prestige_bonus * 100)}%`;
+  state.awayT = 5;
+  tone(200, 0.3, 'sawtooth', 0.2); tone(523, 0.2, 'square', 0.22, 0.16);
+  events.push({ e: 'prestige', gain: g, total: state.prestige });
+  saveGame();
+}
+
+// ---- 绘制:羊皮纸账房 ---------------------------------------------------------------------
+const INK = '#4a3018', INK2 = '#7a5c34', PAPER = '#ecd9a8', PAPER2 = '#e2cc96';
+function drawParchment() {
+  clear(PAPER);
+  ctx.strokeStyle = 'rgba(122,92,52,0.25)'; ctx.lineWidth = 1;
+  for (let y = 130; y < H; y += 60) { ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(W - 40, y); ctx.stroke(); }
+  ctx.strokeStyle = 'rgba(122,92,52,0.5)'; ctx.lineWidth = 3;
+  ctx.strokeRect(20, 20, W - 40, H - 40); // 账目边框
+}
+function drawCoin(x, y, r, press) { // 方孔铜钱
+  ctx.save(); ctx.translate(x, y); if (press) ctx.scale(0.94, 0.94);
+  ctx.fillStyle = '#e0b44c'; ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#9a7420'; ctx.lineWidth = 8; ctx.beginPath(); ctx.arc(0, 0, r - 4, 0, 7); ctx.stroke();
+  ctx.strokeStyle = 'rgba(154,116,32,0.5)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0, 0, r * 0.62, 0, 7); ctx.stroke();
+  ctx.fillStyle = PAPER; ctx.fillRect(-r * 0.2, -r * 0.2, r * 0.4, r * 0.4); // 方孔
+  ctx.strokeStyle = '#8a6a20'; ctx.lineWidth = 3; ctx.strokeRect(-r * 0.2, -r * 0.2, r * 0.4, r * 0.4);
+  ctx.restore();
+}
+function drawPortrait(kind, x, y, s, ink) { // 6 种帮手小像,墨线手绘,一眼可分
+  ctx.save(); ctx.translate(x, y); ctx.strokeStyle = ink; ctx.fillStyle = ink; ctx.lineWidth = s * 0.06; ctx.lineCap = 'round';
+  if (kind === 0) { // 挑夫:扁担双筐
+    ctx.beginPath(); ctx.moveTo(-s * 0.4, -s * 0.1); ctx.lineTo(s * 0.4, -s * 0.05); ctx.stroke();
+    ctx.beginPath(); ctx.arc(-s * 0.34, s * 0.18, s * 0.14, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(s * 0.34, s * 0.22, s * 0.14, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.arc(0, -s * 0.28, s * 0.12, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(0, s * 0.02, s * 0.1, s * 0.16, 0, 0, 7); ctx.fill();
+  } else if (kind === 1) { // 车夫:独轮车
+    ctx.beginPath(); ctx.arc(-s * 0.22, s * 0.2, s * 0.18, 0, 7); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(-s * 0.4, s * 0.02); ctx.lineTo(s * 0.3, -s * 0.14); ctx.lineTo(s * 0.42, s * 0.02); ctx.closePath(); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s * 0.3, -s * 0.14); ctx.lineTo(s * 0.46, -s * 0.02); ctx.stroke();
+    ctx.beginPath(); ctx.arc(s * 0.12, -s * 0.3, s * 0.1, 0, 7); ctx.fill();
+  } else if (kind === 2) { // 商队:双峰驼
+    ctx.beginPath(); ctx.moveTo(-s * 0.36, s * 0.3);
+    ctx.lineTo(-s * 0.3, -s * 0.05); ctx.quadraticCurveTo(-s * 0.18, -s * 0.3, -s * 0.05, -s * 0.08);
+    ctx.quadraticCurveTo(s * 0.08, -s * 0.3, s * 0.2, -s * 0.06);
+    ctx.lineTo(s * 0.26, s * 0.3); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(s * 0.2, -s * 0.1); ctx.quadraticCurveTo(s * 0.4, -s * 0.4, s * 0.34, -s * 0.42); ctx.stroke();
+    ctx.beginPath(); ctx.arc(s * 0.36, -s * 0.44, s * 0.07, 0, 7); ctx.fill();
+  } else if (kind === 3) { // 工坊:齿轮 + 锤
+    ctx.beginPath(); ctx.arc(-s * 0.1, s * 0.1, s * 0.2, 0, 7); ctx.stroke();
+    for (let i = 0; i < 8; i++) {
+      const a = i * Math.PI / 4;
+      ctx.beginPath(); ctx.arc(-s * 0.1 + Math.cos(a) * s * 0.26, s * 0.1 + Math.sin(a) * s * 0.26, s * 0.05, 0, 7); ctx.fill();
+    }
+    ctx.beginPath(); ctx.moveTo(s * 0.1, -s * 0.1); ctx.lineTo(s * 0.42, -s * 0.42); ctx.stroke();
+    ctx.fillRect(s * 0.3, -s * 0.52, s * 0.24, s * 0.14);
+  } else if (kind === 4) { // 船队:帆船
+    ctx.beginPath(); ctx.moveTo(-s * 0.4, s * 0.2); ctx.quadraticCurveTo(0, s * 0.42, s * 0.4, s * 0.2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, s * 0.2); ctx.lineTo(0, -s * 0.4); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(0, -s * 0.4); ctx.quadraticCurveTo(s * 0.36, -s * 0.2, s * 0.04, s * 0.02); ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.moveTo(0, -s * 0.3); ctx.quadraticCurveTo(-s * 0.26, -s * 0.12, -s * 0.03, s * 0.0); ctx.closePath(); ctx.fill();
+  } else { // 商会:灯笼
+    ctx.beginPath(); ctx.ellipse(0, 0, s * 0.26, s * 0.3, 0, 0, 7); ctx.stroke();
+    ctx.fillRect(-s * 0.14, -s * 0.42, s * 0.28, s * 0.1);
+    ctx.fillRect(-s * 0.14, s * 0.32, s * 0.28, s * 0.1);
+    ctx.beginPath(); ctx.moveTo(0, s * 0.42); ctx.lineTo(0, s * 0.52); ctx.stroke();
+    ctx.beginPath(); ctx.ellipse(0, 0, s * 0.08, s * 0.22, 0, 0, 7); ctx.stroke();
+  }
+  ctx.restore();
+}
+function drawSeal(x, y, s, gain, total) { // 朱红转生印章
+  const ok = gain >= 1;
+  ctx.save(); ctx.translate(x, y); if (!ok) ctx.globalAlpha = 0.35;
+  ctx.fillStyle = '#b03a2a';
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(-s / 2, -s / 2, s, s, 10); else ctx.rect(-s / 2, -s / 2, s, s);
+  ctx.fill();
+  ctx.strokeStyle = '#7a2418'; ctx.lineWidth = 4; ctx.strokeRect(-s / 2 + 5, -s / 2 + 5, s - 10, s - 10);
+  ctx.fillStyle = '#f2e3c8'; ctx.font = `bold ${Math.round(s * 0.3)}px ${FONT}`;
+  ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText('转', 0, -s * 0.16); ctx.fillText('生', 0, s * 0.2);
+  ctx.restore();
+  if (ok) text(`+${gain} 声望`, x, y + s / 2 + 18, 22, '#b03a2a');
+  else text(`还差 ${fmt(tune.prestige_div - state.totalRun)} 收入`, x, y + s / 2 + 18, 18, INK2);
+  text(`声望 ${total}`, x, y - s / 2 - 14, 22, INK);
+}
+function drawPlay() {
+  const s = state;
+  drawParchment();
+  // 顶部账目:总金币 / 每秒
+  text('总金币', 240, 96, 24, INK2);
+  text(fmt(s.shown), 240, 150, 58, INK);
+  text(`每秒 ${fmt(perSec())}`, 240, 208, 28, INK2);
+  // 铜钱按钮
+  drawCoin(240, 420, 110, s.pressT > 0);
+  text('点!', 240, 545, 26, INK2);
+  // 转生印章
+  drawSeal(240, 628, 78, prestigeGain(), s.prestige);
+  // 帮手行
+  const ps = perSec();
+  for (let i = 0; i < HELPERS.length; i++) {
+    const ry = 130 + i * 92, h = HELPERS[i], c = s.counts[i], pr = cost(i), afford = s.gold >= pr;
+    ctx.fillStyle = PAPER2; ctx.fillRect(620, ry, 600, 84);
+    ctx.strokeStyle = afford ? INK : '#b5a480'; ctx.lineWidth = 2; ctx.strokeRect(620, ry, 600, 84);
+    if (c > 0) { ctx.fillStyle = '#f4e6b8'; ctx.fillRect(624, ry + 4, 8, 76); } // 买了亮一盏
+    ctx.strokeStyle = INK; ctx.lineWidth = 1.5;
+    ctx.strokeRect(640, ry + 10, 64, 64);
+    drawPortrait(i, 672, ry + 42, 64, INK);
+    text(h.name, 724, ry + 24, 26, INK, 'left');
+    text(`×${c} · ${fmt(c * h.rate * Math.pow(tune.mile_mult, Math.floor(c / tune.mile_step)) * (1 + s.prestige * tune.prestige_bonus))}/s`, 724, ry + 56, 22, INK2, 'left');
+    // 里程碑进度条
+    const prog = (c % tune.mile_step) / tune.mile_step;
+    ctx.fillStyle = '#cbb381'; ctx.fillRect(920, ry + 62, 140, 10);
+    ctx.fillStyle = '#c08a3e'; ctx.fillRect(920, ry + 62, 140 * prog, 10);
+    ctx.strokeStyle = INK2; ctx.lineWidth = 1; ctx.strokeRect(920, ry + 62, 140, 10);
+    text(`满${tune.mile_step}翻倍`, 1000, ry + 40, 16, INK2);
+    // 价格
+    text(`雇 ${fmt(pr)}`, 1180, ry + 34, 26, afford ? '#8a4a1a' : '#a89878', 'right');
+    text(afford ? '可雇' : '钱不够', 1180, ry + 62, 18, afford ? '#8a4a1a' : '#a89878', 'right');
+    if (s.rowFlash[i] > 0) { ctx.fillStyle = `rgba(224,180,76,${s.rowFlash[i] * 0.5})`; ctx.fillRect(620, ry, 600, 84); }
+  }
+  // 点击浮字
+  for (const f of s.floats) {
+    ctx.fillStyle = `rgba(74,48,24,${Math.max(0, f.t)})`;
+    ctx.font = `bold 24px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText(f.s, f.x, f.y - (0.8 - f.t) * 60);
+  }
+  // 离线/转生结算条
+  if (s.awayT > 0) {
+    ctx.fillStyle = 'rgba(176,58,42,0.12)'; ctx.fillRect(W / 2 - 320, 60, 640, 44);
+    text(s.awayMsg, W / 2, 82, 26, '#8a2a1a');
+  }
+}
+
+// ---- 场景 -----------------------------------------------------------------------------
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() { // 帮手谱系 + 铜钱 + 印章,全部命名
+      drawParchment();
+      const c = INK;
+      text('帮手谱系(左小像右名字)· 下面是铜钱与转生印章', W / 2, 60, 24, INK2);
+      for (let i = 0; i < HELPERS.length; i++) {
+        const x = 150 + i * 180;
+        ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.strokeRect(x - 32, 130, 64, 64);
+        drawPortrait(i, x, 162, 64, INK);
+        text(HELPERS[i].name, x, 220, 24, c);
+        text(`${fmt(HELPERS[i].cost)} 钱`, x, 250, 18, INK2);
+      }
+      drawCoin(240, 470, 80, false); text('铜钱·点击', 240, 570, 22, c);
+      drawSeal(560, 470, 72, 1, 3); text('转生印章', 560, 570, 22, c);
+    },
+  },
+  title: {
+    update(dt) {
+      state.t += dt;
+      const btn = { x: 96, y: 530, w: 310, h: 64 };
+      const hover = (tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h)
+        || Math.hypot(tp.x - 965, tp.y - 295) <= 122;
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space')) { canvas.style.cursor = 'default'; scene = 'play'; }
+    },
+    draw() {
+      drawParchment();
+      const lx = 96, t = state.t || 0;
+      const totalHelpers = state.counts.reduce((a, b) => a + b, 0);
+
+      // 左侧账房开张区
+      ctx.beginPath(); ctx.roundRect(lx, 84, 210, 32, 16);
+      ctx.fillStyle = 'rgba(176, 58, 42, 0.12)'; ctx.fill();
+      ctx.strokeStyle = '#b03a2a'; ctx.lineWidth = 1.5; ctx.stroke();
+      text(state.prestige > 0 ? `第 ${state.prestige + 1} 次创业 · 声望 ${state.prestige}` : '羊皮纸账房 · 放置经营', lx + 105, 100, 15, '#922b1e');
+
+      text(TITLE, lx, 174, 92, INK, 'left');
+      text('从一枚方孔铜钱到商路纵横 —— 离线也会默默生钱', lx, 246, 22, INK2, 'left');
+
+      // 存档进度条（若有旧档）
+      if (state.gold > 0 || totalHelpers > 0 || state.prestige > 0) {
+        ctx.fillStyle = PAPER2; ctx.fillRect(lx, 282, 540, 44);
+        ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.strokeRect(lx, 282, 540, 44);
+        text(`账面结余 ${fmt(state.gold)} 钱   ·   帮手 ${totalHelpers} 位   ·   ${fmt(perSec())}/s`, lx + 270, 304, 18, INK);
+      }
+
+      const items = [
+        ['点击铜钱', '手动赚第一桶金，点击收益随产能提升'],
+        ['雇佣六行', '挑夫 / 车夫 / 商队 / 工坊 / 船队 / 商会'],
+        ['满10翻倍', '每种帮手每满 10 人产出翻倍 · 攒够可转生'],
+      ];
+      items.forEach(([k, v], i) => {
+        const iy = 344 + i * 54;
+        ctx.fillStyle = 'rgba(226, 204, 150, 0.72)'; ctx.fillRect(lx, iy, 540, 44);
+        ctx.strokeStyle = '#b5a480'; ctx.lineWidth = 1.5; ctx.strokeRect(lx, iy, 540, 44);
+        ctx.fillStyle = '#4a3018'; ctx.fillRect(lx + 10, iy + 8, 108, 28);
+        text(k, lx + 64, iy + 22, 15, '#f2e3c8');
+        text(v, lx + 132, iy + 22, 16, INK, 'left');
+      });
+
+      const btn = { x: lx, y: 530, w: 310, h: 64 };
+      const hover = tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h;
+      ctx.save();
+      ctx.shadowColor = hover ? 'rgba(176, 58, 42, 0.38)' : 'rgba(74, 48, 24, 0.2)'; ctx.shadowBlur = hover ? 20 : 10;
+      ctx.beginPath(); ctx.roundRect(btn.x, btn.y - (hover ? 2 : 0), btn.w, btn.h, 12);
+      ctx.fillStyle = hover ? '#c44432' : '#b03a2a'; ctx.fill();
+      ctx.strokeStyle = '#6e2016'; ctx.lineWidth = 2.5; ctx.stroke();
+      ctx.restore();
+      text(state.gold > 0 ? '继续掌柜  [Enter / 空格]' : '开张营业  [Enter / 空格]', btn.x + btn.w / 2, btn.y - (hover ? 2 : 0) + btn.h / 2, 22, '#f9edd3');
+
+      // 右侧铜钱与六行小像展示框
+      const rx = 740, ry = 88, rw = 450, rh = 534;
+      ctx.fillStyle = 'rgba(226, 204, 150, 0.52)'; ctx.fillRect(rx, ry, rw, rh);
+      ctx.strokeStyle = 'rgba(122,92,52,0.65)'; ctx.lineWidth = 2.5; ctx.strokeRect(rx, ry, rw, rh);
+      ctx.strokeStyle = 'rgba(122,92,52,0.28)'; ctx.lineWidth = 1; ctx.strokeRect(rx + 8, ry + 8, rw - 16, rh - 16);
+
+      const coinHov = Math.hypot(tp.x - 965, tp.y - 295) <= 122;
+      ctx.save();
+      ctx.translate(965, 295);
+      ctx.scale(1 + Math.sin(t * 2.5) * 0.025, 1 + Math.sin(t * 2.5) * 0.025);
+      drawCoin(0, 0, 108, coinHov);
+      ctx.restore();
+      text('点铜钱直接开张', 965, 430, 18, INK2);
+
+      for (let i = 0; i < HELPERS.length; i++) {
+        const hx = rx + 42 + i * 66, hy = 514;
+        ctx.strokeStyle = INK; ctx.lineWidth = 1.5; ctx.strokeRect(hx - 24, hy - 24, 48, 48);
+        drawPortrait(i, hx, hy, 48, INK);
+        text(HELPERS[i].name, hx, hy + 42, 14, INK2);
+      }
+    },
+  },
+  play: {
+    update(dt) {
+      const s = state;
+      s.t += dt;
+      // 进账走固定步进,不挂真实时钟
+      const inc = perSec() * dt;
+      s.gold += inc; s.totalRun += inc;
+      s.shown += (s.gold - s.shown) * Math.min(1, dt * 8); // 平滑跳字
+      if (s.pressT > 0) s.pressT -= dt;
+      if (s.awayT > 0) s.awayT -= dt;
+      for (const f of s.floats) f.t -= dt;
+      s.floats = s.floats.filter(f => f.t > 0);
+      for (let i = 0; i < s.rowFlash.length; i++) if (s.rowFlash[i] > 0) s.rowFlash[i] -= dt;
+      if (s.t - s.lastSave > 5) { s.lastSave = s.t; saveGame(); }
+    },
+    draw() { drawPlay(); },
+  },
+};
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1;
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP;
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive ---------------------------------------------------
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; },
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }

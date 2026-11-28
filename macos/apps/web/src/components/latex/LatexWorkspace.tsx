@@ -211,6 +211,23 @@ export function LatexWorkspace({
     return notice;
   }, [refreshSnapshots, state]);
 
+  const handleAgentDirectApplied = useCallback(async (filePaths: string[]) => {
+    await state.refreshTree().catch(() => undefined);
+    for (const path of filePaths) {
+      if (state.files.some((file) => file.path === path)) {
+        await state.reloadFile(path).catch(() => undefined);
+      } else {
+        await state.openFile(path).catch(() => undefined);
+      }
+    }
+    if (filePaths.length > 0) {
+      state.setActivePath(filePaths[0]!);
+    }
+    await state.refreshIndex().catch(() => undefined);
+    await refreshSnapshots().catch(() => undefined);
+    state.setStatus(`智能体已更新 ${filePaths.length} 个文件：${filePaths.join('、')}`);
+  }, [refreshSnapshots, state]);
+
   useEffect(() => {
     void refreshSnapshots();
   }, [refreshSnapshots]);
@@ -763,6 +780,8 @@ export function LatexWorkspace({
               onAutoFix={(question) => void runAutoFix(question)}
               onRollbackSnapshot={(snapshotId) => void rollbackSnapshot(snapshotId)}
               onRefreshSnapshots={() => void refreshSnapshots()}
+              onAgentDirectApplied={handleAgentDirectApplied}
+              onOpenFile={openTextFile}
               onCompile={() => { if (!compiler.running && !compiler.starting) void compile(); }}
               compiling={compiler.running || compiler.starting}
             />

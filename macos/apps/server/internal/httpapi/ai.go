@@ -117,6 +117,12 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 	emit := out.Send
 	emit(map[string]any{"meta": map[string]any{"included": included, "total": total, "scope": body.Scope, "unit": unit, "provider": config.ProviderName(), "model": config.ModelName(), "reasoningEffort": config.ReasoningEffort}})
 
+	agentContext := s.emitPaperAgentWorkflow(r.Context(), key, body, included, total, unit, emit)
+	if agentContext != "" {
+		system += agentContext
+		messages[0].Content = system
+	}
+
 	client := ai.NewClient(config)
 	if len(images) > 0 {
 		text, imageErr := client.GenerateWithImages(r.Context(), system, chatUserMessage(body), images, 0.2, ai.RequestTimeout)
@@ -124,6 +130,7 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 			emit(map[string]any{"error": imageErr.Error()})
 			return
 		}
+		completePaperAgentWorkflow(text, unit, emit)
 		emit(map[string]any{"delta": text})
 		emit(map[string]any{"done": true, "text": text})
 		return
@@ -135,6 +142,7 @@ func (s *Server) handleAIChat(w http.ResponseWriter, r *http.Request) {
 		emit(map[string]any{"error": streamErr.Error(), "partial": text})
 		return
 	}
+	completePaperAgentWorkflow(text, unit, emit)
 	emit(map[string]any{"done": true, "text": text})
 }
 

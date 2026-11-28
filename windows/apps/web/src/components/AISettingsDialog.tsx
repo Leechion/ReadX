@@ -111,7 +111,7 @@ function workflowKeyOf(wf: WorkflowAISettingInput): string {
 }
 
 type TestState = 'idle' | 'testing' | 'ok' | 'fail';
-type SettingsTab = 'ai' | 'sync' | 'policy' | 'appearance' | 'shortcuts';
+export type SettingsTab = 'ai' | 'sync' | 'policy' | 'appearance' | 'shortcuts';
 
 export interface AppearanceProps {
   theme: ThemeChoice;
@@ -120,6 +120,16 @@ export interface AppearanceProps {
   readingFont: ReadingFont;
   readingSize: number;
   onAppearanceChange: (patch: Partial<{ density: InterfaceDensity; readingFont: ReadingFont; readingSize: number }>) => void;
+}
+
+export interface LauncherWheelProps {
+  enabled: boolean;
+  onToggle: (next: boolean) => void;
+}
+
+export interface DesktopPetProps {
+  enabled: boolean;
+  onToggle: (next: boolean) => void;
 }
 
 const SHORTCUTS: ReadonlyArray<{ keys: string[]; title: string; desc: string }> = [
@@ -134,11 +144,17 @@ const SHORTCUTS: ReadonlyArray<{ keys: string[]; title: string; desc: string }> 
 export function AISettingsDialog({
   onClose,
   appearance,
+  launcherWheel,
+  desktopPet,
   initialTab = 'ai',
+  focusSection,
 }: {
   onClose: () => void;
   appearance?: AppearanceProps;
+  launcherWheel?: LauncherWheelProps;
+  desktopPet?: DesktopPetProps;
   initialTab?: SettingsTab;
+  focusSection?: 'ocr';
 }) {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [showKey, setShowKey] = useState(false);
@@ -187,6 +203,16 @@ export function AISettingsDialog({
    */
   const [customMode, setCustomMode] = useState(false);
   const modelBox = useRef<HTMLDivElement>(null);
+  const ocrSectionRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (tab === 'ai' && focusSection === 'ocr') {
+      const timer = window.setTimeout(() => {
+        ocrSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }, 60);
+      return () => window.clearTimeout(timer);
+    }
+  }, [tab, focusSection]);
   const filteredModels = modelQuery.trim()
     ? models.filter((item) => item.toLowerCase().includes(modelQuery.trim().toLowerCase()))
     : models;
@@ -370,6 +396,7 @@ export function AISettingsDialog({
       setOCRToken('');
       setClearOCRToken(false);
       setOCRNotice(`${ocrLabel} 设置已保存在本机。${value.configured ? '' : '尚未配置访问令牌。'}`);
+      window.dispatchEvent(new CustomEvent('readx-ocr-settings', { detail: { settings: value } }));
     } catch (cause) {
       setOCRNotice(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -469,7 +496,7 @@ export function AISettingsDialog({
     ai: { label: 'AI 服务', icon: 'chat', desc: '大模型对话渠道、模型目录与 OCR 解析令牌' },
     sync: { label: '同步与备份', icon: 'sync', desc: '坚果云 WebDAV、本地同步目录、跨设备批注合并与完整快照' },
     policy: { label: '处理策略', icon: 'sliders', desc: '全文翻译与精读流水线的默认执行方式' },
-    appearance: { label: '外观', icon: 'sun', desc: '主题色彩、界面密度与译文阅读排版参数' },
+    appearance: { label: '外观与交互', icon: 'sun', desc: '主题色彩、界面密度、快速轮盘与译文阅读排版参数' },
     shortcuts: { label: '快捷键', icon: 'key', desc: '键盘导航与全局命令速查' },
   };
 
@@ -1073,7 +1100,7 @@ export function AISettingsDialog({
                 </table>
               </div>
 
-              <div className="pt-4 border-t border-line flex flex-col gap-3">
+              <div ref={ocrSectionRef} className="pt-4 border-t border-line flex flex-col gap-3">
                 <div className="flex items-center justify-between gap-2">
                   <div>
                     <h5 style={{ fontSize: 15 }}>文档识别（OCR）</h5>
@@ -1251,6 +1278,40 @@ export function AISettingsDialog({
                     ))}
                   </div>
                 </div>
+                {launcherWheel ? (
+                  <div className="rx-setting-row">
+                    <div className="rx-setting-label">
+                      <strong>快速轮盘</strong>
+                      <span>桌面端长按 Alt / Option 呼出跨工作区轮盘切换器</span>
+                    </div>
+                    <Segmented<'on' | 'off'>
+                      ariaLabel="快速轮盘"
+                      value={launcherWheel.enabled ? 'on' : 'off'}
+                      onChange={(next) => launcherWheel.onToggle(next === 'on')}
+                      options={[
+                        { value: 'on', label: '开启' },
+                        { value: 'off', label: '关闭' },
+                      ]}
+                    />
+                  </div>
+                ) : null}
+                {desktopPet ? (
+                  <div className="rx-setting-row">
+                    <div className="rx-setting-label">
+                      <strong>桌面科研伴侣</strong>
+                      <span>透明置顶书房小黑猫，支持拖入论文入库与后台翻译/编译进度提醒</span>
+                    </div>
+                    <Segmented<'on' | 'off'>
+                      ariaLabel="桌面科研伴侣"
+                      value={desktopPet.enabled ? 'on' : 'off'}
+                      onChange={(next) => desktopPet.onToggle(next === 'on')}
+                      options={[
+                        { value: 'on', label: '开启' },
+                        { value: 'off', label: '关闭' },
+                      ]}
+                    />
+                  </div>
+                ) : null}
               </div>
             </>
           ) : null}
@@ -1262,6 +1323,28 @@ export function AISettingsDialog({
                 <div className="rx-settings-sub">{tabMeta.shortcuts.desc}</div>
               </div>
               <div className="rx-shortcut-list">
+                {launcherWheel ? (
+                  <div className="rx-shortcut-row">
+                    <div className="rx-shortcut-desc">
+                      <strong>快速轮盘{launcherWheel.enabled ? '' : '（已关闭）'}</strong>
+                      <small>桌面端长按 Alt / Option 呼出轮盘；可随时在此开关</small>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="rx-shortcut-keys">
+                        <span className="rx-kbd">长按 Alt</span>
+                      </div>
+                      <Segmented<'on' | 'off'>
+                        ariaLabel="快速轮盘快捷键开关"
+                        value={launcherWheel.enabled ? 'on' : 'off'}
+                        onChange={(next) => launcherWheel.onToggle(next === 'on')}
+                        options={[
+                          { value: 'on', label: '开启' },
+                          { value: 'off', label: '关闭' },
+                        ]}
+                      />
+                    </div>
+                  </div>
+                ) : null}
                 {SHORTCUTS.map((item) => (
                   <div key={item.title} className="rx-shortcut-row">
                     <div className="rx-shortcut-desc">

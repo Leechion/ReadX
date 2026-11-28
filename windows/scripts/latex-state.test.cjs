@@ -480,3 +480,64 @@ test('stopping chat during snapshot creation prevents the subsequent file write'
   assert.equal(hook.render().active.content, 'original');
   hook.unmount();
 });
+
+test('agent workflow records taskPlan, toolCalls, autoApplied multi-file edits, and new-file proposals', async () => {
+  const { api, disk } = projectApi();
+  const baseLatexFile = api.latexFile;
+  api.latexFile = async (id, file) => {
+    if (!disk.has(file)) throw new ApiError('not found', 404);
+    return baseLatexFile(id, file);
+  };
+  api.latexCreateSnapshot = async () => ({ id: 'snap-agent-1' });
+  api.latexFileOp = async (_id, op) => {
+    if (op.op === 'new-file') disk.set(op.to, { path: op.to, content: '', revision: 'new-r0' });
+  };
+  const runAgent = loadModule('apps/web/src/lib/latex/latexChatTransport.ts', {
+    '../../api/client': {
+      streamLatexChat: async (_request, emit) => {
+        emit({ meta: { provider: 'openai', model: 'agent-model', included: 2, total: 2, scope: 'project' }, agentMode: 'agent', agentRole: '章节撰写专家' });
+        emit({ taskPlan: [{ id: 's1', title: '扫描源码', status: 'completed', agent: '章节撰写专家' }, { id: 's2', title: '直接修改并新建章节', status: 'completed', agent: '章节撰写专家' }] });
+        emit({ toolCall: { id: 't1', toolName: 'inspect_workspace', label: '扫描项目源码', status: 'completed' } });
+        emit({ thinking: '已定位 main.tex 与 sections/method.tex', toolCall: { id: 't2', toolName: 'write_file', label: '已写入 main.tex', status: 'completed', locations: ['main.tex'] } });
+        emit({
+          done: true,
+          autoApplied: true,
+          snapshotId: 'snap-agent-1',
+          agentMode: 'agent',
+          text: '智能体已直接更新 2 个文件。',
+          edit: abstractProposal,
+          edits: [
+            abstractProposal,
+            { filePath: 'sections/method.tex', original: '', content: '\\section{Method}', summary: '新建 Method 章节' },
+          ],
+        });
+      },
+    },
+  }).runLatexChat;
+
+  const transport = (request, emit, signal) => runAgent({ ...latexChatRequest, ...request }, emit, signal);
+  const chat = mount('apps/web/src/hooks/useChat.ts', 'useChat', {}, {}, ['latex-project:agent', transport, false]);
+  chat.render();
+  await chat.settle();
+  await chat.render().send('@章节撰写 新建 Method 章节', '', false, [], 'agent');
+  await chat.settle();
+
+  const turn = chat.render().turns.find((item) => item.role === 'ai');
+  assert.equal(turn.agentRole, '章节撰写专家');
+  assert.equal(turn.agentMode, 'agent');
+  assert.equal(turn.taskPlan.length, 2);
+  assert.equal(turn.toolCalls.length, 2);
+  assert.equal(turn.thinking, '已定位 main.tex 与 sections/method.tex');
+  assert.equal(turn.edit.status, 'applied');
+  assert.equal(turn.edit.autoApplied, true);
+  assert.equal(turn.edit.snapshotId, 'snap-agent-1');
+  assert.equal(turn.edit.proposals.length, 2);
+  chat.unmount();
+
+  // Also test applyAIEdit creating a brand-new file when approved in review mode
+  const hook = await openProject(api);
+  const res = await hook.render().applyAIEdit({ filePath: 'sections/method.tex', original: '', content: '\\section{Method}' });
+  assert.match(res, /已应用并保存：sections\/method\.tex/);
+  assert.equal(disk.get('sections/method.tex').content, '\\section{Method}');
+  hook.unmount();
+});

@@ -1,0 +1,525 @@
+'use strict';
+// 《推一把》— 木质案头上的 8 个微型推箱谜题:推错免罚,U 撤销到底,死角箱子变暗提醒。
+// '#' 墙 '.' 地 'B' 箱 'T' 目标 '@' 人;每关都经过人工推演,保证可解。
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value });
+const STEP = 1 / 60;
+const W = 1280, H = 720;
+const PIXEL = false;
+const FONT = 'sans-serif';
+const TITLE = '推一把';
+const CONTROLS = ['方向键 / WASD :推', 'U :撤销 · R :重开本关', 'M :静音 · 数字键 1-8 选关(已解锁)'];
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 };
+const CHEAP = params.get('render') === 'cheap';
+let seed;
+function rng() {
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = [];
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() {
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center') {
+  ctx.fillStyle = c; ctx.font = `${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+
+// ---- Input ----------------------------------------------------------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code);
+const tp = { x: -1, y: -1, click: false };
+function toLogical(e) {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
+}
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('pointermove', e => { const [x, y] = toLogical(e); tp.x = x; tp.y = y; });
+addEventListener('pointerdown', e => { startAudio(); const [x, y] = toLogical(e); tp.x = x; tp.y = y; tp.click = true; });
+addEventListener('blur', () => down.clear());
+
+// ---- Audio ----------------------------------------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted));
+function tone(freq, dur, type = 'square', vol = 0.3, delay = 0) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime + delay, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- 关卡数据:8 关,全部人工推演可解。每关引入或反转一个规则点 ------------------------
+const LEVELS = [
+  { name: '第一推', rows: [           // 教推:人、箱、槽一线,一推入槽
+    '######',
+    '#@BT.#',
+    '#....#',
+    '######',
+  ] },
+  { name: '绕过去', rows: [           // 教绕位:推到一半要绕到箱子另一头
+    '######',
+    '#....#',
+    '#@B..#',
+    '#..T.#',
+    '######',
+  ] },
+  { name: '再来一下', rows: [         // 教双推:推两下再拐弯
+    '######',
+    '#....#',
+    '#.B..#',
+    '#.@.T#',
+    '#....#',
+    '######',
+  ] },
+  { name: '两只都进', rows: [         // 两箱同屏:顺序自由,先热身
+    '########',
+    '#......#',
+    '#.BT.BT#',
+    '#..@...#',
+    '#......#',
+    '########',
+  ] },
+  { name: '柱后借力', rows: [         // 石柱挡道:近路不通,要绕到能推的位
+    '########',
+    '#......#',
+    '#..B.T.#',
+    '#..#...#',
+    '#.@....#',
+    '#......#',
+    '########',
+  ] },
+  { name: '长廊双箱', rows: [         // 两箱都要往左推两格,别把路堵死
+    '########',
+    '#......#',
+    '#.T.B..#',
+    '#......#',
+    '#.T.B..#',
+    '#..@...#',
+    '########',
+  ] },
+  { name: '镜像反转', rows: [         // 第 3 关的镜像:往左推再往下
+    '######',
+    '#....#',
+    '#..B.#',
+    '#T.@.#',
+    '#....#',
+    '######',
+  ] },
+  { name: '三连节奏', rows: [         // 三箱同屏:一排排来,别乱序
+    '#########',
+    '#..BT...#',
+    '#..BT...#',
+    '#..BT...#',
+    '#...@...#',
+    '#########',
+  ] },
+];
+
+// ---- 状态 -----------------------------------------------------------------------------
+let scene, state, grain = [];
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  let prog = 1;
+  try { prog = Number(localStorage.getItem('push_prog')) || 1; } catch (e) {}
+  state = {
+    t: 0, prog, level: Math.min(prog, LEVELS.length) - 1,
+    grid: null, boxes: [], targets: [], p: { x: 0, y: 0 },
+    steps: 0, total: 0, undo: [], bannerT: 0, hintT: 0,
+    lastDir: { x: 1, y: 0 }, ox: 0, oy: 0,
+  };
+  grain = [];
+  for (let i = 0; i < 14; i++) grain.push({ y: 40 + i * 50 + rng() * 20, w: 0.5 + rng() * 1.5, a: 0.06 + rng() * 0.1 });
+}
+function snap() { return { p: { x: state.p.x, y: state.p.y }, b: state.boxes.map(b => ({ x: b.x, y: b.y })) }; }
+function startLevel(n) {
+  const L = LEVELS[n];
+  state.level = n;
+  state.grid = L.rows.map(r => r.split(''));
+  state.targets = []; state.boxes = [];
+  for (let y = 0; y < state.grid.length; y++) {
+    for (let x = 0; x < state.grid[y].length; x++) {
+      const ch = state.grid[y][x];
+      if (ch === 'B') { state.boxes.push({ x, y }); state.grid[y][x] = '.'; }
+      else if (ch === 'T') state.targets.push({ x, y });
+      else if (ch === '@') { state.p = { x, y }; state.grid[y][x] = '.'; }
+    }
+  }
+  state.steps = 0; state.undo = []; state.bannerT = 0; state.hintT = 0;
+  events.push({ e: 'level', n: n + 1 });
+}
+
+// ---- 规则 -----------------------------------------------------------------------------
+function isWall(x, y) {
+  return y < 0 || y >= state.grid.length || x < 0 || x >= state.grid[y].length || state.grid[y][x] === '#';
+}
+function boxAt(x, y) { return state.boxes.findIndex(b => b.x === x && b.y === y); }
+function onTarget(b) { return state.targets.some(t => t.x === b.x && t.y === b.y); }
+function isCorner(b) { // 死角:贴两面相邻的墙(且不在槽上,调用方保证)
+  return (isWall(b.x - 1, b.y) || isWall(b.x + 1, b.y)) && (isWall(b.x, b.y - 1) || isWall(b.x, b.y + 1));
+}
+function deadBoxes() { return state.boxes.filter(b => !onTarget(b) && isCorner(b)); }
+
+function move(dx, dy) {
+  const s = state;
+  if (!s.grid || s.bannerT > 0) return;
+  s.lastDir = { x: dx, y: dy };
+  const nx = s.p.x + dx, ny = s.p.y + dy;
+  if (isWall(nx, ny)) return;
+  const bi = boxAt(nx, ny);
+  if (bi >= 0) {
+    const bx = nx + dx, by = ny + dy;
+    if (isWall(bx, by) || boxAt(bx, by) >= 0) return; // 推不动就是推不动
+    if (s.undo.length > 400) s.undo.shift();
+    s.undo.push(snap());
+    s.boxes[bi].x = bx; s.boxes[bi].y = by;
+    tone(180, 0.08, 'square', 0.14);
+    events.push({ e: 'push' });
+  } else {
+    if (s.undo.length > 400) s.undo.shift();
+    s.undo.push(snap());
+    tone(300, 0.04, 'triangle', 0.08);
+  }
+  s.p.x = nx; s.p.y = ny;
+  s.steps++; s.total++;
+  const dead = deadBoxes(); // 推进死角:变暗 + 提示(撤销免费,不心疼)
+  if (dead.length > 0) { tone(130, 0.25, 'sawtooth', 0.16); events.push({ e: 'dead', n: dead.length }); }
+  s.hintT = dead.length > 0 ? tune.hint_time : 0;
+  if (s.boxes.every(b => onTarget(b))) { // 过关:叮一声 + 存进度
+    s.bannerT = tune.banner_time;
+    tone(523, 0.12, 'square', 0.2); tone(784, 0.22, 'square', 0.2, 0.1);
+    if (s.level + 2 > s.prog && s.level + 2 <= LEVELS.length) {
+      s.prog = s.level + 2;
+      try { localStorage.setItem('push_prog', String(s.prog)); } catch (e) {}
+    }
+    events.push({ e: 'solve', n: s.level + 1, steps: s.steps });
+  }
+}
+function undo() { // 撤销免费:连人带箱退一步,不计步
+  const s = state;
+  if (!s.grid || s.bannerT > 0 || s.undo.length === 0) return;
+  const u = s.undo.pop();
+  s.p = u.p; s.boxes = u.b;
+  s.hintT = deadBoxes().length > 0 ? tune.hint_time : 0;
+  tone(220, 0.06, 'sawtooth', 0.1);
+  events.push({ e: 'undo' });
+}
+function restart() { if (state.grid) startLevel(state.level); }
+
+// ---- 绘制:木质案头 ----------------------------------------------------------------------
+function drawWood() { // 深胡桃木底 + 细木纹
+  clear('#3a2418');
+  for (const g of grain) { ctx.fillStyle = `rgba(20,10,5,${g.a})`; ctx.fillRect(0, g.y, W, g.w); }
+}
+function drawFloor(cx, cy, T, alt) {
+  ctx.fillStyle = alt ? '#c19a5f' : '#c9a469';
+  ctx.fillRect(cx, cy, T, T);
+  ctx.strokeStyle = '#a9834d'; ctx.lineWidth = 1;
+  ctx.strokeRect(cx + 0.5, cy + 0.5, T - 1, T - 1);
+}
+function drawTarget(cx, cy, T) { // 凹刻圆槽
+  ctx.fillStyle = '#8a6a3e';
+  ctx.beginPath(); ctx.arc(cx + T / 2, cy + T / 2, T * 0.26, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#5f4626'; ctx.lineWidth = 3;
+  ctx.beginPath(); ctx.arc(cx + T / 2, cy + T / 2, T * 0.26, 0, 7); ctx.stroke();
+  ctx.fillStyle = '#6f5230';
+  ctx.beginPath(); ctx.arc(cx + T / 2, cy + T / 2, T * 0.16, 0, 7); ctx.fill();
+}
+function drawWall(cx, cy, T) { // 一墩圆石
+  ctx.fillStyle = '#5a4a3e';
+  ctx.beginPath();
+  if (ctx.roundRect) { ctx.roundRect(cx + 2, cy + 2, T - 4, T - 4, 10); } else { ctx.rect(cx + 2, cy + 2, T - 4, T - 4); }
+  ctx.fill();
+  ctx.fillStyle = '#6e5a4a';
+  ctx.beginPath(); ctx.ellipse(cx + T / 2, cy + T * 0.32, T * 0.3, T * 0.16, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#40342a'; ctx.lineWidth = 2;
+  ctx.beginPath();
+  if (ctx.roundRect) { ctx.roundRect(cx + 2, cy + 2, T - 4, T - 4, 10); } else { ctx.rect(cx + 2, cy + 2, T - 4, T - 4); }
+  ctx.stroke();
+}
+function drawBox(cx, cy, T, onT, dead) { // 木箱:木纹 + 铜钉;入槽亮铜芯;死角变暗
+  ctx.save();
+  if (dead) ctx.globalAlpha = tune.dead_alpha;
+  ctx.fillStyle = onT ? '#b57838' : '#a06a32';
+  ctx.fillRect(cx + 5, cy + 5, T - 10, T - 10);
+  ctx.strokeStyle = '#7a4c20'; ctx.lineWidth = 3;
+  ctx.strokeRect(cx + 5, cy + 5, T - 10, T - 10);
+  ctx.strokeStyle = 'rgba(90,55,20,0.7)'; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(cx + 5, cy + T * 0.38); ctx.lineTo(cx + T - 5, cy + T * 0.38); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + 5, cy + T * 0.62); ctx.lineTo(cx + T - 5, cy + T * 0.62); ctx.stroke();
+  ctx.fillStyle = '#e0b070';
+  for (const [rx, ry] of [[10, 10], [T - 14, 10], [10, T - 14], [T - 14, T - 14]]) {
+    ctx.beginPath(); ctx.arc(cx + rx, cy + ry, 2.6, 0, 7); ctx.fill();
+  }
+  if (onT) { // 铜芯亮起
+    ctx.fillStyle = '#e8b04a';
+    ctx.fillRect(cx + T * 0.3, cy + T * 0.42, T * 0.4, T * 0.16);
+    ctx.strokeStyle = '#f4d68a'; ctx.lineWidth = 2;
+    ctx.strokeRect(cx + T * 0.3, cy + T * 0.42, T * 0.4, T * 0.16);
+  }
+  ctx.restore();
+}
+function drawPerson(cx, cy, T, dir) { // 深色小人剪影,一对亮眼
+  const px = cx + T / 2, py = cy + T / 2;
+  ctx.fillStyle = '#2a1810';
+  ctx.beginPath(); ctx.ellipse(px, py + 6, T * 0.2, T * 0.24, 0, 0, 7); ctx.fill(); // 身体
+  ctx.beginPath(); ctx.arc(px + dir.x * 4, py - T * 0.2, T * 0.15, 0, 7); ctx.fill(); // 头(朝向偏移)
+  ctx.fillStyle = '#ffd98a';
+  ctx.beginPath(); ctx.arc(px + dir.x * 4 + dir.x * 4 - 3, py - T * 0.2, 2.4, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.arc(px + dir.x * 4 + dir.x * 4 + 3, py - T * 0.2, 2.4, 0, 7); ctx.fill();
+}
+function drawPlay() {
+  const s = state, T = tune.tile;
+  drawWood();
+  if (!s.grid) return;
+  const rows = s.grid.length, cols = s.grid[0].length;
+  const bw = cols * T, bh = rows * T;
+  const ox = Math.round((W - bw) / 2), oy = Math.round(120 + (H - 120 - bh) / 2);
+  s.ox = ox; s.oy = oy;
+  for (let y = 0; y < rows; y++) {
+    for (let x = 0; x < cols; x++) {
+      const cx = ox + x * T, cy = oy + y * T;
+      if (s.grid[y][x] === '#') { drawWall(cx, cy, T); continue; }
+      drawFloor(cx, cy, T, (x + y) % 2 === 1);
+      if (s.targets.some(t => t.x === x && t.y === y)) drawTarget(cx, cy, T);
+    }
+  }
+  const dead = deadBoxes();
+  for (const b of s.boxes) {
+    drawBox(ox + b.x * T, oy + b.y * T, T, onTarget(b), dead.some(d => d.x === b.x && d.y === b.y));
+  }
+  drawPerson(ox + s.p.x * T, oy + s.p.y * T, T, s.lastDir);
+  // HUD
+  text(`第 ${s.level + 1} 关 · ${LEVELS[s.level].name}`, 24, 36, 28, '#f2e3c8', 'left');
+  text(`步数 ${s.steps}`, W - 24, 36, 24, '#d9c39a', 'right');
+  text('U 撤销 · R 重开', W / 2, H - 28, 20, 'rgba(242,227,200,0.6)');
+  if (s.hintT > 0) text('箱子顶死角了 —— 按 U 撤销', W / 2, H - 64, 26, '#ff9d6b');
+  if (s.bannerT > 0) { // 过关横幅
+    ctx.fillStyle = 'rgba(30,16,8,0.55)'; ctx.fillRect(0, 0, W, H);
+    text('过了!', W / 2, H / 2 - 20, 72, '#ffd98a');
+    text(`第 ${s.level + 1} 关完成`, W / 2, H / 2 + 60, 30, '#f2e3c8');
+  }
+}
+
+// ---- 场景 -----------------------------------------------------------------------------
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() { // 每种单元并排,名字在下
+      drawWood();
+      const T = 72, cy = 280, c = '#f2e3c8';
+      const put = (x, fn, name) => { drawFloor(x, cy, T, false); fn(x, cy, T); text(name, x + T / 2, cy + 120, 22, c); };
+      put(120, (x, y, t2) => drawBox(x, y, t2, false, false), '箱子');
+      put(290, (x, y, t2) => { drawTarget(x, y, t2); drawBox(x, y, t2, true, false); }, '箱子·入槽亮芯');
+      put(460, (x, y, t2) => drawBox(x, y, t2, false, true), '箱子·死角变暗');
+      put(630, (x, y, t2) => drawTarget(x, y, t2), '目标凹槽');
+      put(800, (x, y, t2) => drawWall(x, y, t2), '石墩墙');
+      put(970, (x, y, t2) => drawPerson(x, y, t2, { x: 1, y: 0 }), '推箱人');
+    },
+  },
+  title: {
+    update(dt) {
+      state.t += dt;
+      const curLv = Math.min(state.prog, LEVELS.length) - 1;
+      const btn = { x: 96, y: 406, w: 320, h: 62 };
+      const hoverBtn = tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h;
+      let hoverTile = -1;
+      const x0 = 96, gap = 18, tw = 118, ty = 540;
+      for (let i = 0; i < LEVELS.length; i++) {
+        const tx = x0 + i * (tw + gap);
+        if (i + 1 <= state.prog && tp.x >= tx && tp.x <= tx + tw && tp.y >= ty && tp.y <= ty + 88) hoverTile = i;
+      }
+      canvas.style.cursor = (hoverBtn || hoverTile >= 0) ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space') || (tp.click && hoverBtn)) {
+        tp.click = false; canvas.style.cursor = 'default'; startLevel(curLv); scene = 'play'; return;
+      }
+      if (tp.click && hoverTile >= 0) {
+        tp.click = false; canvas.style.cursor = 'default'; startLevel(hoverTile); scene = 'play'; return;
+      }
+      for (let i = 0; i < LEVELS.length; i++) {
+        if (pressed('Digit' + (i + 1)) && i + 1 <= state.prog) {
+          tp.click = false; canvas.style.cursor = 'default'; startLevel(i); scene = 'play'; return;
+        }
+      }
+      tp.click = false;
+    },
+    draw() {
+      drawWood();
+      const t = state.t || 0, lx = 96;
+      const cleared = Math.min(state.prog - 1, LEVELS.length);
+      const curLv = Math.min(state.prog, LEVELS.length);
+
+      // 左侧标题与进度区
+      ctx.beginPath(); ctx.roundRect(lx, 74, 188, 30, 15);
+      ctx.fillStyle = 'rgba(232, 176, 74, 0.16)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(232, 176, 74, 0.52)'; ctx.lineWidth = 1.5; ctx.stroke();
+      text(`8 关谜题 · 已通 ${cleared} / ${LEVELS.length}`, lx + 94, 89, 14, '#ffd98a');
+
+      text(TITLE, lx, 160, 88, '#f5e6cc', 'left');
+      text('把每一只木箱稳稳推进铜芯凹槽，不留死角', lx, 224, 21, '#d9c39a', 'left');
+
+      // 操作说明芯片
+      const chips = [
+        ['WASD / 方向键', '推箱移动'],
+        ['U / 退格', '无限撤销（救回死角）'],
+        ['R / 1~8', '重开本关 / 快捷选关'],
+      ];
+      chips.forEach(([k, v], i) => {
+        const cy = 264 + i * 42;
+        ctx.beginPath(); ctx.roundRect(lx, cy, 480, 34, 8);
+        ctx.fillStyle = 'rgba(20, 10, 4, 0.34)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(217, 195, 154, 0.18)'; ctx.lineWidth = 1.2; ctx.stroke();
+        text(k, lx + 14, cy + 17, 15, '#ffd98a', 'left');
+        text(v, lx + 168, cy + 17, 15, '#e8d7b8', 'left');
+      });
+
+      // 主开始按钮
+      const btn = { x: lx, y: 406, w: 320, h: 62 };
+      const hoverBtn = tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h;
+      ctx.save();
+      ctx.shadowColor = hoverBtn ? 'rgba(232, 176, 74, 0.45)' : 'rgba(20, 10, 4, 0.35)'; ctx.shadowBlur = hoverBtn ? 22 : 12;
+      ctx.beginPath(); ctx.roundRect(btn.x, btn.y - (hoverBtn ? 2 : 0), btn.w, btn.h, 14);
+      ctx.fillStyle = hoverBtn ? '#f2c060' : '#d9a44a'; ctx.fill();
+      ctx.strokeStyle = '#7a4c20'; ctx.lineWidth = 2.5; ctx.stroke();
+      ctx.restore();
+      text(`从第 ${curLv} 关继续  [Enter / 空格]`, btn.x + btn.w / 2, btn.y - (hoverBtn ? 2 : 0) + btn.h / 2, 20, '#2a160c');
+
+      // 右侧微缩实景推箱工坊预览
+      const mx = 758, my = 84, T = 66;
+      ctx.beginPath(); ctx.roundRect(mx - 22, my - 22, T * 6 + 44, T * 5 + 78, 18);
+      ctx.fillStyle = 'rgba(30, 18, 10, 0.48)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(217, 195, 154, 0.25)'; ctx.lineWidth = 2; ctx.stroke();
+      const mini = ['######', '#..T.#', '#....#', '#.B..#', '######'];
+      for (let r = 0; r < 5; r++) for (let c = 0; c < 6; c++) {
+        const cx = mx + c * T, cy = my + r * T;
+        if (mini[r][c] === '#') drawWall(cx, cy, T);
+        else {
+          drawFloor(cx, cy, T, (r + c) % 2 === 1);
+          if (mini[r][c] === 'T') drawTarget(cx, cy, T);
+        }
+      }
+      const stepOsc = Math.sin(t * 2) * 0.5 + 0.5;
+      drawBox(mx + 2 * T + stepOsc * T * 0.55, my + 1 * T, T, stepOsc > 0.72, false);
+      drawBox(mx + 2 * T, my + 3 * T, T, false, false);
+      drawPerson(mx + 1 * T + stepOsc * T * 0.55, my + 1 * T, T, { x: 1, y: 0 });
+      text('箱子推入凹槽，铜芯立即点亮', mx + T * 3, my + T * 5 + 26, 17, '#e2cfa8');
+
+      // 底部 8 关可点选关木牌
+      text('选择关卡（点击木牌或按 1~8）', lx, 514, 17, '#d9c39a', 'left');
+      const x0 = lx, gap = 18, tw = 118, ty = 540;
+      for (let i = 0; i < LEVELS.length; i++) {
+        const tx = x0 + i * (tw + gap), open = i + 1 <= state.prog, done = i + 1 < state.prog;
+        const hov = open && tp.x >= tx && tp.x <= tx + tw && tp.y >= ty && tp.y <= ty + 88;
+        ctx.save();
+        if (!open) ctx.globalAlpha = 0.42;
+        ctx.beginPath(); ctx.roundRect(tx, ty - (hov ? 3 : 0), tw, 88, 12);
+        ctx.fillStyle = done ? '#b57838' : open ? (hov ? '#dfb572' : '#c9a469') : '#5a4a3e'; ctx.fill();
+        ctx.strokeStyle = open ? (hov ? '#ffd98a' : '#7a4c20') : '#40342a'; ctx.lineWidth = hov ? 3 : 2; ctx.stroke();
+        text(String(i + 1), tx + tw / 2, ty + 30 - (hov ? 3 : 0), 30, open ? '#2a160c' : '#c9b28a');
+        text(open ? LEVELS[i].name : '未解锁', tx + tw / 2, ty + 64 - (hov ? 3 : 0), 14, open ? '#3a2418' : '#b8a078');
+        ctx.restore();
+      }
+    },
+  },
+  play: {
+    update(dt) {
+      const s = state;
+      s.t += dt;
+      if (!s.grid) return;
+      if (s.bannerT > 0) { // 横幅期间锁输入,到点开下一关(或全通结算)
+        s.bannerT -= dt;
+        if (s.bannerT <= 0) {
+          s.bannerT = 0;
+          if (s.level + 1 >= LEVELS.length) { events.push({ e: 'allclear', total: s.total }); scene = 'results'; }
+          else startLevel(s.level + 1);
+        }
+        return;
+      }
+      if (s.hintT > 0) s.hintT -= dt;
+      if (pressed('ArrowUp') || pressed('KeyW')) move(0, -1);
+      else if (pressed('ArrowDown') || pressed('KeyS')) move(0, 1);
+      else if (pressed('ArrowLeft') || pressed('KeyA')) move(-1, 0);
+      else if (pressed('ArrowRight') || pressed('KeyD')) move(1, 0);
+      else if (pressed('KeyU') || pressed('Backspace')) undo();
+      else if (pressed('KeyR')) restart();
+    },
+    draw() { drawPlay(); },
+  },
+  results: {
+    update() { if (pressed('Enter') || pressed('KeyR')) scene = 'title'; },
+    draw() {
+      drawWood();
+      text('全部推完!', W / 2, 250, 76, '#ffd98a');
+      text(`8 关 · 共 ${state.total} 步`, W / 2, 340, 32, '#f2e3c8');
+      text('撤销救过的局面,都是你自己想明白的', W / 2, 400, 24, '#d9c39a');
+      text('Enter 回标题(可从选关小牌回玩任何一关)', W / 2, 500, 26, '#c9b28a');
+    },
+  },
+};
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1;
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP;
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive ---------------------------------------------------
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; },
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }

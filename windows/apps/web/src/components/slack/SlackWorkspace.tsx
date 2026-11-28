@@ -4,7 +4,7 @@ import { useSlackLibrary } from '../../hooks/useSlackLibrary';
 import { readString, writeString, STORAGE_KEYS } from '../../lib/storage';
 import { BookFinder } from './BookFinder';
 import { CountdownWidget } from './CountdownWidget';
-import { Game2048 } from './Game2048';
+import { GAME_TABS, GameHub } from './GameHub';
 import { SlackLibrary, type SlackFilter } from './SlackLibrary';
 import { SlackReader } from './SlackReader';
 import { recordReading, weekStats, type SlackStatsWeek } from './stats';
@@ -183,7 +183,7 @@ export function SlackWorkspace({
                 <button type="button" className={section === 'find' ? 'active' : ''} aria-current={section === 'find' ? 'page' : undefined} onClick={() => setSection('find')}>找书</button>
                 <button type="button" className={section === 'game' ? 'active' : ''} aria-current={section === 'game' ? 'page' : undefined} onClick={() => setSection('game')}>小游戏</button>
               </nav>
-              <small>{section === 'find' ? '多书源 · 直接导入本地' : section === 'game' ? '2048 · 方向键游玩' : '本地书架'}</small>
+              <small>{section === 'find' ? '多书源 · 直接导入本地' : section === 'game' ? `${GAME_TABS.length} 款桌面小游戏` : '本地书架'}</small>
             </>
           )}
         </div>
@@ -236,7 +236,7 @@ export function SlackWorkspace({
             }}
           />
         ) : section === 'game' ? (
-          <Game2048 />
+          <GameHub onEscape={() => setSection('shelf')} />
         ) : (
           <SlackLibrary
             items={items}

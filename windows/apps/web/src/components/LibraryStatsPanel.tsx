@@ -101,7 +101,6 @@ export function LibraryStatsPanel({
           <span>正文索引 <b>{reading.indexedDocuments}</b> 篇 · <b>{reading.indexedPages}</b> 页</span>
           <span>收藏 <b>{library.favorite}</b> · 回收站 <b>{library.trashed}</b></span>
         </div>
-        <p className="rx-src">来源：本地解析 / 翻译 / AI 任务的起止时间戳统计，优先按页折算。</p>
       </div>
 
       <div className="rx-cal-col">

@@ -1,0 +1,860 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: 两个人挤在一块场地上既抢又撞,能不能一边骂一边笑? -->
+<!-- Date: 2026-11-27 -->
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>双人抢分对决</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-variant-numeric: tabular-nums; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script src="config.js"></script>
+<script>
+'use strict';
+// The one-shot's starter: only what the checks read. Keep the fixed step, the clock hook,
+// window.game and the play and figures scenes. Everything else is the game's own: replace
+// what is marked "the game", and draw every figure in the brief's look, in 2D or with three.js.
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.speed is CONFIG.speed.value
+const STEP = 1 / 60;            // simulation step in seconds; motion is per second, never per frame
+const W = 1280, H = 720;        // logical size; a pixel look lowers it and sets PIXEL
+const PIXEL = false;            // pixel looks: whole-number scale, no smoothing
+const FONT = 'sans-serif';      // the brief's look picks the type
+const TITLE = '双人抢分对决';
+const CONTROLS = ['1P:WASD 走 · E 冲撞', '2P:方向键 走 · L 冲撞(按一下接管)', 'P 暂停 · M 静音'];
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 }; // a check may inject one
+const CHEAP = params.get('render') === 'cheap'; // a headless shot or check: 3D draws cheap; players never see it
+let seed;
+function rng() { // mulberry32; every gameplay random call reads this, never Math.random
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = []; // window.game.events: anything the game wants a run to see
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() { // fills the window at any size and pixel ratio
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center') {
+  ctx.fillStyle = c; ctx.font = `${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+
+// ---- Input: keys by position (event.code), OS key repeat ignored ------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code); // true for one step after the key goes down
+const tp = { x: -1, y: -1, click: false };
+function toLogical(e) {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
+}
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('pointermove', e => { const [x, y] = toLogical(e); tp.x = x; tp.y = y; });
+addEventListener('pointerdown', e => { startAudio(); const [x, y] = toLogical(e); tp.x = x; tp.y = y; tp.click = true; });
+addEventListener('blur', () => down.clear());
+function drawButton(btn, label, fill, hoverFill, textCol, hover) {
+  const dy = hover ? -2 : 0;
+  ctx.save();
+  ctx.shadowColor = hover ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.35)';
+  ctx.shadowBlur = hover ? 18 : 10;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(btn.x, btn.y + dy, btn.w, btn.h, 14);
+  else ctx.rect(btn.x, btn.y + dy, btn.w, btn.h);
+  ctx.fillStyle = hover ? hoverFill : fill;
+  ctx.fill();
+  ctx.restore();
+  text(label, btn.x + btn.w / 2, btn.y + dy + btn.h / 2, 22, textCol);
+}
+function inRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+// ---- Audio: started on first input, mute on M --------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)(); // a check may inject one
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted)); // the tweak panel (an add-on), when added, moved a value: the volume follows
+function tone(freq, dur, type = 'square', vol = 0.3) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- The game: a night-market stone square, shards to grab, pots to fill -------------------
+const FX = 140, FY = 150, FW = 1000, FH = 490;          // the field
+const INSET = 24;                                        // how far a body stays from its wall
+const POT = [{ x: 330, y: 588 }, { x: 950, y: 588 }];  // each player's jar
+const SPAWN = [{ x: 430, y: 490 }, { x: 850, y: 490 }];
+const BODY = [{ c: '#e07a3a', d: '#8a3f18', n: '1P·暖橙' }, { c: '#3aa0c0', d: '#1d5f78', n: '2P·青蓝' }];
+const SHARD = { 1: '#5fe0d0', 2: '#ffd45e', 3: '#ff7ac0' };
+const FIG = -1; // a figure drawn for the outline shot belongs to nobody
+
+function mkPlayer(i) {
+  return { i, x: SPAWN[i].x, y: SPAWN[i].y, face: [0, -1], carry: [], dashT: 0, dashX: 0, dashY: 0,
+           cool: 0, stun: 0, freeze: 0, hitDone: false, trail: [], bob: 0, tgt: null, walk: 0 };
+}
+function hash2(i, j) { // a stable shade for a stone tile; never the seeded rng (draws must not move it)
+  let h = (i * 374761393 + j * 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177) | 0;
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function starPath(x, y, r, rot) {
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const a = rot + i * Math.PI / 5, rr = i % 2 ? r * 0.46 : r;
+    const px = x + Math.cos(a) * rr, py = y + Math.sin(a) * rr;
+    if (i) ctx.lineTo(px, py); else ctx.moveTo(px, py);
+  }
+  ctx.closePath();
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y); ctx.lineTo(x + w - r, y); ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+  ctx.lineTo(x + w, y + h - r); ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+  ctx.lineTo(x + r, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+  ctx.lineTo(x, y + r); ctx.quadraticCurveTo(x, y, x + r, y);
+  ctx.closePath();
+}
+
+let scene, state;
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  state = { t: 0, round: 0, roundT: 0, roundOver: 0, wins: [0, 0], total: [0, 0], score: [0, 0],
+            shards: [], spawnT: 0, sparks: [], floats: [], bot: true, joined2: false,
+            botT: 0, roundMsg: '', roundIntro: 0, leadIdx: -1, p1: null, p2: null,
+            gained: '', winner: -1 };
+  startRound(1);
+}
+
+// ---- Rounds ------------------------------------------------------------------------------
+function startRound(n) {
+  const s = state;
+  s.round = n;
+  s.roundT = tune.round_secs;
+  s.score = [0, 0];
+  s.shards = []; s.sparks = []; s.floats = [];
+  s.roundOver = 0; s.roundMsg = ''; s.spawnT = 0.4;
+  s.p1 = mkPlayer(0); s.p2 = mkPlayer(1);
+  s.bot = !s.joined2;
+  // 落后补贴:总战绩落后的一方先动,领先的一方开局冻一下
+  let lead = -1;
+  if (s.wins[0] !== s.wins[1]) lead = s.wins[0] > s.wins[1] ? 0 : 1;
+  else if (s.total[0] !== s.total[1]) lead = s.total[0] > s.total[1] ? 0 : 1;
+  s.leadIdx = lead;
+  if (lead >= 0 && tune.freeze_secs > 0) (lead === 0 ? s.p1 : s.p2).freeze = tune.freeze_secs;
+  s.roundIntro = lead >= 0 ? 1.4 : 0;
+  // 开局一人一颗在手边,其余在中间
+  spawnNear(s.p1.x, s.p1.y);
+  spawnNear(s.p2.x, s.p2.y);
+  for (let i = 0; i < 2; i++) spawnShard();
+  events.push({ e: 'roundstart', n, lead });
+}
+function endRound() {
+  const s = state;
+  const [a, b] = s.score;
+  const w = a === b ? -1 : (a > b ? 0 : 1);
+  if (w >= 0) s.wins[w]++;
+  s.total[0] += a; s.total[1] += b;
+  s.roundMsg = w < 0 ? `这局打平 ${a} : ${b}` : `${w === 0 ? '1P' : '2P'} 拿下这局 ${a} : ${b}`;
+  s.roundOver = 2.2;
+  if (w >= 0) burst(POT[w].x, POT[w].y, BODY[w].c, 26);
+  tone(w < 0 ? 300 : 520, 0.22, 'square', 0.2);
+  if (w >= 0) tone(780, 0.3, 'triangle', 0.16, 0.12);
+  events.push({ e: 'round', n: s.round, winner: w, score: [a, b] });
+}
+function afterRound() {
+  const s = state;
+  s.roundOver = 0;
+  if (s.wins[0] >= tune.win_rounds || s.wins[1] >= tune.win_rounds || s.round >= 3) { finishMatch(); return; }
+  startRound(s.round + 1);
+}
+function finishMatch() {
+  const s = state;
+  let w = -1;
+  if (s.wins[0] !== s.wins[1]) w = s.wins[0] > s.wins[1] ? 0 : 1;
+  else if (s.total[0] !== s.total[1]) w = s.total[0] > s.total[1] ? 0 : 1;
+  s.winner = w;
+  s.gained = w < 0 ? '打平!' : `${w === 0 ? '1P' : '2P'} 胜!`;
+  try { // 本地战绩:胜场与连胜
+    const rec = JSON.parse(localStorage.getItem('clash_record') || '{"w":[0,0],"streak":0,"who":-1}');
+    if (w >= 0) { rec.w[w]++; if (rec.who === w) rec.streak++; else { rec.who = w; rec.streak = 1; } }
+    localStorage.setItem('clash_record', JSON.stringify(rec));
+  } catch (e) {}
+  events.push({ e: 'match', winner: w, wins: s.wins.slice(), total: s.total.slice() });
+  if (w >= 0) { burst(POT[w].x, POT[w].y, BODY[w].c, 60); tone(660, 0.5, 'triangle', 0.2); }
+  scene = 'results';
+}
+
+// ---- Shards, sparks, floats --------------------------------------------------------------
+function spawnShard() {
+  const s = state;
+  if (s.shards.length >= tune.shard_max) return;
+  for (let tries = 0; tries < 14; tries++) {
+    const x = FX + 60 + rng() * (FW - 120), y = FY + 60 + rng() * (FH - 110);
+    if (Math.hypot(x - POT[0].x, y - POT[0].y) < 130) continue;
+    if (Math.hypot(x - POT[1].x, y - POT[1].y) < 130) continue;
+    if (s.p1 && Math.hypot(x - s.p1.x, y - s.p1.y) < 80) continue;
+    if (s.p2 && Math.hypot(x - s.p2.x, y - s.p2.y) < 80) continue;
+    let crowded = false;
+    for (const o of s.shards) if (Math.hypot(x - o.x, y - o.y) < 70) crowded = true;
+    if (crowded) continue;
+    const r = rng();
+    const v = r < tune.three_chance ? 3 : (r < tune.three_chance + 0.3 ? 2 : 1);
+    const life = tune.shard_life * (v === 3 ? 0.68 : v === 2 ? 0.85 : 1);
+    s.shards.push({ x, y, v, life, max: life, lock: 0, spin: rng() * 6.283 });
+    return;
+  }
+}
+function spawnAt(x, y, v, life) {
+  const s = state;
+  s.shards.push({ x, y, v, life, max: life, lock: 0.35, spin: rng() * 6.283 });
+}
+function spawnNear(px, py) { // 开局一人一颗:就在你旁边,但不在脚底下
+  const s = state;
+  for (let tries = 0; tries < 24; tries++) {
+    const a = rng() * 6.283, d = 140 + rng() * 90;
+    const x = Math.max(FX + 60, Math.min(FX + FW - 60, px + Math.cos(a) * d));
+    const y = Math.max(FY + 60, Math.min(FY + FH - 90, py + Math.sin(a) * d));
+    if (Math.hypot(x - POT[0].x, y - POT[0].y) < 120) continue;
+    if (Math.hypot(x - POT[1].x, y - POT[1].y) < 120) continue;
+    let crowded = false;
+    for (const o of s.shards) if (Math.hypot(x - o.x, y - o.y) < 80) crowded = true;
+    if (crowded) continue;
+    const r = rng();
+    const v = r < tune.three_chance ? 3 : (r < tune.three_chance + 0.3 ? 2 : 1);
+    const life = tune.shard_life * (v === 3 ? 0.68 : v === 2 ? 0.85 : 1);
+    s.shards.push({ x, y, v, life, max: life, lock: 0, spin: rng() * 6.283 });
+    return;
+  }
+}
+function burst(x, y, c, n) {
+  for (let i = 0; i < n; i++) {
+    const a = rng() * 6.283, sp = 90 + rng() * 260;
+    state.sparks.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp - 80, t: 0.5 + rng() * 0.5, max: 1, c });
+  }
+}
+function float(x, y, txt, c) { state.floats.push({ x, y, txt, c, t: 1, max: 1 }); }
+
+// ---- Players ------------------------------------------------------------------------------
+function tryDash(p) {
+  if (p.cool > 0 || p.dashT > 0 || p.stun > 0 || p.freeze > 0) return false;
+  p.dashT = tune.dash_time; p.cool = tune.dash_cool; p.hitDone = false;
+  const len = Math.hypot(p.face[0], p.face[1]) || 1;
+  p.dashX = p.face[0] / len; p.dashY = p.face[1] / len;
+  tone(210, 0.06, 'square', 0.1);
+  return true;
+}
+function movePlayer(p, kx, ky, speed, dt) {
+  if (p.cool > 0) p.cool -= dt;
+  if (p.stun > 0) p.stun -= dt;
+  if (p.freeze > 0) p.freeze -= dt;
+  let mx = 0, my = 0;
+  if (p.dashT > 0) {
+    p.dashT -= dt;
+    mx = p.dashX * tune.dash_speed; my = p.dashY * tune.dash_speed;
+    p.trail.push({ x: p.x, y: p.y, t: 0.2 });
+    if (p.dashT <= 0) p.dashT = 0;
+  } else if (p.stun <= 0 && p.freeze <= 0) {
+    const len = Math.hypot(kx, ky);
+    if (len > 0.001) { mx = kx / len; my = ky / len; p.face = [mx, my]; }
+    const mul = speed * (1 - tune.slow_per * p.carry.length);
+    mx *= tune.move_speed * mul; my *= tune.move_speed * mul;
+  }
+  if (p.stun > 0) { mx *= 0.2; my *= 0.2; }
+  p.x += mx * dt; p.y += my * dt;
+  const walking = Math.hypot(mx, my) > 20;
+  p.walk += walking ? dt * 10 : 0;
+  p.bob = walking ? Math.sin(p.walk) * 2.2 : p.bob * 0.86;
+  for (const tr of p.trail) tr.t -= dt;
+  p.trail = p.trail.filter(tr => tr.t > 0);
+  p.x = Math.max(FX + INSET, Math.min(FX + FW - INSET, p.x));
+  p.y = Math.max(FY + INSET, Math.min(FY + FH - INSET, p.y));
+}
+function pickupAndBank(p, dt) {
+  const s = state;
+  for (const sh of s.shards) {
+    if (sh.dead || sh.lock > 0) continue;
+    if (p.carry.length < tune.carry_max && Math.hypot(p.x - sh.x, p.y - sh.y) < 26) {
+      sh.dead = true;
+      p.carry.push(sh);
+      tone(660 + sh.v * 90, 0.05, 'triangle', 0.12);
+      events.push({ e: 'pick', who: p.i, v: sh.v });
+    }
+  }
+  if (p.carry.length && Math.hypot(p.x - POT[p.i].x, p.y - POT[p.i].y) < 52) bank(p);
+}
+function bank(p) {
+  const s = state;
+  let n = 0;
+  for (const sh of p.carry) n += sh.v;
+  p.carry = [];
+  s.score[p.i] += n;
+  float(POT[p.i].x, POT[p.i].y - 46, '+' + n, BODY[p.i].c);
+  burst(POT[p.i].x, POT[p.i].y - 20, BODY[p.i].c, 10);
+  tone(620, 0.07, 'triangle', 0.16); tone(930, 0.1, 'triangle', 0.14, 0.06);
+  events.push({ e: 'bank', who: p.i, n });
+}
+function dropShards(victim) {
+  const n = victim.carry.length;
+  for (let i = 0; i < n; i++) {
+    const sh = victim.carry[i];
+    const a = (i / Math.max(1, n)) * 6.283 + rng() * 0.7;
+    spawnAt(victim.x + Math.cos(a) * 38, victim.y + Math.sin(a) * 38, sh.v, Math.max(2.5, sh.life * 0.8));
+  }
+  victim.carry = [];
+  float(victim.x, victim.y - 58, '撒了!', '#ffd45e');
+  burst(victim.x, victim.y, '#ffd45e', 12);
+  return n;
+}
+function dashHits(a, b) {
+  if (a.dashT <= 0 || a.hitDone) return;
+  if (Math.hypot(a.x - b.x, a.y - b.y) > 38) return;
+  a.hitDone = true;
+  const n = dropShards(b);
+  b.stun = tune.stun_time;
+  b.dashT = 0;
+  tone(110, 0.2, 'sawtooth', 0.22);
+  events.push({ e: 'hit', by: a.i, on: b.i, n });
+}
+function separate(a, b) {
+  const dx = a.x - b.x, dy = a.y - b.y, d = Math.hypot(dx, dy);
+  const min = 34;
+  if (d > 0.01 && d < min) {
+    const push = (min - d) / 2;
+    a.x += dx / d * push; a.y += dy / d * push;
+    b.x -= dx / d * push; b.y -= dy / d * push;
+  }
+}
+
+// ---- The bot (thin stand-in for 2P) -------------------------------------------------------
+function botUpdate(dt) {
+  const s = state, b = s.p2, h = s.p1;
+  s.botT -= dt;
+  if (s.botT <= 0) {
+    s.botT = 0.22;
+    const full = b.carry.length >= tune.carry_max;
+    const hurry = s.roundT < 6 || s.roundT <= tune.freeze_secs * 2;
+    if (full || (b.carry.length >= 2 && (hurry || b.carry.length === tune.carry_max - 1 && rng() < 0.25))) {
+      b.tgt = POT[1];
+    } else {
+      const dh = Math.hypot(h.x - b.x, h.y - b.y);
+      if (h.carry.length >= 2 && dh < 170 && b.cool <= 0 && b.carry.length <= 1 && rng() < 0.7) {
+        const len = dh || 1;
+        b.face = [(h.x - b.x) / len, (h.y - b.y) / len];
+        tryDash(b);
+        b.tgt = { x: h.x, y: h.y };
+      } else {
+        let best = null, bd = 1e9;
+        for (const sh of s.shards) {
+          if (sh.dead || sh.lock > 0) continue;
+          const d = Math.hypot(sh.x - b.x, sh.y - b.y) / (0.65 + sh.v * 0.4);
+          if (d < bd) { bd = d; best = sh; }
+        }
+        b.tgt = best ? { x: best.x, y: best.y } : POT[1];
+      }
+    }
+  }
+  let kx = 0, ky = 0;
+  if (b.tgt) {
+    const dx = b.tgt.x - b.x, dy = b.tgt.y - b.y, d = Math.hypot(dx, dy);
+    if (d > 8) { kx = dx; ky = dy; }
+  }
+  movePlayer(b, kx, ky, tune.bot_speed / tune.move_speed, dt);
+}
+
+// ---- Play ---------------------------------------------------------------------------------
+function updatePlay(dt) {
+  const s = state;
+  s.t += dt;
+  if (s.roundIntro > 0) s.roundIntro -= dt;
+  // particles keep moving even between rounds
+  for (const p of s.sparks) { p.t -= dt; p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 620 * dt; }
+  s.sparks = s.sparks.filter(p => p.t > 0);
+  for (const f of s.floats) { f.t -= dt; f.y -= 44 * dt; }
+  s.floats = s.floats.filter(f => f.t > 0);
+
+  if (s.roundOver > 0) {
+    s.roundOver -= dt;
+    if (s.roundOver <= 0) afterRound();
+    return;
+  }
+  s.roundT -= dt;
+  if (s.roundT <= 0) { s.roundT = 0; endRound(); return; }
+
+  s.spawnT -= dt;
+  if (s.spawnT <= 0) { spawnShard(); s.spawnT = tune.spawn_every; }
+
+  // 2P 一按键就接管
+  if (s.bot) {
+    for (const k of ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'KeyL']) {
+      if (down.has(k) || pressed(k)) {
+        s.bot = false; s.joined2 = true; s.botT = 0;
+        events.push({ e: 'join', who: 2 });
+        break;
+      }
+    }
+  }
+  const p1 = s.p1, p2 = s.p2;
+  const k1x = (down.has('KeyD') ? 1 : 0) - (down.has('KeyA') ? 1 : 0);
+  const k1y = (down.has('KeyS') ? 1 : 0) - (down.has('KeyW') ? 1 : 0);
+  if (pressed('KeyE')) tryDash(p1);
+  movePlayer(p1, k1x, k1y, 1, dt);
+  if (s.bot) {
+    botUpdate(dt);
+  } else {
+    const k2x = (down.has('ArrowRight') ? 1 : 0) - (down.has('ArrowLeft') ? 1 : 0);
+    const k2y = (down.has('ArrowDown') ? 1 : 0) - (down.has('ArrowUp') ? 1 : 0);
+    if (pressed('KeyL')) tryDash(p2);
+    movePlayer(p2, k2x, k2y, 1, dt);
+  }
+  // 撞:朝对手冲过去,撞到就撒一地
+  dashHits(p1, p2); dashHits(p2, p1);
+  separate(p1, p2);
+  pickupAndBank(p1, dt); pickupAndBank(p2, dt);
+  for (const sh of s.shards) {
+    if (sh.lock > 0) { sh.lock -= dt; continue; }
+    sh.life -= dt;
+    if (sh.life <= 0) sh.dead = true;
+  }
+  s.shards = s.shards.filter(sh => !sh.dead);
+}
+
+// ---- Drawing ---------------------------------------------------------------------------------
+function drawBackdrop() {
+  const g = ctx.createLinearGradient(0, 0, 0, H);
+  g.addColorStop(0, '#0d0a1c'); g.addColorStop(1, '#1b1432');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  // 远处的夜市灯火:一圈模糊的暖点
+  for (let i = 0; i < 26; i++) {
+    const x = hash2(i, 3) * W, y = 40 + hash2(i, 9) * 120, r = 6 + hash2(i, 5) * 10;
+    ctx.fillStyle = `rgba(255,196,110,${0.04 + hash2(i, 7) * 0.05})`;
+    ctx.beginPath(); ctx.arc(x, y, r, 0, 6.283); ctx.fill();
+  }
+}
+function drawField() {
+  // 石砖地面
+  ctx.save();
+  roundRect(FX - 10, FY - 10, FW + 20, FH + 20, 22); ctx.clip();
+  ctx.fillStyle = '#272039'; ctx.fillRect(FX - 10, FY - 10, FW + 20, FH + 20);
+  const T = 70;
+  for (let gx = 0; gx * T < FW + 20; gx++) {
+    for (let gy = 0; gy * T < FH + 20; gy++) {
+      const h = hash2(gx, gy);
+      const x = FX - 10 + gx * T, y = FY - 10 + gy * T;
+      ctx.fillStyle = h > 0.5 ? '#2f2746' : '#2a2340';
+      ctx.fillRect(x + 2, y + 2, T - 4, T - 4);
+      ctx.fillStyle = `rgba(255,235,200,${0.02 + h * 0.02})`;
+      ctx.fillRect(x + 6, y + 6, T - 12, 3);
+    }
+  }
+  ctx.restore();
+  // 石边框
+  ctx.strokeStyle = '#4a4066'; ctx.lineWidth = 12;
+  roundRect(FX - 4, FY - 4, FW + 8, FH + 8, 18); ctx.stroke();
+  ctx.strokeStyle = '#5b4f7c'; ctx.lineWidth = 3;
+  roundRect(FX + 4, FY + 4, FW - 8, FH - 8, 14); ctx.stroke();
+  // 四角暖灯
+  const lamps = [[FX + 42, FY + 42], [FX + FW - 42, FY + 42], [FX + 42, FY + FH - 42], [FX + FW - 42, FY + FH - 42]];
+  for (const [x, y] of lamps) {
+    const rg = ctx.createRadialGradient(x, y, 0, x, y, 110);
+    rg.addColorStop(0, 'rgba(255,196,110,0.20)'); rg.addColorStop(1, 'rgba(255,196,110,0)');
+    ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(x, y, 110, 0, 6.283); ctx.fill();
+    ctx.fillStyle = '#ffe0a8'; ctx.beginPath(); ctx.arc(x, y, 7, 0, 6.283); ctx.fill();
+    ctx.strokeStyle = '#7a5a2c'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x, y + 8); ctx.lineTo(x, y + 26); ctx.stroke();
+  }
+}
+function drawShard(x, y, v, life, max, spin) {
+  const c = SHARD[v];
+  const pulse = 1 + Math.sin((max - life) * 9) * 0.07;
+  const fade = life / max < 0.3 ? 0.45 + 0.55 * Math.abs(Math.sin(life * 14)) : 1; // 快消失时闪
+  ctx.save(); ctx.globalAlpha = fade;
+  const rg = ctx.createRadialGradient(x, y, 0, x, y, 30 * pulse);
+  rg.addColorStop(0, c + '66'); rg.addColorStop(1, c + '00');
+  ctx.fillStyle = rg; ctx.beginPath(); ctx.arc(x, y, 30 * pulse, 0, 6.283); ctx.fill();
+  starPath(x, y, 13 * pulse + v * 2.5, spin);
+  ctx.fillStyle = c; ctx.fill();
+  ctx.strokeStyle = 'rgba(20,14,30,0.7)'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.restore();
+  text(String(v), x, y + 1, 12, '#1a1226');
+}
+function drawPot(i, x, y, score, t) {
+  const c = BODY[i].c, d = BODY[i].d;
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(x, y + 34, 40, 12, 0, 0, 6.283); ctx.fill();
+  // 陶罐
+  ctx.fillStyle = '#6d4a2f';
+  ctx.beginPath();
+  ctx.moveTo(x - 30, y + 30);
+  ctx.quadraticCurveTo(x - 44, y - 6, x - 24, y - 22);
+  ctx.quadraticCurveTo(x, y - 34, x + 24, y - 22);
+  ctx.quadraticCurveTo(x + 44, y - 6, x + 30, y + 30);
+  ctx.quadraticCurveTo(x, y + 44, x - 30, y + 30);
+  ctx.closePath(); ctx.fill();
+  // 家色的罐口环
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.ellipse(x, y - 24, 27, 10, 0, 0, 6.283); ctx.fill();
+  ctx.fillStyle = '#2a1a12';
+  ctx.beginPath(); ctx.ellipse(x, y - 23, 20, 7, 0, 0, 6.283); ctx.fill();
+  // 里面攒下的星星,分数越高越亮
+  const n = Math.min(5, Math.ceil(score / 4));
+  for (let k = 0; k < n; k++) {
+    const a = k * 1.9 + t * 0.8, rr = 10 + (k % 3) * 5;
+    ctx.globalAlpha = 0.55 + 0.35 * Math.sin(t * 3 + k);
+    starPath(x + Math.cos(a) * rr, y - 20 + Math.sin(a) * rr * 0.4, 4.5, a);
+    ctx.fillStyle = SHARD[2]; ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  // 罐身上的家色记号
+  ctx.fillStyle = d; ctx.globalAlpha = 0.9;
+  ctx.beginPath(); ctx.arc(x, y + 6, 8, 0, 6.283); ctx.fill();
+  ctx.globalAlpha = 1;
+  text(BODY[i].n.slice(0, 2), x, y + 6, 10, '#fff4e2');
+}
+function drawTag(x, y, color, label) { // 头顶同色三尖记号
+  ctx.fillStyle = color;
+  ctx.beginPath(); ctx.moveTo(x, y - 7); ctx.lineTo(x + 8, y + 6); ctx.lineTo(x - 8, y + 6); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#241a2c'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#1a1226'; ctx.font = `bold 10px ${FONT}`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+  ctx.fillText(label, x, y + 2);
+}
+function drawPlayer(p, x, y, tag) {
+  const c = BODY[p.i].c, d = BODY[p.i].d;
+  for (const tr of p.trail) { // 冲撞的残影
+    ctx.globalAlpha = tr.t / 0.2 * 0.5;
+    ctx.fillStyle = c; ctx.beginPath(); ctx.arc(tr.x, tr.y, 13, 0, 6.283); ctx.fill();
+    ctx.globalAlpha = tr.t / 0.2 * 0.9;
+    ctx.strokeStyle = c; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(tr.x, tr.y, 13, 0, 6.283); ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
+  ctx.fillStyle = 'rgba(0,0,0,0.35)';
+  ctx.beginPath(); ctx.ellipse(x, y + 19, 16, 6, 0, 0, 6.283); ctx.fill();
+  // 两只小脚
+  const step = Math.sin(p.walk) * 3;
+  for (const s of [-1, 1]) {
+    ctx.fillStyle = d;
+    ctx.beginPath(); ctx.ellipse(x + s * 8, y + 15 + (s < 0 ? step : -step), 6, 4, 0, 0, 6.283); ctx.fill();
+  }
+  // 身子:圆胖小人
+  ctx.fillStyle = c;
+  ctx.beginPath(); ctx.arc(x, y + p.bob, 17, 0, 6.283); ctx.fill();
+  ctx.strokeStyle = '#241a2c'; ctx.lineWidth = 2.5; ctx.stroke();
+  // 围兜
+  ctx.fillStyle = 'rgba(255,246,230,0.85)';
+  ctx.beginPath(); ctx.ellipse(x, y + 8 + p.bob, 9, 7, 0, 0, 6.283); ctx.fill();
+  // 眼睛看着走的方向
+  const fx = p.face[0], fy = p.face[1];
+  for (const s of [-1, 1]) {
+    const ex = x + s * 6 + fx * 3, ey = y - 5 + fy * 3 + p.bob;
+    ctx.fillStyle = '#fff6e6'; ctx.beginPath(); ctx.arc(ex, ey, 4.2, 0, 6.283); ctx.fill();
+    ctx.fillStyle = '#241a2c'; ctx.beginPath(); ctx.arc(ex + fx * 1.4, ey + fy * 1.4, 2.1, 0, 6.283); ctx.fill();
+  }
+  // 眩晕:转圈的小星
+  if (p.stun > 0) {
+    for (let k = 0; k < 3; k++) {
+      const a = p.stun * 9 + k * 2.1;
+      starPath(x + Math.cos(a) * 20, y - 30 + Math.sin(a) * 5, 4, a);
+      ctx.fillStyle = '#ffe9a8'; ctx.fill();
+    }
+  }
+  // 冻结:一层冷蓝壳
+  if (p.freeze > 0) {
+    ctx.strokeStyle = 'rgba(140,220,255,0.9)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(x, y, 23, 0, 6.283); ctx.stroke();
+    ctx.strokeStyle = 'rgba(140,220,255,0.35)'; ctx.lineWidth = 1;
+    for (let k = 0; k < 4; k++) {
+      const a = k * 1.57 + 0.4;
+      ctx.beginPath(); ctx.moveTo(x + Math.cos(a) * 16, y + Math.sin(a) * 16);
+      ctx.lineTo(x + Math.cos(a) * 23, y + Math.sin(a) * 23); ctx.stroke();
+    }
+  }
+  drawTag(x, y - 34 + p.bob, c, tag);
+  // 身上的碎片:头顶一排小星
+  const n = p.carry.length;
+  for (let k = 0; k < n; k++) {
+    const sx = x + (k - (n - 1) / 2) * 13, sy = y - 52 + p.bob;
+    starPath(sx, sy, 6, state.t * 2 + k);
+    ctx.fillStyle = SHARD[p.carry[k].v]; ctx.fill();
+    ctx.strokeStyle = 'rgba(24,16,32,0.6)'; ctx.lineWidth = 1; ctx.stroke();
+  }
+  if (p.cool > 0 && p.cool < tune.dash_cool) { // 冷却小弧
+    ctx.strokeStyle = 'rgba(255,240,216,0.35)'; ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(x, y, 24, -Math.PI / 2, -Math.PI / 2 + 6.283 * (1 - p.cool / tune.dash_cool));
+    ctx.stroke();
+  }
+}
+function drawWorld() {
+  const s = state;
+  drawBackdrop();
+  drawField();
+  for (const sh of s.shards) drawShard(sh.x, sh.y, sh.v, sh.life, sh.max, sh.spin + s.t * (sh.v === 3 ? 3.4 : 1.6));
+  // 罐子与人是按脚下位置排序的:站到罐子后面就被罐子挡住
+  const depth = [
+    { y: POT[0].y, f: () => drawPot(0, POT[0].x, POT[0].y, s.score[0], s.t) },
+    { y: POT[1].y, f: () => drawPot(1, POT[1].x, POT[1].y, s.score[1], s.t) },
+    { y: s.p1.y, f: () => drawPlayer(s.p1, s.p1.x, s.p1.y, '1') },
+    { y: s.p2.y, f: () => drawPlayer(s.p2, s.p2.x, s.p2.y, s.bot ? '机' : '2') },
+  ];
+  depth.sort((a, b) => a.y - b.y);
+  for (const d of depth) d.f();
+  for (const p of s.sparks) {
+    ctx.globalAlpha = Math.max(0, p.t / p.max);
+    ctx.fillStyle = p.c;
+    ctx.beginPath(); ctx.arc(p.x, p.y, 3, 0, 6.283); ctx.fill();
+    ctx.globalAlpha = 1;
+  }
+  for (const f of s.floats) {
+    ctx.globalAlpha = Math.max(0, f.t / f.max);
+    text(f.txt, f.x, f.y, 22, f.c);
+    ctx.globalAlpha = 1;
+  }
+}
+function drawHUD() {
+  const s = state;
+  // 两边比分
+  text(BODY[0].n, 30, 40, 20, BODY[0].c, 'left');
+  text(String(s.score[0]), 30, 76, 40, '#fff3df', 'left');
+  text(BODY[1].n + (s.bot ? '(机器人)' : ''), W - 30, 40, 20, BODY[1].c, 'right');
+  text(String(s.score[1]), W - 30, 76, 40, '#fff3df', 'right');
+  // 中间:局数与计时
+  text(`第 ${s.round} / 3 局`, W / 2, 30, 18, '#c9b8e8');
+  text(`${Math.ceil(s.roundT)}`, W / 2, 72, 44, s.roundT <= 5 ? '#ff9a8a' : '#fff3df');
+  // 局分小点
+  for (let i = 0; i < 2; i++) {
+    for (let k = 0; k < tune.win_rounds; k++) {
+      const x = W / 2 + (i === 0 ? -1 : 1) * (62 + k * 22), y = 104;
+      ctx.beginPath(); ctx.arc(x, y, 7, 0, 6.283);
+      ctx.fillStyle = k < s.wins[i] ? BODY[i].c : 'rgba(255,240,216,0.22)';
+      ctx.fill();
+    }
+  }
+  if (s.roundIntro > 0 && s.leadIdx >= 0) {
+    const msg = `落后的一方先动 · 领先的${s.leadIdx === 0 ? '1P' : '2P'}先冻 ${tune.freeze_secs} 秒`;
+    ctx.globalAlpha = Math.min(1, s.roundIntro);
+    ctx.font = `20px ${FONT}`;
+    const tw = ctx.measureText(msg).width;
+    ctx.fillStyle = 'rgba(10,7,20,0.75)';
+    roundRect(W / 2 - tw / 2 - 14, 158, tw + 28, 32, 10); ctx.fill();
+    text(msg, W / 2, 174, 20, '#8cdcff');
+    ctx.globalAlpha = 1;
+  }
+  if (s.roundOver > 0) {
+    ctx.fillStyle = 'rgba(10,7,20,0.55)'; ctx.fillRect(0, 0, W, H);
+    text(s.roundMsg, W / 2, H / 2 - 18, 44, '#fff3df');
+    text(`局分 ${s.wins[0]} : ${s.wins[1]}`, W / 2, H / 2 + 38, 26, '#c9b8e8');
+  }
+}
+
+// ---- Scenes ---------------------------------------------------------------------------------
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() {
+      drawBackdrop();
+      // 一块深色板,所有图形排在上面
+      ctx.fillStyle = 'rgba(28,22,44,0.92)';
+      roundRect(70, 110, 1140, 520, 24); ctx.fill();
+      ctx.strokeStyle = '#4a4066'; ctx.lineWidth = 3; ctx.stroke();
+      const c = '#f4e8ff';
+      const ghost = (extra) => Object.assign({ i: 0, carry: [], face: [0, -1], walk: 0, bob: 0,
+        stun: 0, freeze: 0, cool: 0, trail: [], x: 0, y: 0 }, extra);
+      // 上排:两个人、三种碎片、两个罐子
+      const cols = [150, 313, 476, 639, 802, 965, 1128];
+      text('头顶同色三角、罐口同色 = 一眼分清谁是谁', 640, 88, 20, '#c9b8e8');
+      drawPlayer(ghost({ i: 0 }), cols[0], 220, '1');
+      text('1P·暖橙', cols[0], 285, 19, c);
+      drawPlayer(ghost({ i: 1, face: [0, 1] }), cols[1], 220, '2');
+      text('2P·青蓝', cols[1], 285, 19, c);
+      drawShard(cols[2], 220, 1, 5, 6, 0.3); text('1 分·青', cols[2], 285, 19, c);
+      drawShard(cols[3], 220, 2, 5, 6, 0.9); text('2 分·黄', cols[3], 285, 19, c);
+      drawShard(cols[4], 220, 3, 3, 4.4, 1.5); text('3 分·粉', cols[4], 285, 19, c);
+      drawPot(0, cols[5], 238, 6, 0.8); text('罐子·1P', cols[5], 285, 19, c);
+      drawPot(1, cols[6], 238, 6, 0.8); text('罐子·2P', cols[6], 285, 19, c);
+      // 下排:带三份、被撞撒一地、冻住、冲刺残影、存进罐子
+      const row2 = [200, 430, 660, 890, 1120];
+      drawPlayer(ghost({ i: 0, carry: [{ v: 1 }, { v: 2 }, { v: 3 }], face: [1, 0] }), row2[0], 470, '1');
+      text('带 3 份·变慢', row2[0], 555, 19, c);
+      drawPlayer(ghost({ i: 1, face: [-1, 0], stun: 0.5 }), row2[1], 470, '2');
+      const ring = [[-46, -8, 1], [44, -22, 2], [-30, 36, 3], [38, 30, 1]];
+      for (const [dx, dy, v] of ring) drawShard(row2[1] + dx, 470 + dy, v, 5, 6, dx * 0.01);
+      text('被撞·撒一地', row2[1], 555, 19, c);
+      drawPlayer(ghost({ i: 1, freeze: 1.2 }), row2[2], 470, '2');
+      text('落后补贴·先冻', row2[2], 555, 19, c);
+      const dash = ghost({ i: 0, face: [1, 0], cool: 0.7,
+        trail: [{ x: row2[3] - 40, y: 470, t: 0.18 }, { x: row2[3] - 22, y: 470, t: 0.1 }] });
+      drawPlayer(dash, row2[3], 470, '1');
+      text('冲刺·残影', row2[3], 555, 19, c);
+      drawPot(0, row2[4], 492, 9, 1.2);
+      text('+6', row2[4], 420, 30, BODY[0].c);
+      for (let k = 0; k < 9; k++) {
+        const a = k * 0.7;
+        ctx.globalAlpha = 0.85; ctx.fillStyle = k % 2 ? BODY[0].c : SHARD[2];
+        ctx.beginPath(); ctx.arc(row2[4] + Math.cos(a) * (34 + k * 3), 452 + Math.sin(a) * 16, 3, 0, 6.283); ctx.fill();
+        ctx.globalAlpha = 1;
+      }
+      text('存进罐子', row2[4], 555, 19, c);
+    },
+  },
+  title: {
+    update() {
+      const btn = { x: W / 2 - 170, y: 580, w: 340, h: 60 };
+      const hover = inRect(tp.x, tp.y, btn);
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      drawBackdrop(); drawField();
+      ctx.fillStyle = 'rgba(10,7,20,0.55)'; ctx.fillRect(0, 0, W, H);
+      text(TITLE, W / 2, 150, 78, '#fff3df');
+      text('抢到手还不算,带回自家罐子才计分', W / 2, 222, 26, '#d9c8f4');
+      CONTROLS.forEach((cn, i) => text(cn, W / 2, 296 + i * 36, 24, '#c9b8e8'));
+      text('碎片 1/2/3 分 · 身上最多带 3 份,带得越多跑得越慢', W / 2, 424, 21, '#a9b8d8');
+      text('按 E / L 冲撞:撞到对手,他身上的全撒一地', W / 2, 458, 21, '#a9b8d8');
+      text('30 秒一局 · 三局两胜 · 落后的一方下一局先动', W / 2, 492, 21, '#a9b8d8');
+      let rec = null; try { rec = JSON.parse(localStorage.getItem('clash_record') || 'null'); } catch (e) {}
+      if (rec && (rec.w[0] || rec.w[1])) text(`本地战绩 1P ${rec.w[0]} 胜 · 2P ${rec.w[1]} 胜 · 最长连胜 ${rec.streak}`, W / 2, 540, 20, '#8fa8c8');
+      const btn = { x: W / 2 - 170, y: 580, w: 340, h: 60 };
+      drawButton(btn, '开打对决  [Enter / 空格]', '#e07a3a', '#f29456', '#fff8ee', inRect(tp.x, tp.y, btn));
+    },
+  },
+  play: {
+    update(dt) {
+      if (pressed('KeyP') || pressed('Escape')) { scene = 'pause'; return; }
+      updatePlay(dt);
+    },
+    draw() { drawWorld(); drawHUD(); },
+  },
+  pause: {
+    update() { if (pressed('KeyP') || pressed('Escape')) scene = 'play'; },
+    draw() { drawWorld(); drawHUD(); ctx.fillStyle = 'rgba(10,7,20,0.6)'; ctx.fillRect(0, 0, W, H); text('暂停', W / 2, H / 2, 52, '#fff3df'); },
+  },
+  over: {
+    update() {
+      const btn = { x: W / 2 - 150, y: H / 2 + 12, w: 300, h: 56 };
+      const hover = inRect(tp.x, tp.y, btn);
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('KeyR') || pressed('Enter') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      drawWorld(); text(state.gained || '结束', W / 2, H / 2 - 34, 48, '#fff3df');
+      const btn = { x: W / 2 - 150, y: H / 2 + 12, w: 300, h: 56 };
+      drawButton(btn, '重来  [R / Enter]', '#e07a3a', '#f29456', '#fff8ee', inRect(tp.x, tp.y, btn));
+    },
+  },
+  results: {
+    update() {
+      const btn = { x: W / 2 - 170, y: 580, w: 340, h: 60 };
+      const hover = inRect(tp.x, tp.y, btn);
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('KeyR') || pressed('Space') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      drawWorld();
+      ctx.fillStyle = 'rgba(10,7,20,0.66)'; ctx.fillRect(0, 0, W, H);
+      const w = state.winner;
+      text(state.gained, W / 2, 200, 76, w < 0 ? '#c9b8e8' : BODY[w].c);
+      text(`局分  ${state.wins[0]} : ${state.wins[1]}`, W / 2, 292, 34, '#fff3df');
+      text(`总得分  1P ${state.total[0]} · 2P ${state.total[1]}`, W / 2, 342, 26, '#d9c8f4');
+      if (w >= 0) {
+        // 胜者的一圈星
+        for (let k = 0; k < 26; k++) {
+          const a = k / 26 * 6.283 + state.t * 0.35, rr = 108 + (k % 3) * 16;
+          starPath(W / 2 + Math.cos(a) * rr, 430 + Math.sin(a) * rr * 0.42, 6.5, a);
+          ctx.globalAlpha = 0.85; ctx.fillStyle = SHARD[(k % 3) + 1]; ctx.fill(); ctx.globalAlpha = 1;
+        }
+      }
+      let rec = null; try { rec = JSON.parse(localStorage.getItem('clash_record') || 'null'); } catch (e) {}
+      if (rec) text(`本地战绩 1P ${rec.w[0]} 胜 · 2P ${rec.w[1]} 胜 · 最长连胜 ${rec.streak}`, W / 2, 536, 20, '#8fa8c8');
+      const btn = { x: W / 2 - 170, y: 580, w: 340, h: 60 };
+      drawButton(btn, '再来一场  [Enter / R]', '#e07a3a', '#f29456', '#fff8ee', inRect(tp.x, tp.y, btn));
+    },
+  },
+};
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1; // ALPHA: how far the frame is between the last two steps
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now; // a stall never fast-forwards the game
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP; // draw between steps, so the view never judders
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+// A headless browser on a time budget runs timers but almost no animation frames: a timer
+// ticks when no frame has come for 100 ms on a visible page; a hidden tab stays paused.
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive (?manual=1 stops the loop; players never see it) ----
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; }, // the loop steps; a check empties it
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }
+</script>
+</body>
+</html>

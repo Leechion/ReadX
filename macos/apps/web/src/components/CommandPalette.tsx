@@ -21,6 +21,7 @@ export function CommandPalette({
   onScreen,
   onImport,
   onSettings,
+  onOpenOnboarding,
   onThemeChange,
 }: {
   open: boolean;
@@ -30,6 +31,7 @@ export function CommandPalette({
   onScreen: (screen: ScreenId) => void;
   onImport: () => void;
   onSettings: () => void;
+  onOpenOnboarding?: () => void;
   onThemeChange: (next: ThemeChoice) => void;
 }) {
   const [query, setQuery] = useState('');
@@ -61,6 +63,7 @@ export function CommandPalette({
     list.push(
       { id: 'cmd-import', group: '操作', label: '导入 PDF / EPUB 论文', onSelect: () => { onImport(); onClose(); } },
       { id: 'cmd-settings', group: '操作', label: '打开设置（AI / 同步 / 外观）', onSelect: () => { onSettings(); onClose(); } },
+      ...(onOpenOnboarding ? [{ id: 'cmd-onboarding', group: '操作', label: '打开新手配置引导', onSelect: () => { onOpenOnboarding(); onClose(); } }] : []),
       { id: 'theme-light', group: '主题', label: '切换主题：浅色', onSelect: () => { onThemeChange('light'); onClose(); } },
       { id: 'theme-dark', group: '主题', label: '切换主题：深色', onSelect: () => { onThemeChange('dark'); onClose(); } },
       { id: 'theme-paper', group: '主题', label: '切换主题：纸张', onSelect: () => { onThemeChange('paper'); onClose(); } },
@@ -83,7 +86,7 @@ export function CommandPalette({
 
     if (!q) return list;
     return list.filter((item) => `${item.group} ${item.label} ${item.meta ?? ''}`.toLowerCase().includes(q));
-  }, [documents, onClose, onImport, onOpenDocument, onScreen, onSettings, onThemeChange, query]);
+  }, [documents, onClose, onImport, onOpenDocument, onOpenOnboarding, onScreen, onSettings, onThemeChange, query]);
 
   useEffect(() => {
     setCursor(0);

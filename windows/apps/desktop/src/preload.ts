@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import type { DesktopLauncherBridge, DesktopSyncBridge, DesktopUpdateBridge, DesktopUpdateStatus } from '@cbct/shared';
+import type { DesktopLauncherBridge, DesktopPetBridge, DesktopSyncBridge, DesktopUpdateBridge, DesktopUpdateStatus, PetAppState, PetHostEvent, PetNavigateTarget, PetSettings } from '@cbct/shared';
 
 /**
  * 唯一的渲染进程入口凭据通道：主进程用 additionalArguments 传进来，
@@ -50,6 +50,8 @@ const launcherBridge: DesktopLauncherBridge = {
   publish: (catalog) => ipcRenderer.send('readx-launcher:catalog', catalog),
   activate: (target) => ipcRenderer.send('readx-launcher:activate', target),
   dismiss: () => ipcRenderer.send('readx-launcher:dismiss'),
+  getEnabled: () => ipcRenderer.invoke('readx-launcher:get-enabled') as Promise<boolean>,
+  setEnabled: (enabled) => ipcRenderer.invoke('readx-launcher:set-enabled', enabled) as Promise<boolean>,
   onEvent: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, value: Parameters<typeof callback>[0]) => callback(value);
     ipcRenderer.on('readx-launcher:event', listener);
@@ -66,3 +68,36 @@ const launcherBridge: DesktopLauncherBridge = {
   },
 };
 contextBridge.exposeInMainWorld('__READX_LAUNCHER__', launcherBridge);
+
+const petBridge: DesktopPetBridge = {
+  ready: () => ipcRenderer.send('readx-pet:ready'),
+  getSettings: () => ipcRenderer.invoke('readx-pet:get-settings') as Promise<PetSettings>,
+  updateSettings: (patch) => ipcRenderer.invoke('readx-pet:update-settings', patch) as Promise<PetSettings>,
+  moveTo: (x, y) => ipcRenderer.invoke('readx-pet:move-to', x, y),
+  setInteractive: (interactive) => ipcRenderer.send('readx-pet:set-interactive', interactive),
+  showContextMenu: () => ipcRenderer.send('readx-pet:show-context-menu'),
+  readClipboard: () => ipcRenderer.invoke('readx-pet:read-clipboard') as Promise<string>,
+  navigateMain: (target) => ipcRenderer.send('readx-pet:navigate-main', target),
+  notifyLibraryUpdated: () => ipcRenderer.send('readx-pet:library-updated'),
+  publishAppState: (state: PetAppState) => ipcRenderer.send('readx-pet:publish-app-state', state),
+  onHostEvent: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: PetHostEvent) => callback(value);
+    ipcRenderer.on('readx-pet:host-event', listener);
+    return () => ipcRenderer.removeListener('readx-pet:host-event', listener);
+  },
+  onNavigateMain: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: PetNavigateTarget) => callback(value);
+    ipcRenderer.on('readx-pet:navigate-main', listener);
+    return () => ipcRenderer.removeListener('readx-pet:navigate-main', listener);
+  },
+  onLibraryUpdated: (callback) => {
+    ipcRenderer.on('readx-pet:library-updated', callback);
+    return () => ipcRenderer.removeListener('readx-pet:library-updated', callback);
+  },
+  onSettingsChanged: (callback) => {
+    const listener = (_event: Electron.IpcRendererEvent, value: PetSettings) => callback(value);
+    ipcRenderer.on('readx-pet:settings-changed', listener);
+    return () => ipcRenderer.removeListener('readx-pet:settings-changed', listener);
+  },
+};
+contextBridge.exposeInMainWorld('__READX_PET__', petBridge);

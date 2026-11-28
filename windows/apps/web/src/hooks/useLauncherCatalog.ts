@@ -51,7 +51,7 @@ export function useLauncherCatalog({ current, documents, workbench, onNavigate, 
         slack.status === 'fulfilled'
           ? { workspace: 'slack', projects: [
             ...[...slack.value].sort((a, b) => b.openedAt - a.openedAt).map(item => ({ id: item.id, title: item.title, subtitle: item.kind === 'comic' ? '漫画' : '小说' })),
-            { id: 'section:game', title: '2048', subtitle: '休息一下' },
+            { id: 'section:game', title: '小游戏', subtitle: '2048 等 10 款 · 休息一下' },
             { id: 'section:find', title: '找点书看', subtitle: '发现新书' },
           ] }
           : { workspace: 'slack', projects: [], error: '摸鱼文库读取失败，下次呼出时重试' },

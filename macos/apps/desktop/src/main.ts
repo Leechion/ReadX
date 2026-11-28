@@ -40,6 +40,7 @@ interface ServerHandle {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let launcher: DesktopLauncher | null = null;
+let launcherEnabled = true;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let server: ServerHandle | null = null;
 let allowedOrigin = '';
@@ -82,11 +83,24 @@ if (!app.requestSingleInstanceLock()) {
 
 async function bootstrap(): Promise<void> {
   await app.whenReady();
+  launcherEnabled = readLauncherEnabled();
   setupUpdater();
   setupBackup();
   ipcMain.handle('readx-capture:enable', event => {
     if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口启用采集');
     return app.isPackaged ? app.setAsDefaultProtocolClient('readx-capture') : app.setAsDefaultProtocolClient('readx-capture', process.execPath, [app.getAppPath()]);
+  });
+  ipcMain.handle('readx-launcher:get-enabled', event => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口读取轮盘设置');
+    return launcherEnabled;
+  });
+  ipcMain.handle('readx-launcher:set-enabled', (event, next: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口修改轮盘设置');
+    launcherEnabled = Boolean(next);
+    writeLauncherEnabled(launcherEnabled);
+    launcher?.setEnabled(launcherEnabled);
+    refreshTrayMenu();
+    return launcherEnabled;
   });
   const resultArg = process.argv.find(arg => arg.startsWith('--readx-backup-result='));
   if (resultArg) {
@@ -207,25 +221,53 @@ function restoreMainWindow(): void {
   }
 }
 
-function setupLauncher(): void {
-  if (!server) return;
-  launcher = new DesktopLauncher({
-    url: startUrl(server), preload: path.join(__dirname, 'preload.js'),
-    apiBase: allowedOrigin, token: server.info.token,
-    main: () => mainWindow, restore: restoreMainWindow, log: logLifecycle,
-  });
-  tray = new Tray(nativeImage.createFromPath(APP_ICON).resize({ width: 18, height: 18 }));
-  tray.setToolTip('ReadX · 按住 Alt 呼出轮盘');
+function launcherSettingsFile(): string {
+  return path.join(app.getPath('userData'), 'launcher-settings.json');
+}
+
+function readLauncherEnabled(): boolean {
+  try {
+    const raw = fs.readFileSync(launcherSettingsFile(), 'utf8');
+    const parsed = JSON.parse(raw) as { enabled?: unknown };
+    return typeof parsed.enabled === 'boolean' ? parsed.enabled : true;
+  } catch {
+    return true;
+  }
+}
+
+function writeLauncherEnabled(enabled: boolean): void {
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(launcherSettingsFile(), JSON.stringify({ enabled }), 'utf8');
+  } catch (error) {
+    logLifecycle(`保存轮盘开关失败：${describe(error)}`);
+  }
+}
+
+function refreshTrayMenu(): void {
+  if (!tray) return;
+  tray.setToolTip(launcherEnabled ? 'ReadX · 按住 Alt 呼出轮盘' : 'ReadX');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 ReadX', click: restoreMainWindow },
-    { label: '打开快速轮盘', click: () => launcher?.show() },
-    ...(process.platform === 'darwin' ? [{ label: '启用 Alt 轮盘（辅助功能权限）', click: () => {
+    { label: launcherEnabled ? '打开快速轮盘' : '打开快速轮盘（已关闭）', enabled: launcherEnabled, click: () => launcher?.show() },
+    ...(process.platform === 'darwin' ? [{ label: '启用 Alt 轮盘（辅助功能权限）', enabled: launcherEnabled, click: () => {
       systemPreferences.isTrustedAccessibilityClient(true);
       launcher?.enableHook();
     } }] : []),
     { type: 'separator' },
     { label: '退出 ReadX', click: () => app.quit() },
   ]));
+}
+
+function setupLauncher(): void {
+  if (!server) return;
+  launcher = new DesktopLauncher({
+    url: startUrl(server), preload: path.join(__dirname, 'preload.js'),
+    apiBase: allowedOrigin, token: server.info.token, enabled: launcherEnabled,
+    main: () => mainWindow, restore: restoreMainWindow, log: logLifecycle,
+  });
+  tray = new Tray(nativeImage.createFromPath(APP_ICON).resize({ width: 18, height: 18 }));
+  refreshTrayMenu();
   tray.on('double-click', restoreMainWindow);
   if (process.platform !== 'darwin') tray.on('click', restoreMainWindow);
 }

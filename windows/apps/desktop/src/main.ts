@@ -13,6 +13,7 @@ import { downloadVerifiedUpdate } from './update-download';
 import { MacInstallerUpdater } from './mac-installer-update';
 import { createUpdateFetcher } from './update-fetch';
 import { DesktopLauncher } from './launcher';
+import { DesktopPet } from './pet';
 import { verifyBackup } from './backup';
 import { parseBrowserCapture } from './browser-capture';
 
@@ -40,6 +41,8 @@ interface ServerHandle {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let launcher: DesktopLauncher | null = null;
+let pet: DesktopPet | null = null;
+let launcherEnabled = true;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let server: ServerHandle | null = null;
 let allowedOrigin = '';
@@ -82,11 +85,24 @@ if (!app.requestSingleInstanceLock()) {
 
 async function bootstrap(): Promise<void> {
   await app.whenReady();
+  launcherEnabled = readLauncherEnabled();
   setupUpdater();
   setupBackup();
   ipcMain.handle('readx-capture:enable', event => {
     if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口启用采集');
     return app.isPackaged ? app.setAsDefaultProtocolClient('readx-capture') : app.setAsDefaultProtocolClient('readx-capture', process.execPath, [app.getAppPath()]);
+  });
+  ipcMain.handle('readx-launcher:get-enabled', event => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口读取轮盘设置');
+    return launcherEnabled;
+  });
+  ipcMain.handle('readx-launcher:set-enabled', (event, next: unknown) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口修改轮盘设置');
+    launcherEnabled = Boolean(next);
+    writeLauncherEnabled(launcherEnabled);
+    launcher?.setEnabled(launcherEnabled);
+    refreshTrayMenu();
+    return launcherEnabled;
   });
   const resultArg = process.argv.find(arg => arg.startsWith('--readx-backup-result='));
   if (resultArg) {
@@ -176,6 +192,8 @@ async function bootstrap(): Promise<void> {
   });
   app.on('before-quit', (event) => {
     stopping = true;
+    pet?.dispose();
+    pet = null;
     launcher?.dispose();
     launcher = null;
     tray?.destroy();
@@ -195,6 +213,7 @@ async function bootstrap(): Promise<void> {
 function restoreMainWindow(): void {
   if (!mainWindow && server) createWindow();
   if (!mainWindow) return;
+  if (process.platform !== 'darwin') mainWindow.setSkipTaskbar(false);
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   if (process.platform === 'win32') {
@@ -207,25 +226,87 @@ function restoreMainWindow(): void {
   }
 }
 
-function setupLauncher(): void {
-  if (!server) return;
-  launcher = new DesktopLauncher({
-    url: startUrl(server), preload: path.join(__dirname, 'preload.js'),
-    apiBase: allowedOrigin, token: server.info.token,
-    main: () => mainWindow, restore: restoreMainWindow, log: logLifecycle,
-  });
-  tray = new Tray(nativeImage.createFromPath(APP_ICON).resize({ width: 18, height: 18 }));
-  tray.setToolTip('ReadX · 按住 Alt 呼出轮盘');
+function launcherSettingsFile(): string {
+  return path.join(app.getPath('userData'), 'launcher-settings.json');
+}
+
+function readLauncherEnabled(): boolean {
+  try {
+    const raw = fs.readFileSync(launcherSettingsFile(), 'utf8');
+    const parsed = JSON.parse(raw) as { enabled?: unknown };
+    return typeof parsed.enabled === 'boolean' ? parsed.enabled : true;
+  } catch {
+    return true;
+  }
+}
+
+function writeLauncherEnabled(enabled: boolean): void {
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(launcherSettingsFile(), JSON.stringify({ enabled }), 'utf8');
+  } catch (error) {
+    logLifecycle(`保存轮盘开关失败：${describe(error)}`);
+  }
+}
+
+function refreshTrayMenu(): void {
+  if (!tray) return;
+  const petSettings = pet?.getSettings();
+  tray.setToolTip(launcherEnabled ? 'ReadX · 按住 Alt 呼出轮盘' : 'ReadX');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 ReadX', click: restoreMainWindow },
-    { label: '打开快速轮盘', click: () => launcher?.show() },
-    ...(process.platform === 'darwin' ? [{ label: '启用 Alt 轮盘（辅助功能权限）', click: () => {
+    { label: launcherEnabled ? '打开快速轮盘' : '打开快速轮盘（已关闭）', enabled: launcherEnabled, click: () => launcher?.show() },
+    { type: 'separator' },
+    {
+      label: '显示桌面伴侣',
+      type: 'checkbox',
+      checked: petSettings?.enabled ?? true,
+      click: (item) => {
+        pet?.setEnabled(item.checked);
+        refreshTrayMenu();
+      },
+    },
+    {
+      label: '锁定伴侣穿透（Alt 可拖动）',
+      type: 'checkbox',
+      enabled: petSettings?.enabled ?? true,
+      checked: petSettings?.clickThrough ?? false,
+      click: (item) => {
+        pet?.updateSettings({ clickThrough: item.checked });
+        refreshTrayMenu();
+      },
+    },
+    ...(process.platform === 'darwin' ? [{ label: '启用 Alt 轮盘（辅助功能权限）', enabled: launcherEnabled, click: () => {
       systemPreferences.isTrustedAccessibilityClient(true);
       launcher?.enableHook();
+      pet?.enableHook();
     } }] : []),
     { type: 'separator' },
     { label: '退出 ReadX', click: () => app.quit() },
   ]));
+}
+
+function setupLauncher(): void {
+  if (!server) return;
+  launcher = new DesktopLauncher({
+    url: startUrl(server), preload: path.join(__dirname, 'preload.js'),
+    apiBase: allowedOrigin, token: server.info.token, enabled: launcherEnabled,
+    main: () => mainWindow, restore: restoreMainWindow, log: logLifecycle,
+  });
+  pet = new DesktopPet({
+    url: startUrl(server),
+    preload: path.join(__dirname, 'preload.js'),
+    apiBase: allowedOrigin,
+    token: server.info.token,
+    settingsFile: path.join(app.getPath('userData'), 'pet-settings.json'),
+    main: () => mainWindow,
+    restore: restoreMainWindow,
+    showLauncher: () => launcher?.show(),
+    onSettingsChange: () => refreshTrayMenu(),
+    log: logLifecycle,
+  });
+  tray = new Tray(nativeImage.createFromPath(APP_ICON).resize({ width: 18, height: 18 }));
+  refreshTrayMenu();
   tray.on('double-click', restoreMainWindow);
   if (process.platform !== 'darwin') tray.on('click', restoreMainWindow);
 }
@@ -653,7 +734,8 @@ function createWindow(): void {
     saveWindowState(mainWindow);
     if (!stopping && !stopRequested) {
       event.preventDefault();
-      mainWindow?.minimize();
+      if (process.platform !== 'darwin') mainWindow?.setSkipTaskbar(true);
+      mainWindow?.hide();
     }
   });
   mainWindow.on('closed', () => {
@@ -708,7 +790,9 @@ function scheduleWindowStateSave(window: BrowserWindow | null): void {
 function saveWindowState(window: BrowserWindow | null): void {
   if (!window || window.isDestroyed()) return;
   try {
-    const bounds = window.isMaximized() || window.isMinimized() ? window.getNormalBounds() : window.getBounds();
+    const bounds = window.isMaximized() || window.isMinimized() || !window.isVisible()
+      ? window.getNormalBounds()
+      : window.getBounds();
     const value: SavedWindowState = {
       bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
       maximized: window.isMaximized(),

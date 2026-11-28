@@ -50,6 +50,8 @@ const launcherBridge: DesktopLauncherBridge = {
   publish: (catalog) => ipcRenderer.send('readx-launcher:catalog', catalog),
   activate: (target) => ipcRenderer.send('readx-launcher:activate', target),
   dismiss: () => ipcRenderer.send('readx-launcher:dismiss'),
+  getEnabled: () => ipcRenderer.invoke('readx-launcher:get-enabled') as Promise<boolean>,
+  setEnabled: (enabled) => ipcRenderer.invoke('readx-launcher:set-enabled', enabled) as Promise<boolean>,
   onEvent: (callback) => {
     const listener = (_event: Electron.IpcRendererEvent, value: Parameters<typeof callback>[0]) => callback(value);
     ipcRenderer.on('readx-launcher:event', listener);

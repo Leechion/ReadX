@@ -12,7 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "start": "electron .",
     "package:windows": "electron-builder --win nsis --x64 --publish never",
-    "test": "npm run build && node --experimental-sqlite --test test/update-status.test.cjs test/icon-resources.test.cjs test/launcher.test.cjs test/backup.test.cjs"
+    "test": "npm run build && node --experimental-sqlite --test test/update-status.test.cjs test/icon-resources.test.cjs test/launcher.test.cjs test/backup.test.cjs test/pet.test.cjs"
   },
   "devDependencies": {
     "@cbct/shared": "0.0.0",

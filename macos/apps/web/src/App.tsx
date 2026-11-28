@@ -12,7 +12,9 @@ import { useTheme } from './hooks/useTheme';
 import { useWorkspace } from './hooks/useWorkspace';
 import { ActivityRail, RAIL_ITEMS, type ScreenId } from './components/ActivityRail';
 import { CommandPalette } from './components/CommandPalette';
+import { OnboardingGuide } from './components/OnboardingGuide';
 import { Icon } from './components/ui/Icon';
+import type { SettingsTab } from './components/AISettingsDialog';
 const ImportDialog = lazy(() => import('./components/ImportDialog').then((module) => ({ default: module.ImportDialog })));
 const RetranslateDialog = lazy(() => import('./components/RetranslateDialog').then((module) => ({ default: module.RetranslateDialog })));
 const DocumentJobDialog = lazy(() => import('./components/DocumentJobDialog').then((module) => ({ default: module.DocumentJobDialog })));
@@ -23,7 +25,7 @@ const LatexStudio = lazy(() => import('./components/latex/LatexStudio').then((mo
 const SlackWorkspace = lazy(() => import('./components/slack/SlackWorkspace').then((module) => ({ default: module.SlackWorkspace })));
 import { ModePendant, type WorkspaceMode } from './components/slack/ModePendant';
 import './components/slack/slack.css';
-import { STORAGE_KEYS } from './lib/storage';
+import { readString, STORAGE_KEYS, writeString } from './lib/storage';
 import { ResearchWorkbench } from './components/ResearchWorkbench';
 import { FocusPendant } from './components/research/FocusPendant';
 import { useResearchWorkbench } from './hooks/useResearchWorkbench';
@@ -83,11 +85,13 @@ export default function App() {
   const dragDepth = useRef(0);
   const [retranslateDocument, setRetranslateDocument] = useState<DocumentSummary | null>(null);
   const [processingDocument, setProcessingDocument] = useState<DocumentSummary | null>(null);
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsTarget, setSettingsTarget] = useState<{ tab: SettingsTab; focusSection?: 'ocr' } | null>(null);
+  const [onboardingReopenNonce, setOnboardingReopenNonce] = useState(0);
   const [commandOpen, setCommandOpen] = useState(false);
   const [activeJobCount, setActiveJobCount] = useState(0);
   const [launcherRequest, setLauncherRequest] = useState<LauncherOpenRequest | null>(null);
   const [launcherError, setLauncherError] = useState('');
+  const [launcherEnabled, setLauncherEnabled] = useState<boolean>(() => readString(STORAGE_KEYS.launcherWheelEnabled, '1') !== '0');
   const [libraryView, setLibraryView] = useState<'all' | 'favorite' | 'trash' | 'shelves'>('all');
   const [mode, setMode] = useState<WorkspaceMode>(readWorkspaceMode);
   const [curtain, setCurtain] = useState<{ target: WorkspaceMode; phase: 'closing' | 'opening' } | null>(null);
@@ -351,10 +355,37 @@ export default function App() {
       } catch (error) { setLauncherError(error instanceof Error ? error.message : '打开工作区失败'); }
     })();
   }, [openDocument, researchWorkbench.setData]);
+  useEffect(() => {
+    if (popupTarget) return;
+    const bridge = window.__READX_LAUNCHER__;
+    if (!bridge?.getEnabled) return;
+    let disposed = false;
+    void bridge.getEnabled().then((enabled) => {
+      if (disposed) return;
+      setLauncherEnabled(enabled);
+      writeString(STORAGE_KEYS.launcherWheelEnabled, enabled ? '1' : '0');
+    }).catch(() => {});
+    return () => { disposed = true; };
+  }, [popupTarget]);
+
+  const toggleLauncherEnabled = useCallback((next: boolean) => {
+    setLauncherEnabled(next);
+    writeString(STORAGE_KEYS.launcherWheelEnabled, next ? '1' : '0');
+    const bridge = window.__READX_LAUNCHER__;
+    if (bridge?.setEnabled) {
+      void bridge.setEnabled(next).then((confirmed) => {
+        setLauncherEnabled(confirmed);
+        writeString(STORAGE_KEYS.launcherWheelEnabled, confirmed ? '1' : '0');
+      }).catch((error) => {
+        setLauncherError(error instanceof Error ? error.message : '更新轮盘设置失败');
+      });
+    }
+  }, []);
+
   useLauncherCatalog({
     current: mode === 'slack' ? 'slack' : (['library', 'research', 'presentation', 'latex'].includes(screen) ? screen as LauncherWorkspace : 'library'),
     documents: launcherDocuments, workbench: researchWorkbench.data, onNavigate: navigateFromLauncher,
-    enabled: !popupTarget,
+    enabled: !popupTarget && launcherEnabled,
   });
 
   return (
@@ -405,7 +436,7 @@ export default function App() {
               screen={screen}
               onScreen={setScreen}
               onImport={() => setImportFiles([])}
-              onSettings={() => setSettingsOpen(true)}
+              onSettings={() => setSettingsTarget({ tab: 'ai' })}
               onReload={reload}
               onToggleCommandPalette={() => setCommandOpen(true)}
               theme={theme.choice}
@@ -434,7 +465,7 @@ export default function App() {
                   onOpenProcessing={setProcessingDocument}
                   onOpenImport={() => setImportFiles([])}
                   onOpenAcademic={() => setScreen('research')}
-                  onOpenSettings={() => setSettingsOpen(true)}
+                  onOpenSettings={() => setSettingsTarget({ tab: 'ai' })}
                   meta={libraryMeta}
                   view={libraryView}
                   onViewChange={(view) => {
@@ -569,10 +600,12 @@ export default function App() {
             />
           </Suspense>
         ) : null}
-        {settingsOpen && (
+        {settingsTarget && (
           <Suspense fallback={null}>
             <AISettingsDialog
-              onClose={() => setSettingsOpen(false)}
+              initialTab={settingsTarget.tab}
+              focusSection={settingsTarget.focusSection}
+              onClose={() => setSettingsTarget(null)}
               appearance={{
                 theme: theme.choice,
                 onThemeChange: theme.setTheme,
@@ -580,6 +613,10 @@ export default function App() {
                 readingFont: theme.readingFont,
                 readingSize: theme.readingSize,
                 onAppearanceChange: theme.setAppearance,
+              }}
+              launcherWheel={{
+                enabled: launcherEnabled,
+                onToggle: toggleLauncherEnabled,
               }}
             />
           </Suspense>
@@ -592,8 +629,26 @@ export default function App() {
             onOpenDocument={openDocument}
             onScreen={setScreen}
             onImport={() => setImportFiles([])}
-            onSettings={() => setSettingsOpen(true)}
+            onSettings={() => setSettingsTarget({ tab: 'ai' })}
+            onOpenOnboarding={() => {
+              if (screen === 'reader' || screen === 'latex') setScreen('library');
+              setOnboardingReopenNonce((n) => n + 1);
+            }}
             onThemeChange={theme.setTheme}
+          />
+        ) : null}
+        {!popupTarget && phase.kind === 'ready' ? (
+          <OnboardingGuide
+            documentCount={launcherDocuments.length}
+            hidden={
+              mode !== 'research'
+              || screen === 'reader'
+              || screen === 'latex'
+              || Boolean(settingsTarget || commandOpen || importFiles !== null || retranslateDocument || processingDocument || dragHover)
+            }
+            reopenNonce={onboardingReopenNonce}
+            onOpenSettings={(tab, focusSection) => setSettingsTarget({ tab, focusSection })}
+            onOpenImport={() => setImportFiles([])}
           />
         ) : null}
       </Activity>

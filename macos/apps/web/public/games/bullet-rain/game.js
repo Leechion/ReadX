@@ -1,0 +1,520 @@
+'use strict';
+// 《弹雨》— 深夜海空上的纵版弹幕:判定点比机身小,四种敌机四种弹道,60 秒巨舰收梢。
+// 走位/开火/弹道全部走固定步进;敌弹朱红白芯,威胁永远最显眼。
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value });
+const STEP = 1 / 60;
+const W = 1280, H = 720;
+const PIXEL = false;
+const FONT = 'sans-serif';
+const TITLE = '弹雨';
+const CONTROLS = ['方向键 / WASD :走位(自动开火)', '空格 / X :炸弹清屏', 'P :暂停 · M :静音'];
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 };
+const CHEAP = params.get('render') === 'cheap';
+let seed;
+function rng() {
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = [];
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() {
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center') {
+  ctx.fillStyle = c; ctx.font = `${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+
+// ---- 输入 ----------------------------------------------------------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code);
+const tp = { x: -1, y: -1, click: false };
+function toLogical(e) {
+  const r = canvas.getBoundingClientRect();
+  return [(e.clientX - r.left) / r.width * W, (e.clientY - r.top) / r.height * H];
+}
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('pointermove', e => { const [x, y] = toLogical(e); tp.x = x; tp.y = y; });
+addEventListener('pointerdown', e => { startAudio(); const [x, y] = toLogical(e); tp.x = x; tp.y = y; tp.click = true; });
+addEventListener('blur', () => down.clear());
+function drawButton(btn, label, fill, hoverFill, textCol, hover) {
+  const dy = hover ? -2 : 0;
+  ctx.save();
+  ctx.shadowColor = hover ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.35)';
+  ctx.shadowBlur = hover ? 18 : 10;
+  ctx.beginPath();
+  if (ctx.roundRect) ctx.roundRect(btn.x, btn.y + dy, btn.w, btn.h, 14);
+  else ctx.rect(btn.x, btn.y + dy, btn.w, btn.h);
+  ctx.fillStyle = hover ? hoverFill : fill;
+  ctx.fill();
+  ctx.restore();
+  text(label, btn.x + btn.w / 2, btn.y + dy + btn.h / 2, 22, textCol);
+}
+function inRect(x, y, r) {
+  return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h;
+}
+
+// ---- Audio ----------------------------------------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)();
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted));
+function tone(freq, dur, type = 'square', vol = 0.3, delay = 0) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime + delay, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- 敌机档案:四种弹道四种走法 ----------------------------------------------------------
+// diver 蜂群:直冲俯冲,不开火        r=16 hp1 分10
+// gunship 炮舰:降下悬停,瞄准弹      r=34 hp5 分40
+// weaver 环织:大幅横摆,三向扇       r=22 hp3 分30
+// elite 巨舰:压场,旋转弹环          r=80 hp=elite_hp 分500
+function spawnFoe(kind) {
+  const s = state;
+  const f = { kind, t: 0, x: 0, y: -60, hp: 1, r: 16, fireT: rng() * 0.8, dead: false };
+  if (kind === 'diver') {
+    f.x = 80 + rng() * 1120; f.x0 = f.x; f.hp = 1; f.vy = tune.dive_v;
+  } else if (kind === 'gunship') {
+    f.x = 200 + rng() * 880; f.y = -60; f.ty = 150 + rng() * 60; f.hp = 5; f.r = 34;
+  } else if (kind === 'weaver') {
+    f.x0 = 320 + rng() * 640; f.x = f.x0; f.hp = 3; f.r = 22; f.vy = 110;
+  } else { // elite
+    f.x = W / 2; f.y = -110; f.hp = tune.elite_hp; f.r = 80; f.ringA = 0; f.fireT = 1.2;
+  }
+  s.foes.push(f);
+  events.push({ e: 'spawn', kind });
+}
+
+// ---- 状态 -----------------------------------------------------------------------------
+let scene, state, stars = [];
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  let best = 0;
+  try { best = Number(localStorage.getItem('rain_best')) || 0; } catch (e) {}
+  state = {
+    t: 0, px: W / 2, py: 600, lives: tune.lives, bombs: tune.bombs,
+    score: 0, best, kills: 0, fireT: 0, invulnT: 0,
+    foes: [], pbul: [], ebul: [], parts: [],
+    nextDive: 0.5, nextWeave: 35.5, g1: false, g2: false, g3: false,
+    eliteUp: false, flash: 0, gained: '',
+  };
+  stars = [];
+  for (let L = 0; L < 3; L++) {
+    const arr = [];
+    for (let i = 0; i < 36; i++) arr.push({ x: rng() * W, y: rng() * H, s: 1 + rng() * 1.6 });
+    stars.push({ v: [46, 96, 190][L], pts: arr });
+  }
+}
+function hitPlayer() {
+  const s = state;
+  if (s.invulnT > 0) return;
+  s.lives--; s.invulnT = tune.invuln; s.flash = 0.2;
+  tone(130, 0.3, 'sawtooth', 0.25);
+  events.push({ e: 'death', lives: s.lives });
+  if (s.lives <= 0) {
+    if (s.score > s.best) { s.best = s.score; try { localStorage.setItem('rain_best', String(s.best)); } catch (e) {} }
+    s.gained = `击破 ${s.kills} · 得分 ${s.score}`;
+    events.push({ e: 'gameover', score: s.score, kills: s.kills });
+    scene = 'over';
+  }
+}
+function fireBullet() { // 自动双联装
+  const s = state;
+  s.pbul.push({ x: s.px - 10, y: s.py - 18, vy: -tune.bullet_v });
+  s.pbul.push({ x: s.px + 10, y: s.py - 18, vy: -tune.bullet_v });
+  tone(920, 0.03, 'square', 0.05);
+}
+function fireAimed(f, speed, spread = 0) { // 朝玩家的瞄准弹,spread = 偏角
+  const s = state;
+  const a = Math.atan2(s.py - f.y, s.px - f.x) + spread;
+  s.ebul.push({ x: f.x, y: f.y + 14, vx: Math.cos(a) * speed, vy: Math.sin(a) * speed });
+}
+function fireRing(f) { // 巨舰弹环:每圈转一个相位
+  const s = state;
+  for (let i = 0; i < 14; i++) {
+    const a = f.ringA + i * Math.PI * 2 / 14;
+    s.ebul.push({ x: f.x, y: f.y, vx: Math.cos(a) * tune.ring_v, vy: Math.sin(a) * tune.ring_v });
+  }
+  f.ringA += 0.37;
+  tone(180, 0.15, 'square', 0.15);
+}
+function boom(x, y, n, col) { // 碎光圈
+  if (CHEAP) return;
+  for (let i = 0; i < n; i++) {
+    const a = rng() * Math.PI * 2, v = 60 + rng() * 240;
+    state.parts.push({ x, y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0.35 + rng() * 0.3, col });
+  }
+}
+function killFoe(f) {
+  const s = state;
+  const val = f.kind === 'elite' ? 500 : f.kind === 'gunship' ? 40 : f.kind === 'weaver' ? 30 : 10;
+  s.score += val; s.kills++;
+  boom(f.x, f.y, f.kind === 'elite' ? 40 : 12, '255,200,120');
+  tone(f.kind === 'elite' ? 90 : 300, f.kind === 'elite' ? 0.5 : 0.12, f.kind === 'elite' ? 'sawtooth' : 'square', 0.2);
+  events.push({ e: 'kill', kind: f.kind, n: s.kills });
+  f.dead = true;
+  if (f.kind === 'elite') { // 击杀巨舰:胜利结算
+    if (s.score > s.best) { s.best = s.score; try { localStorage.setItem('rain_best', String(s.best)); } catch (e) {} }
+    s.gained = `撑过巨舰!击破 ${s.kills} · 得分 ${s.score}`;
+    events.push({ e: 'win', score: s.score, kills: s.kills });
+    scene = 'results';
+  }
+}
+function useBomb() {
+  const s = state;
+  if (s.bombs <= 0) { tone(140, 0.08, 'sawtooth', 0.1); return; }
+  s.bombs--; s.flash = 0.3;
+  for (const b of s.ebul) boom(b.x, b.y, 2, '255,255,220');
+  s.ebul = [];
+  for (const f of s.foes) f.hp -= 8;
+  tone(100, 0.4, 'sawtooth', 0.3); tone(600, 0.2, 'square', 0.2, 0.1);
+  events.push({ e: 'bomb', left: s.bombs });
+}
+
+// ---- 场景 -----------------------------------------------------------------------------
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() {
+      drawSky(0, false);
+      const c = '#dfe6f8', t = state.t;
+      drawPlayerShip(150, 300, t, false);  text('玩家机(判定点在中心)', 150, 390, 20, c);
+      drawFoe('diver', 340, 300, t);       text('蜂群·直冲', 340, 390, 20, c);
+      drawFoe('gunship', 520, 300, t);     text('炮舰·瞄准弹', 520, 390, 20, c);
+      drawFoe('weaver', 700, 300, t);      text('环织·三向扇', 700, 390, 20, c);
+      drawFoe('elite', 920, 310, t);       text('巨舰·弹环', 920, 400, 20, c);
+      drawEBullet(1090, 280, t);           text('敌弹·朱红白芯', 1090, 330, 20, c);
+      drawPBullet(1090, 380, t);           text('我方弹·浅金', 1090, 430, 20, c);
+    },
+  },
+  title: {
+    update() {
+      const btn = { x: W / 2 - 170, y: 536, w: 340, h: 60 };
+      const hover = inRect(tp.x, tp.y, btn);
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      drawSky(0, CHEAP);
+      text(TITLE, W / 2, 190, 92, '#eef2ff');
+      text('躲弹雨,扫怪海,60 秒巨舰收梢', W / 2, 268, 28, '#8f9cc4');
+      CONTROLS.forEach((cn, i) => text(cn, W / 2, 348 + i * 40, 26, '#b8c2e0'));
+      if (state.best > 0) text(`最高 ${state.best}`, W / 2, 496, 26, '#e8c05a');
+      const btn = { x: W / 2 - 170, y: 536, w: 340, h: 60 };
+      drawButton(btn, '立即出击  [Enter / 空格]', '#f0b060', '#ffc780', '#161b2e', inRect(tp.x, tp.y, btn));
+    },
+  },
+  play: {
+    update(dt) {
+      if (pressed('KeyP') || pressed('Escape')) { scene = 'pause'; return; }
+      const s = state;
+      s.t += dt;
+      // 走位
+      const mvx = (down.has('ArrowRight') || down.has('KeyD') ? 1 : 0) - (down.has('ArrowLeft') || down.has('KeyA') ? 1 : 0);
+      const mvy = (down.has('ArrowDown') || down.has('KeyS') ? 1 : 0) - (down.has('ArrowUp') || down.has('KeyW') ? 1 : 0);
+      s.px = Math.max(30, Math.min(W - 30, s.px + mvx * tune.player_speed * dt));
+      s.py = Math.max(80, Math.min(H - 30, s.py + mvy * tune.player_speed * dt));
+      if (s.invulnT > 0) s.invulnT -= dt;
+      if (s.flash > 0) s.flash -= dt;
+      // 自动开火 + 炸弹
+      s.fireT -= dt;
+      if (s.fireT <= 0) { s.fireT = tune.fire_gap; fireBullet(); }
+      if (pressed('Space') || pressed('KeyX')) useBomb();
+      // 90 秒波次脚本
+      if (!s.eliteUp) {
+        if (s.t >= 62) { s.eliteUp = true; spawnFoe('elite'); }
+        else {
+          if (s.t >= s.nextDive && s.t < 58) { spawnFoe('diver'); if (s.t > 20) spawnFoe('diver'); s.nextDive += 1.1; }
+          if (!s.g1 && s.t >= 15) { s.g1 = true; spawnFoe('gunship'); }
+          if (!s.g2 && s.t >= 28) { s.g2 = true; spawnFoe('gunship'); }
+          if (!s.g3 && s.t >= 42) { s.g3 = true; spawnFoe('gunship'); }
+          if (s.t >= s.nextWeave && s.t < 56) { spawnFoe('weaver'); s.nextWeave += 2.2; }
+        }
+      }
+      // 敌机行为
+      for (const f of s.foes) {
+        f.t += dt;
+        if (f.kind === 'diver') {
+          f.y += f.vy * dt; f.x = f.x0 + Math.sin(f.t * 3) * 30;
+        } else if (f.kind === 'gunship') {
+          if (f.y < f.ty) f.y += 60 * dt; else f.x += Math.sin(f.t * 1.2) * 22 * dt;
+          f.fireT -= dt;
+          if (f.fireT <= 0 && f.y > 80) { f.fireT = 1.6; fireAimed(f, tune.aimed_v); tone(340, 0.06, 'square', 0.1); }
+        } else if (f.kind === 'weaver') {
+          f.y += f.vy * dt; f.x = f.x0 + Math.sin(f.t * 2) * 180;
+          f.fireT -= dt;
+          if (f.fireT <= 0 && f.y > 40) {
+            f.fireT = 1.4;
+            for (const sp of [-0.45, 0, 0.45]) fireAimed(f, tune.aimed_v * 0.85, sp);
+            tone(300, 0.06, 'square', 0.1);
+          }
+        } else { // elite
+          if (f.y < 160) f.y += 50 * dt;
+          f.fireT -= dt;
+          if (f.fireT <= 0) { f.fireT = 1.8; fireRing(f); }
+        }
+        if (f.y > H + 90) f.dead = true; // 冲出屏即过,不扣分
+      }
+      // 我方弹
+      for (const b of s.pbul) b.y += b.vy * dt;
+      s.pbul = s.pbul.filter(b => b.y > -30 && !b.hit);
+      // 敌弹
+      for (const b of s.ebul) { b.x += b.vx * dt; b.y += b.vy * dt; }
+      s.ebul = s.ebul.filter(b => b.x > -30 && b.x < W + 30 && b.y > -30 && b.y < H + 30);
+      // 命中:我方弹 → 敌机
+      for (const b of s.pbul) {
+        for (const f of s.foes) {
+          if (f.dead || f.hp <= 0) continue;
+          const dx = b.x - f.x, dy = b.y - f.y, rr = f.r * 0.7 + 5;
+          if (dx * dx + dy * dy < rr * rr) { b.hit = true; f.hp--; boom(b.x, b.y, 2, '255,220,150'); break; }
+        }
+      }
+      // 命中:敌弹/敌身 → 玩家
+      for (const b of s.ebul) {
+        const dx = b.x - s.px, dy = b.y - s.py, rr = tune.hit_r + 5;
+        if (dx * dx + dy * dy < rr * rr) { b.dead = true; hitPlayer(); break; }
+      }
+      s.ebul = s.ebul.filter(b => !b.dead);
+      for (const f of s.foes) {
+        if (f.dead) continue;
+        const dx = f.x - s.px, dy = f.y - s.py, rr = f.r * 0.7 + tune.hit_r;
+        if (dx * dx + dy * dy < rr * rr) { f.hp -= 3; hitPlayer(); break; }
+      }
+      for (const f of s.foes) if (!f.dead && f.hp <= 0) killFoe(f);
+      s.foes = s.foes.filter(f => !f.dead);
+      // 粒子
+      for (const p of s.parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.life -= dt; }
+      s.parts = s.parts.filter(p => p.life > 0);
+    },
+    draw() { drawWorld(); },
+  },
+  pause: {
+    update() { if (pressed('KeyP') || pressed('Escape')) scene = 'play'; },
+    draw() { drawWorld(); ctx.fillStyle = 'rgba(6,10,24,0.55)'; ctx.fillRect(0, 0, W, H); text('暂停', W / 2, H / 2, 52, '#eef2ff'); },
+  },
+  over: {
+    update() {
+      const btn = { x: W / 2 - 170, y: 432, w: 340, h: 58 };
+      const hover = inRect(tp.x, tp.y, btn);
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space') || pressed('KeyR') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      drawWorld();
+      ctx.fillStyle = 'rgba(6,10,24,0.6)'; ctx.fillRect(0, 0, W, H);
+      text('机毁于弹雨', W / 2, 240, 56, '#eef2ff');
+      text(state.gained, W / 2, 325, 34, '#e8c05a');
+      text(`最高 ${state.best}`, W / 2, 380, 26, '#b8c2e0');
+      const btn = { x: W / 2 - 170, y: 432, w: 340, h: 58 };
+      drawButton(btn, '再出击  [Enter / 空格]', '#f0b060', '#ffc780', '#161b2e', inRect(tp.x, tp.y, btn));
+    },
+  },
+  results: {
+    update() {
+      const btn = { x: W / 2 - 170, y: 422, w: 340, h: 58 };
+      const hover = inRect(tp.x, tp.y, btn);
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      drawWorld();
+      ctx.fillStyle = 'rgba(10,20,14,0.6)'; ctx.fillRect(0, 0, W, H);
+      text('巨舰沉了!', W / 2, 230, 62, '#ffd98a');
+      text(state.gained, W / 2, 320, 34, '#eef2ff');
+      text(`最高 ${state.best}`, W / 2, 372, 26, '#b8c2e0');
+      const btn = { x: W / 2 - 170, y: 422, w: 340, h: 58 };
+      drawButton(btn, '再来一段  [Enter / 空格]', '#ffd98a', '#ffe8b0', '#142018', inRect(tp.x, tp.y, btn));
+    },
+  },
+};
+
+// ---- 绘制:深夜海空 ---------------------------------------------------------------------
+function drawSky(wx, cheap) { // wx 在这里是滚动累计位移
+  clear('#10162c');
+  for (const L of stars) {
+    for (const st of L.pts) {
+      const y = ((st.y + wx * L.v) % H + H) % H;
+      ctx.fillStyle = 'rgba(190,205,240,0.5)';
+      ctx.beginPath(); ctx.moveTo(st.x, y - st.s); ctx.lineTo(st.x + st.s, y); ctx.lineTo(st.x, y + st.s); ctx.lineTo(st.x - st.s, y); ctx.closePath(); ctx.fill();
+    }
+  }
+}
+function drawPlayerShip(x, y, t, invuln) {
+  ctx.save(); ctx.translate(x, y);
+  if (invuln) ctx.globalAlpha = 0.4 + Math.sin(t * 30) * 0.3; // 无敌闪白
+  // 尾焰
+  const fl = 10 + Math.sin(t * 40) * 4;
+  ctx.fillStyle = '#f0a050';
+  ctx.beginPath(); ctx.moveTo(-5, 14); ctx.lineTo(5, 14); ctx.lineTo(0, 14 + fl); ctx.closePath(); ctx.fill();
+  // 机身:暖白箭形
+  ctx.fillStyle = '#eef2ff';
+  ctx.beginPath(); ctx.moveTo(0, -22); ctx.lineTo(7, 0); ctx.lineTo(17, 10); ctx.lineTo(5, 12); ctx.lineTo(0, 8);
+  ctx.lineTo(-5, 12); ctx.lineTo(-17, 10); ctx.lineTo(-7, 0); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = '#8f9cc4'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#f0b060'; ctx.beginPath(); ctx.arc(0, -6, 3.5, 0, 7); ctx.fill(); // 座舱
+  // 判定点(中心小点,擦边不中的那一点)
+  ctx.fillStyle = '#f06060'; ctx.beginPath(); ctx.arc(0, 0, 2.6, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function drawFoe(kind, x, y, t) {
+  ctx.save(); ctx.translate(x, y);
+  if (kind === 'diver') { // 蜂群:小红箭朝下
+    ctx.fillStyle = '#c05848';
+    ctx.beginPath(); ctx.moveTo(0, 16); ctx.lineTo(6, -2); ctx.lineTo(13, -8); ctx.lineTo(4, -9); ctx.lineTo(0, -14);
+    ctx.lineTo(-4, -9); ctx.lineTo(-13, -8); ctx.lineTo(-6, -2); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#703028'; ctx.lineWidth = 1.5; ctx.stroke();
+  } else if (kind === 'gunship') { // 炮舰:宽体 + 双炮管
+    ctx.fillStyle = '#4a5468';
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-34, -16, 68, 32, 8); else ctx.rect(-34, -16, 68, 32);
+    ctx.fill();
+    ctx.fillStyle = '#39425a'; ctx.fillRect(-46, -8, 14, 16); ctx.fillRect(32, -8, 14, 16);
+    ctx.fillRect(-6, 14, 4, 10); ctx.fillRect(3, 14, 4, 10); // 炮管
+    ctx.fillStyle = '#e05848'; ctx.beginPath(); ctx.arc(0, 0, 5, 0, 7); ctx.fill(); // 核心
+    ctx.strokeStyle = '#28304a'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(-34, -16, 68, 32, 8); else ctx.rect(-34, -16, 68, 32);
+    ctx.stroke();
+  } else if (kind === 'weaver') { // 环织:钢蓝蝶形
+    ctx.fillStyle = '#5a7898';
+    ctx.beginPath(); ctx.ellipse(-14, -2, 12, 8, -0.5, 0, 7); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(14, -2, 12, 8, 0.5, 0, 7); ctx.fill();
+    ctx.fillStyle = '#39425a';
+    ctx.beginPath(); ctx.ellipse(0, 0, 5, 12, 0, 0, 7); ctx.fill();
+    ctx.fillStyle = '#e05848'; ctx.beginPath(); ctx.arc(0, 4, 2.5, 0, 7); ctx.fill();
+  } else { // 巨舰:大块头
+    ctx.fillStyle = '#39425a'; ctx.fillRect(-80, -22, 160, 44);
+    ctx.fillStyle = '#4a5468'; ctx.fillRect(-60, -34, 120, 22);
+    ctx.fillStyle = '#2a3248'; ctx.fillRect(-90, -10, 180, 20);
+    ctx.fillStyle = '#e05848'; ctx.beginPath(); ctx.arc(0, 0, 16, 0, 7); ctx.fill(); // 大核心
+    ctx.fillStyle = '#ffd0a0'; ctx.beginPath(); ctx.arc(0, 0, 7 + Math.sin(t * 6) * 2, 0, 7); ctx.fill();
+    ctx.fillStyle = '#28304a';
+    ctx.fillRect(-70, 10, 10, 14); ctx.fillRect(-5, 10, 10, 14); ctx.fillRect(60, 10, 10, 14); // 炮塔
+    ctx.strokeStyle = '#1c2436'; ctx.lineWidth = 2; ctx.strokeRect(-80, -22, 160, 44);
+  }
+  ctx.restore();
+}
+function drawEBullet(x, y, t) { // 朱红圆弹白芯
+  ctx.fillStyle = '#e04040'; ctx.beginPath(); ctx.arc(x, y, 5.5, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff4ea'; ctx.beginPath(); ctx.arc(x, y, 2.2, 0, 7); ctx.fill();
+}
+function drawPBullet(x, y, t) { // 浅金细弹
+  ctx.fillStyle = '#f0d080';
+  ctx.fillRect(x - 2, y - 8, 4, 14);
+  ctx.fillStyle = '#fff4d0'; ctx.fillRect(x - 1, y - 6, 2, 6);
+}
+function drawWorld() {
+  const s = state;
+  drawSky(s.t, CHEAP);
+  // 敌机
+  for (const f of s.foes) drawFoe(f.kind, f.x, f.y, f.t);
+  // 我方弹 / 敌弹
+  for (const b of s.pbul) drawPBullet(b.x, b.y, s.t);
+  for (const b of s.ebul) drawEBullet(b.x, b.y, s.t);
+  // 粒子
+  if (!CHEAP) for (const p of s.parts) {
+    ctx.fillStyle = `rgba(${p.col},${Math.max(0, p.life) * 2})`;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  // 玩家机(无敌时闪)
+  drawPlayerShip(s.px, s.py, s.t, s.invulnT > 0);
+  // 巨舰血条
+  const el = s.foes.find(f => f.kind === 'elite');
+  if (el) {
+    ctx.fillStyle = '#1c2436'; ctx.fillRect(W / 2 - 160, 64, 320, 12);
+    ctx.fillStyle = '#e05848'; ctx.fillRect(W / 2 - 158, 66, 316 * Math.max(0, el.hp) / tune.elite_hp, 8);
+    text('巨舰', W / 2, 90, 18, '#e05848');
+  }
+  // HUD:得分 / 最高 / 计时 / 命 / 炸弹
+  text(`得分 ${s.score}`, 40, 34, 26, '#eef2ff', 'left');
+  text(`最高 ${s.best}`, 240, 36, 20, '#8f9cc4', 'left');
+  text(`${Math.floor(s.t)} 秒`, W / 2, 34, 24, '#8f9cc4');
+  for (let i = 0; i < s.lives; i++) { // 命数:小机
+    ctx.save(); ctx.translate(W - 220 + i * 30, 34); ctx.scale(0.55, 0.55);
+    drawPlayerShip(0, 0, s.t, false); ctx.restore();
+  }
+  for (let i = 0; i < s.bombs; i++) { // 炸弹:黑圆+引线
+    const bx = W - 60 - i * 26;
+    ctx.fillStyle = '#39425a'; ctx.beginPath(); ctx.arc(bx, 34, 9, 0, 7); ctx.fill();
+    ctx.strokeStyle = '#f0b060'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(bx + 4, 26); ctx.quadraticCurveTo(bx + 10, 20, bx + 12, 24); ctx.stroke();
+  }
+  if (s.flash > 0) { ctx.fillStyle = `rgba(255,244,230,${s.flash})`; ctx.fillRect(0, 0, W, H); }
+}
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1;
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now;
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP;
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive ---------------------------------------------------
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; },
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }

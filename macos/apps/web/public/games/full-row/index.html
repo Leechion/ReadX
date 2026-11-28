@@ -1,0 +1,511 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: 干脆的移动+消行节奏,能不能让人一局接一局? -->
+<!-- Date: 2026-11-23 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>满行</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-variant-numeric: tabular-nums; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script src="config.js"></script>
+<script>
+'use strict';
+// 满行 — a falling-block puzzle built on the one-shot starter. Fixed step, window.game hooks,
+// play + figures scenes are kept; the game replaces everything marked "the game".
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.speed is CONFIG.speed.value
+const STEP = 1 / 60;            // simulation step in seconds; motion is per second, never per frame
+const W = 1280, H = 720;        // logical size; a pixel look lowers it and sets PIXEL
+const PIXEL = false;            // pixel looks: whole-number scale, no smoothing
+const FONT = 'sans-serif';      // the brief's look picks the type
+const TITLE = '满行';
+const CONTROLS = ['←→ 移动   ↑ 旋转', '↓ 软降   空格 硬降', 'P 暂停   M 静音', '拼满整行就消掉,堆到井顶就结束'];
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 }; // a check may inject one
+const CHEAP = params.get('render') === 'cheap'; // a headless shot or check: 3D draws cheap; players never see it
+let seed;
+function rng() { // mulberry32; every gameplay random call reads this, never Math.random
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = []; // window.game.events: anything the game wants a run to see
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() { // fills the window at any size and pixel ratio
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center') {
+  ctx.fillStyle = c; ctx.font = `${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+
+// ---- Input: keys by position (event.code), OS key repeat ignored ------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code); // true for one step after the key goes down
+const tp = { x: -1, y: -1, click: false };
+function toLogical(e) {
+  const b = canvas.getBoundingClientRect();
+  return [(e.clientX - b.left) / b.width * W, (e.clientY - b.top) / b.height * H];
+}
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('pointermove', e => { const [x, y] = toLogical(e); tp.x = x; tp.y = y; });
+addEventListener('pointerdown', e => { startAudio(); const [x, y] = toLogical(e); tp.x = x; tp.y = y; tp.click = true; });
+addEventListener('blur', () => down.clear());
+
+// ---- Audio: started on first input, mute on M --------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)(); // a check may inject one
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted));
+function tone(freq, dur, type = 'square', vol = 0.3) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- The game: well, pieces, fair deal, clear cadence ------------------------------------
+const COLS = 10, ROWS = 20;
+const KINDS = {
+  I: { c: '#35d0d8', s: [ [[0,1],[1,1],[2,1],[3,1]], [[2,0],[2,1],[2,2],[2,3]],
+                        [[0,2],[1,2],[2,2],[3,2]], [[1,0],[1,1],[1,2],[1,3]] ] },
+  O: { c: '#f2c94c', s: [ [[1,0],[2,0],[1,1],[2,1]], [[1,0],[2,0],[1,1],[2,1]],
+                          [[1,0],[2,0],[1,1],[2,1]], [[1,0],[2,0],[1,1],[2,1]] ] },
+  T: { c: '#b06ae0', s: [ [[1,0],[0,1],[1,1],[2,1]], [[1,0],[1,1],[2,1],[1,2]],
+                          [[0,1],[1,1],[2,1],[1,2]], [[1,0],[0,1],[1,1],[1,2]] ] },
+  S: { c: '#5ad06b', s: [ [[1,0],[2,0],[0,1],[1,1]], [[1,0],[1,1],[2,1],[2,2]],
+                          [[1,1],[2,1],[0,2],[1,2]], [[0,0],[0,1],[1,1],[1,2]] ] },
+  Z: { c: '#e85555', s: [ [[0,0],[1,0],[1,1],[2,1]], [[2,0],[1,1],[2,1],[1,2]],
+                          [[0,1],[1,1],[1,2],[2,2]], [[1,0],[0,1],[1,1],[0,2]] ] },
+  J: { c: '#5a7bf0', s: [ [[0,0],[0,1],[1,1],[2,1]], [[1,0],[2,0],[1,1],[1,2]],
+                          [[0,1],[1,1],[2,1],[2,2]], [[1,0],[1,1],[0,2],[1,2]] ] },
+  L: { c: '#f08a3c', s: [ [[2,0],[0,1],[1,1],[2,1]], [[1,0],[1,1],[1,2],[2,2]],
+                          [[0,0],[0,1],[1,1],[2,1]], [[0,0],[1,0],[1,1],[1,2]] ] },
+};
+const NAMES = { I: '长条', O: '方块', T: '山字', S: '右弯', Z: '左弯', J: '钩左', L: '钩右' };
+
+// a 7-bag: the same shape seldom comes twice running, and none stays missing for long
+function refill(s) {
+  const bag = Object.keys(KINDS);
+  for (let i = bag.length - 1; i > 0; i--) { const j = (rng() * (i + 1)) | 0; [bag[i], bag[j]] = [bag[j], bag[i]]; }
+  s.bag.push(...bag);
+}
+function collide(board, k, rot, px, py) {
+  for (const [cx, cy] of KINDS[k].s[rot]) {
+    const x = px + cx, y = py + cy;
+    if (x < 0 || x >= COLS || y >= ROWS) return true;
+    if (y >= 0 && board[y][x]) return true;
+  }
+  return false;
+}
+function spawn(s) {
+  if (s.bag.length < 2) refill(s);
+  s.piece = { k: s.next || s.bag.shift(), rot: 0, x: 3, y: 0 };
+  s.next = s.bag.shift();
+  if (s.pendingRot && s.t - s.pendingRot < tune.buffer_time) {
+    const r = (s.piece.rot + 1) % 4;
+    if (!collide(s.board, s.piece.k, r, s.piece.x, s.piece.y)) s.piece.rot = r;
+  }
+  s.pendingRot = 0; s.lock = 0; s.lockResets = tune.lock_resets;
+  if (collide(s.board, s.piece.k, s.piece.rot, s.piece.x, s.piece.y)) { s.piece = null; lose(s); }
+}
+function lose(s) {
+  s.phase = 'over';
+  try { const b = +(localStorage.getItem('fullrow_best') || 0); if (s.score > b) localStorage.setItem('fullrow_best', s.score); } catch (e) {}
+  s.gained = `本局 ${s.score}   最佳 ${Math.max(s.score, best())}   消行 ${s.lines}`;
+  events.push({ type: 'lose', score: s.score });
+  tone(140, 0.3, 'sawtooth', 0.2);
+}
+function best() { try { return +(localStorage.getItem('fullrow_best') || 0); } catch (e) { return 0; } }
+function lockPiece(s) {
+  const p = s.piece;
+  for (const [cx, cy] of KINDS[p.k].s[p.rot]) {
+    const y = p.y + cy, x = p.x + cx;
+    if (y >= 0) s.board[y][x] = p.k;
+  }
+  events.push({ type: 'lock', k: p.k });
+  tone(120, 0.07, 'triangle', 0.35); // the landing's low thud
+  const full = [];
+  for (let y = 0; y < ROWS; y++) if (s.board[y].every(v => v)) full.push(y);
+  s.piece = null;
+  if (full.length) {
+    s.phase = 'clearing'; s.clearT = 0; s.clearRows = full; s.cleared = false;
+    s.score += [0, 1, 3, 6, 12][full.length] * tune.score_base * s.level;
+    s.lines += full.length;
+    const nl = 1 + Math.floor(s.lines / tune.level_lines);
+    if (nl > s.level) { s.level = nl; events.push({ type: 'level', level: nl }); tone(660, 0.15, 'square', 0.3); }
+    // the payoff: one row pops low, more rows climb the scale, each step louder
+    for (let i = 0; i < full.length; i++) tone(220 * Math.pow(1.25, i), 0.18, 'square', 0.25 + i * 0.12);
+  } else spawn(s);
+}
+function tryMove(s, dx) {
+  const p = s.piece; if (!p) return;
+  if (!collide(s.board, p.k, p.rot, p.x + dx, p.y)) { p.x += dx; if (s.lock) { s.lock = 0; if (--s.lockResets <= 0) lockPiece(s); } }
+}
+function tryRotate(s) {
+  const p = s.piece; if (!p) return;
+  const r = (p.rot + 1) % 4;
+  for (const [dx, dy] of [[0, 0], [-1, 0], [1, 0], [-2, 0], [2, 0], [0, -1]]) {
+    if (!collide(s.board, p.k, r, p.x + dx, p.y + dy)) {
+      p.rot = r; p.x += dx; p.y += dy;
+      if (s.lock) { s.lock = 0; if (--s.lockResets <= 0) lockPiece(s); }
+      tone(520, 0.04, 'square', 0.2);
+      return;
+    }
+  }
+}
+function hardDrop(s) {
+  const p = s.piece; if (!p) return;
+  let n = 0;
+  while (!collide(s.board, p.k, p.rot, p.x, p.y + 1)) { p.y++; n++; }
+  s.score += n * 2;
+  s.glow = { cells: KINDS[p.k].s[p.rot].map(([cx, cy]) => [p.x + cx, p.y + cy]), t: tune.glow_time };
+  lockPiece(s);
+}
+function update(s, dt) {
+  s.t += dt;
+  if (s.glow && (s.glow.t -= dt) <= 0) s.glow = null;
+  if (s.phase === 'clearing') {
+    if (pressed('ArrowUp')) s.pendingRot = s.t; // a turn pressed during the beat is kept for the next piece
+    s.clearT += dt;
+    const f = tune.flash_time, b = f + tune.beat_time, d = b + tune.drop_time;
+    if (s.clearT >= b && !s.cleared) { // the stack actually drops here
+      for (const y of s.clearRows) { s.board.splice(y, 1); s.board.unshift(Array(COLS).fill(0)); }
+      s.cleared = true; s.shake = 0.12;
+    }
+    if (s.clearT >= d) { s.phase = 'play'; s.shake = 0; spawn(s); }
+    return;
+  }
+  if (s.phase !== 'play' || !s.piece) return;
+  if (s.shake > 0) s.shake = Math.max(0, s.shake - dt);
+  // horizontal: one tap one column; a held key slides fast after a short pause
+  for (const dir of [[-1, 'ArrowLeft'], [1, 'ArrowRight']]) {
+    const [dx, code] = dir;
+    if (pressed(code)) { tryMove(s, dx); s.dasT[code] = tune.das_delay; }
+    else if (down.has(code)) { if ((s.dasT[code] -= dt) <= 0) { tryMove(s, dx); s.dasT[code] = tune.das_rate; } }
+  }
+  if (pressed('ArrowUp')) s.pendingRot = s.t; // kept if it arrives just before a piece appears
+  if (s.pendingRot && !s.piece) return;
+  if (pressed('ArrowUp')) tryRotate(s);
+  if (pressed('Space')) { hardDrop(s); return; }
+  const iv = Math.max(tune.gravity_min, tune.gravity * Math.pow(tune.speed_mult, s.level - 1) * Math.pow(tune.round_speed, (s.round || 1) - 1))
+             / (down.has('ArrowDown') ? tune.soft_mult : 1);
+  s.fall = (s.fall || 0) + dt;
+  const grounded = collide(s.board, s.piece.k, s.piece.rot, s.piece.x, s.piece.y + 1);
+  if (!grounded && s.fall >= iv) { s.piece.y++; s.fall = 0; s.lock = 0; }
+  if (grounded) { s.lock = (s.lock || 0) + dt; if (s.lock >= tune.lock_delay) lockPiece(s); }
+}
+
+// ---- Drawing: the brief's look — deep ink-blue well, candy blocks, warm-white grid ---------
+const WELL_X = 640, WELL_Y = 60; // well centered, panels at the sides
+function drawCell(x, y, k, a = 1) {
+  const c = tune.cell, s = KINDS[k].c;
+  ctx.globalAlpha = a;
+  ctx.fillStyle = s; roundRect(x + 2, y + 2, c - 4, c - 4, 6); ctx.fill();
+  ctx.strokeStyle = shade(s, -0.35); ctx.lineWidth = 3; ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.25)'; roundRect(x + 5, y + 5, c - 10, (c - 10) * 0.45, 4); ctx.fill();
+  ctx.globalAlpha = 1;
+}
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16), r = n >> 16, g = (n >> 8) & 255, b = n & 255, k = v => Math.max(0, Math.min(255, Math.round(v * (1 + f))));
+  return `rgb(${k(r)},${k(g)},${k(b)})`;
+}
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath(); ctx.moveTo(x + r, y); ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r); ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+}
+function drawWell(s) {
+  const c = tune.cell;
+  ctx.save();
+  if (s.shake) ctx.translate(0, Math.sin(s.clearT * 90) * s.shake * 30);
+  clearBG();
+  // the well: deep ink blue with a warm-white hairline grid
+  ctx.fillStyle = '#0d1321'; ctx.fillRect(WELL_X, WELL_Y, COLS * c, ROWS * c);
+  ctx.strokeStyle = 'rgba(240,225,200,0.08)'; ctx.lineWidth = 1;
+  for (let x = 1; x < COLS; x++) { ctx.beginPath(); ctx.moveTo(WELL_X + x * c, WELL_Y); ctx.lineTo(WELL_X + x * c, WELL_Y + ROWS * c); ctx.stroke(); }
+  for (let y = 1; y < ROWS; y++) { ctx.beginPath(); ctx.moveTo(WELL_X, WELL_Y + y * c); ctx.lineTo(WELL_X + COLS * c, WELL_Y + y * c); ctx.stroke(); }
+  for (let y = 0; y < ROWS; y++) for (let x = 0; x < COLS; x++) if (s.board[y][x])
+    drawCell(WELL_X + x * c, WELL_Y + y * c, s.board[y][x]);
+  if (s.phase === 'clearing') { // the row's white flash, then the beat's held gap
+    for (const y of s.clearRows) {
+      const f = s.clearT / tune.flash_time;
+      if (s.clearT < tune.flash_time) { ctx.fillStyle = `rgba(255,255,250,${0.35 + 0.65 * (1 - f)})`; ctx.fillRect(WELL_X, WELL_Y + y * c, COLS * c, c); }
+      else ctx.fillStyle = '#0d1321', ctx.fillRect(WELL_X, WELL_Y + y * c, COLS * c, c);
+    }
+  }
+  if (s.piece && s.phase === 'play') {
+    const p = s.piece, c2 = tune.cell;
+    let gy = p.y; while (!collide(s.board, p.k, p.rot, p.x, gy + 1)) gy++; // the landing's warm light
+    if (s.glow) { ctx.fillStyle = 'rgba(255,190,90,0.45)'; for (const [x, y] of s.glow.cells) if (y >= 0) ctx.fillRect(WELL_X + x * c2, WELL_Y + y * c2, c2, c2); }
+    else if (gy > p.y) for (const [cx, cy] of KINDS[p.k].s[p.rot]) {
+      const x = p.x + cx, y = gy + cy;
+      if (y >= 0 && !s.board[y][x]) { ctx.strokeStyle = 'rgba(255,200,120,0.35)'; ctx.lineWidth = 2; ctx.strokeRect(WELL_X + x * c2 + 3, WELL_Y + y * c2 + 3, c2 - 6, c2 - 6); }
+    }
+    for (const [cx, cy] of KINDS[p.k].s[p.rot]) { const x = p.x + cx, y = p.y + cy; if (y >= 0) drawCell(WELL_X + x * c2, WELL_Y + y * c2, p.k); }
+  }
+  ctx.restore();
+}
+function clearBG() {
+  const g = ctx.createLinearGradient(0, 0, 0, H); g.addColorStop(0, '#131a2c'); g.addColorStop(1, '#0a0e1a');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+}
+function hud(s) {
+  const c = tune.cell;
+  text('满行', WELL_X + COLS * c / 2, 34, 26, 'rgba(240,225,200,0.5)');
+  text('分数', 200, 120, 24, 'rgba(240,225,200,0.6)', 'left');
+  text(`${s.score}`, 200, 158, 44, '#f0e1c8', 'left');
+  text('最佳', 200, 230, 24, 'rgba(240,225,200,0.6)', 'left');
+  text(`${Math.max(best(), s.score)}`, 200, 268, 44, '#ffbe5a', 'left');
+  text(`关卡 ${s.level}`, 200, 340, 24, 'rgba(240,225,200,0.6)', 'left');
+  text(`消行 ${s.lines}`, 200, 372, 24, 'rgba(240,225,200,0.6)', 'left');
+  // the next piece, so the deal is always seen
+  const nx = 1000;
+  text('下一块', nx, 120, 24, 'rgba(240,225,200,0.6)', 'left');
+  if (s.next) for (const [x, y] of KINDS[s.next].s[0]) drawCell(nx + x * 26, 150 + y * 26, s.next);
+  text('←→ 移动 ↑ 旋转', 1000, 340, 20, 'rgba(240,225,200,0.4)', 'left');
+  text('↓ 软降 空格 硬降', 1000, 368, 20, 'rgba(240,225,200,0.4)', 'left');
+}
+
+// ---- Scenes ------------------------------------------------------------------------------
+let scene, state, rounds = 0;
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  if (scene === 'over' || scene === 'results') rounds++; // 再来一局才提速;标题页不算一局
+  else rounds = Math.max(1, rounds);
+  state = { t: 0, score: 0, gained: '', phase: 'play', round: rounds, board: Array.from({ length: ROWS }, () => Array(COLS).fill(0)),
+            bag: [], next: null, piece: null, level: 1, lines: 0, fall: 0, lock: 0, lockResets: 0,
+            dasT: { ArrowLeft: tune.das_delay, ArrowRight: tune.das_delay }, pendingRot: 0,
+            glow: null, shake: 0, clearT: 0, clearRows: [], cleared: false };
+  refill(state); spawn(state);
+}
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() {
+      clear('#0d1321');
+      const ks = Object.keys(KINDS), c = 26;
+      ks.forEach((k, i) => {
+        const x = 90 + i * 160, y = 200;
+        for (const [dx, dy] of KINDS[k].s[0]) drawCell(x + dx * c, y + dy * c, k);
+        text(NAMES[k], x + c, y + 4 * c + 24, 22, '#f0e1c8');
+        text(k, x + c, y + 4 * c + 52, 18, 'rgba(240,225,200,0.5)');
+      });
+      text('七种方块,各有各的轮廓与颜色', W / 2, 560, 24, 'rgba(240,225,200,0.6)');
+    },
+  },
+  title: {
+    update(dt) {
+      state.t += dt;
+      const btn = { x: 110, y: 526, w: 310, h: 66 };
+      const hover = tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h;
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space') || (tp.click && hover)) {
+        tp.click = false; canvas.style.cursor = 'default'; reset(); scene = 'play'; return;
+      }
+      tp.click = false;
+    },
+    draw() {
+      clearBG();
+      const t = state.t || 0;
+      // 柔和的网格暗纹背景
+      ctx.strokeStyle = 'rgba(240,225,200,0.035)'; ctx.lineWidth = 1;
+      for (let x = 0; x <= W; x += 40) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke(); }
+      for (let y = 0; y <= H; y += 40) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke(); }
+
+      // 右侧演示深井（10×15 预览格）
+      const wx = 760, wy = 88, cell = 34, cols = 10, rows = 15, sc = cell / tune.cell;
+      roundRect(wx - 16, wy - 16, cols * cell + 32, rows * cell + 32, 18);
+      ctx.fillStyle = 'rgba(13,19,33,0.92)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,190,90,0.28)'; ctx.lineWidth = 2; ctx.stroke();
+
+      ctx.save(); ctx.translate(wx, wy);
+      ctx.strokeStyle = 'rgba(240,225,200,0.07)'; ctx.lineWidth = 1;
+      for (let x = 1; x < cols; x++) { ctx.beginPath(); ctx.moveTo(x * cell, 0); ctx.lineTo(x * cell, rows * cell); ctx.stroke(); }
+      for (let y = 1; y < rows; y++) { ctx.beginPath(); ctx.moveTo(0, y * cell); ctx.lineTo(cols * cell, y * cell); ctx.stroke(); }
+      const pile = [
+        [0,14,'L'],[1,14,'L'],[2,14,'L'],[3,14,'I'],[4,14,'I'],[5,14,'I'],[6,14,'I'],[8,14,'O'],[9,14,'O'],
+        [0,13,'L'],[1,13,'S'],[2,13,'S'],[3,13,'T'],[4,13,'T'],[5,13,'T'],[8,13,'O'],[9,13,'O'],
+        [1,12,'Z'],[2,12,'Z'],[4,12,'T'],[5,12,'J'],[6,12,'J'],[8,12,'J'],[9,12,'Z'],
+        [2,11,'Z'],[3,11,'Z'],[5,11,'S'],[6,11,'S'],[8,11,'J'],
+      ];
+      for (const [gx, gy, gk] of pile) {
+        ctx.save(); ctx.translate(gx * cell, gy * cell); ctx.scale(sc, sc); drawCell(0, 0, gk, 0.92); ctx.restore();
+      }
+      // 落块 + 落点虚影
+      const cycle = (t * 1.1) % 3, fallY = Math.min(8, Math.floor(cycle * 3.2));
+      const demoKs = ['T', 'I', 'L'];
+      const dk = demoKs[Math.floor((t * 1.1 / 3)) % demoKs.length];
+      for (const [dx, dy] of KINDS[dk].s[0]) {
+        const px = 4 + dx, gy = 9 + dy;
+        ctx.strokeStyle = 'rgba(255,190,90,0.45)'; ctx.lineWidth = 2;
+        ctx.strokeRect(px * cell + 3, gy * cell + 3, cell - 6, cell - 6);
+        const py = fallY + dy;
+        ctx.save(); ctx.translate(px * cell, py * cell); ctx.scale(sc, sc); drawCell(0, 0, dk, 1); ctx.restore();
+      }
+      ctx.restore();
+
+      // 右上角 NEXT 展示卡
+      const nx = 1134, ny = 96;
+      roundRect(nx, ny, 108, 128, 14); ctx.fillStyle = 'rgba(20,28,48,0.9)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(240,225,200,0.16)'; ctx.lineWidth = 1.5; ctx.stroke();
+      text('NEXT', nx + 54, ny + 24, 15, 'rgba(240,225,200,0.55)');
+      const nextK = Object.keys(KINDS)[(Math.floor(t * 0.9) + 1) % 7];
+      for (const [dx, dy] of KINDS[nextK].s[0]) {
+        ctx.save(); ctx.translate(nx + 18 + dx * 20, ny + 54 + dy * 20); ctx.scale(20 / tune.cell, 20 / tune.cell); drawCell(0, 0, nextK); ctx.restore();
+      }
+
+      // 左侧主视觉区
+      const lx = 110;
+      roundRect(lx, 96, 134, 32, 16); ctx.fillStyle = 'rgba(255,190,90,0.14)'; ctx.fill();
+      ctx.strokeStyle = 'rgba(255,190,90,0.45)'; ctx.lineWidth = 1.5; ctx.stroke();
+      text('落块解谜', lx + 67, 112, 15, '#ffbe5a');
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(255,190,90,0.22)'; ctx.shadowBlur = 24;
+      text(TITLE, lx, 188, 96, '#f6ead4', 'left');
+      ctx.restore();
+      text('十列深井 · 七种方块 · 消行即提速', lx, 260, 24, 'rgba(240,225,200,0.68)', 'left');
+
+      const hi = best();
+      if (hi > 0) {
+        roundRect(lx, 294, 214, 36, 10); ctx.fillStyle = 'rgba(53,208,216,0.12)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(53,208,216,0.35)'; ctx.lineWidth = 1.5; ctx.stroke();
+        text(`历史最高  ${hi} 分`, lx + 107, 312, 17, '#7ee7ec');
+      }
+
+      // 操作按键卡片
+      const chips = [
+        ['← →', '左右移动'], ['↑', '顺时针旋转'],
+        ['↓ / 空格', '软降 / 硬降'], ['P / M', '暂停 / 静音'],
+      ];
+      chips.forEach(([key, desc], i) => {
+        const cx = lx + (i % 2) * 268, cy = 354 + Math.floor(i / 2) * 66;
+        roundRect(cx, cy, 250, 52, 12); ctx.fillStyle = 'rgba(255,255,255,0.04)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(240,225,200,0.12)'; ctx.lineWidth = 1.5; ctx.stroke();
+        roundRect(cx + 10, cy + 11, 86, 30, 8); ctx.fillStyle = 'rgba(255,190,90,0.16)'; ctx.fill();
+        text(key, cx + 53, cy + 26, 15, '#ffcf80');
+        text(desc, cx + 112, cy + 26, 17, '#e2d6be', 'left');
+      });
+
+      // 主按钮
+      const btn = { x: lx, y: 526, w: 310, h: 66 };
+      const hover = tp.x >= btn.x && tp.x <= btn.x + btn.w && tp.y >= btn.y && tp.y <= btn.y + btn.h;
+      const pulse = 0.5 + 0.5 * Math.sin(t * 4);
+      ctx.save();
+      ctx.shadowColor = hover ? 'rgba(255,190,90,0.45)' : 'rgba(255,190,90,0.22)'; ctx.shadowBlur = hover ? 26 : 14;
+      roundRect(btn.x, btn.y - (hover ? 2 : 0), btn.w, btn.h, 16);
+      ctx.fillStyle = hover ? '#ffc870' : '#ffbe5a'; ctx.fill();
+      ctx.restore();
+      text('开始排块  [Enter / 空格]', btn.x + btn.w / 2, btn.y - (hover ? 2 : 0) + btn.h / 2, 22, '#131a2c');
+
+      // 底部七种方块一字陈列
+      Object.keys(KINDS).forEach((k, i) => {
+        const bx = lx + i * 78, by = 626;
+        for (const [dx, dy] of KINDS[k].s[0]) {
+          ctx.save(); ctx.translate(bx + dx * 14, by + dy * 14); ctx.scale(14 / tune.cell, 14 / tune.cell); drawCell(0, 0, k, 0.8); ctx.restore();
+        }
+      });
+    },
+  },
+  play: {
+    update(dt) {
+      if (pressed('KeyP') || pressed('Escape')) { scene = 'pause'; return; }
+      update(state, dt);
+      if (state.phase === 'over') scene = 'over';
+    },
+    draw() { drawWell(state); hud(state); },
+  },
+  pause: {
+    update() { if (pressed('KeyP') || pressed('Escape')) scene = 'play'; },
+    draw() { scenes.play.draw(); ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(0, 0, W, H); text('暂停', W / 2, H / 2, 56, '#fff'); },
+  },
+  over: {
+    update() { if (pressed('KeyR') || pressed('Enter')) { reset(); scene = 'play'; } },
+    draw() {
+      drawWell(state); hud(state);
+      ctx.fillStyle = 'rgba(5,8,16,0.82)'; ctx.fillRect(0, 0, W, H);
+      text('井顶到了', W / 2, 260, 64, '#f0e1c8');
+      text(state.gained, W / 2, 350, 32, '#ffbe5a');
+      text('按 R 或 Enter 再来一局', W / 2, H - 120, 26, '#ccc');
+    },
+  },
+  results: {
+    update() { if (pressed('Enter')) { reset(); scene = 'play'; } },
+    draw() { scenes.over.draw(); },
+  },
+};
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1; // ALPHA: how far the frame is between the last two steps
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now; // a stall never fast-forwards the game
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP; // draw between steps, so the view never judders
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive (?manual=1 stops the loop; players never see it) ----
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; }, // the loop steps; a check empties it
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }
+
+</script>
+</body>
+</html>

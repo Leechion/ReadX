@@ -1,0 +1,633 @@
+<!doctype html>
+<!-- PROTOTYPE - NOT FOR PRODUCTION -->
+<!-- Question: 无计时、可撤销的扫雷,还剩多少'想出来了'的爽感? -->
+<!-- Date: 2026-11-23 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>安静扫雷</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  body { font-variant-numeric: tabular-nums; }
+  canvas { display: block; margin: 0 auto; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<script src="config.js"></script>
+<script>
+'use strict';
+// The one-shot's starter: only what the checks read. Keep the fixed step, the clock hook,
+// window.game and the play and figures scenes. Everything else is the game's own: replace
+// what is marked "the game", and draw every figure in the brief's look, in 2D or with three.js.
+
+// ---- Built to be checked ----------------------------------------------------------------
+const params = new URLSearchParams(location.search);
+const tune = new Proxy({}, { get: (_, k) => CONFIG[k].value }); // live: tune.speed is CONFIG.speed.value
+const STEP = 1 / 60;            // simulation step in seconds; motion is per second, never per frame
+const W = 1280, H = 720;        // logical size; a pixel look lowers it and sets PIXEL
+const PIXEL = false;            // pixel looks: whole-number scale, no smoothing
+const FONT = "'Segoe Print','Comic Sans MS',cursive"; // the brief's look: ballpoint handwriting
+const TITLE = '安静扫雷';
+const CONTROLS = ['左键 翻开 · 右键 标旗(可拖动连标)', '方向键 移动 · 空格 翻开 · F 标旗', 'U 撤销 · R 换一盘 · 1/2/3 换难度', 'M 静音']; // shown on the title screen
+const clock = window.GAME_CLOCK || { now: () => performance.now() / 1000 }; // a check may inject one
+const CHEAP = params.get('render') === 'cheap'; // a headless shot or check: 3D draws cheap; players never see it
+let seed;
+function rng() { // mulberry32; every gameplay random call reads this, never Math.random
+  seed = (seed + 0x6D2B79F5) | 0;
+  let t = Math.imul(seed ^ (seed >>> 15), seed | 1);
+  t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+  return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+const events = []; // window.game.events: anything the game wants a run to see
+
+// ---- Screen ---------------------------------------------------------------------------
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+function fit() { // fills the window at any size and pixel ratio
+  const k = Math.min(innerWidth / W, innerHeight / H);
+  const s = PIXEL ? Math.max(1, Math.floor(k)) : k;
+  const r = PIXEL ? 1 : s * (devicePixelRatio || 1);
+  canvas.width = Math.round(W * r); canvas.height = Math.round(H * r);
+  canvas.style.width = Math.round(W * s) + 'px'; canvas.style.height = Math.round(H * s) + 'px';
+  canvas.style.marginTop = Math.max(0, Math.floor((innerHeight - H * s) / 2)) + 'px';
+  canvas.style.imageRendering = PIXEL ? 'pixelated' : 'auto';
+  ctx.setTransform(r, 0, 0, r, 0, 0); ctx.imageSmoothingEnabled = !PIXEL;
+}
+addEventListener('resize', fit); fit();
+function clear(c) { ctx.fillStyle = c; ctx.fillRect(0, 0, W, H); }
+function text(s, x, y, size, c, align = 'center') {
+  ctx.fillStyle = c; ctx.font = `${size}px ${FONT}`; ctx.textAlign = align;
+  ctx.textBaseline = 'middle'; ctx.fillText(s, x, y);
+}
+
+// ---- Input: keys by position (event.code), OS key repeat ignored ------------------------
+const down = new Set(), hit = new Set();
+const pressed = code => hit.has(code); // true for one step after the key goes down
+addEventListener('keydown', e => {
+  startAudio();
+  if (!e.repeat) { down.add(e.code); hit.add(e.code); }
+  if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
+});
+addEventListener('keyup', e => down.delete(e.code));
+addEventListener('blur', () => { down.clear(); dragFlag = false; });
+
+// ---- Pointer: left opens, right (held) paints flags -------------------------------------
+const pointer = { x: 0, y: 0, has: false };
+let dragFlag = false, lastDragCell = -1;
+function toLogical(e) {
+  const b = canvas.getBoundingClientRect();
+  return [(e.clientX - b.left) / b.width * W, (e.clientY - b.top) / b.height * H];
+}
+
+// ---- Audio: started on first input, mute on M --------------------------------------------
+let audio = null, muted = false;
+function startAudio() {
+  if (!audio) {
+    const ac = window.GAME_AUDIO || new (window.AudioContext || window.webkitAudioContext)(); // a check may inject one
+    const out = ac.createGain(); out.gain.value = muted ? 0 : tune.volume;
+    out.connect(ac.destination); audio = { ac, out };
+  }
+  if (audio.ac.state === 'suspended') audio.ac.resume();
+}
+function setMuted(m) { muted = m; if (audio) audio.out.gain.value = m ? 0 : tune.volume; }
+addEventListener('tune', () => setMuted(muted)); // the tweak panel (an add-on), when added, moved a value: the volume follows
+function tone(freq, dur, type = 'square', vol = 0.3, delay = 0) {
+  if (!audio || muted) return;
+  const t = audio.ac.currentTime + delay, o = audio.ac.createOscillator(), g = audio.ac.createGain();
+  o.type = type; o.frequency.value = freq;
+  g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+  o.connect(g).connect(audio.out); o.start(t); o.stop(t + dur);
+}
+
+// ---- The game: a hand-drawn board, provably solvable ------------------------------------
+// The tiers are graded by the reasoning depth the solver needs, not just board size.
+const TIERS = [
+  { name: '小盘', need: 0, cols: 't1_cols', rows: 't1_rows', mines: 't1_mines' },
+  { name: '中盘', need: 1, cols: 't2_cols', rows: 't2_rows', mines: 't2_mines' },
+  { name: '大盘', need: 2, cols: 't3_cols', rows: 't3_rows', mines: 't3_mines' },
+];
+// ballpoint colours, 1..8 deepening with danger
+const NUMC = ['#4a6fa5', '#2e7d32', '#c0392b', '#6a1b9a', '#9a6b00', '#00838f', '#4e342e', '#263238'];
+
+const idx = (s, x, y) => y * s.cols + x;
+function neighbors(s, i) {
+  const x = i % s.cols, y = (i / s.cols) | 0, out = [];
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    if (!dx && !dy) continue;
+    const nx = x + dx, ny = y + dy;
+    if (nx >= 0 && ny >= 0 && nx < s.cols && ny < s.rows) out.push(ny * s.cols + nx);
+  }
+  return out;
+}
+
+// The solver (in the slice): constraint propagation with the basic rules plus the
+// subset/pair rule. Returns null when the board needs a guess, else the number of
+// pair-rule steps it took — the board's reasoning depth.
+function solverDepth(cols, rows, mine, sx, sy) {
+  const N = cols * rows;
+  const num = new Array(N).fill(0);
+  for (let i = 0; i < N; i++) if (mine[i]) for (const j of neighbors({ cols, rows }, i)) num[j]++;
+  const nb = [];
+  for (let i = 0; i < N; i++) nb[i] = neighbors({ cols, rows }, i);
+  const st = new Uint8Array(N); // 0 hidden, 1 open, 2 flagged
+  const open = i => { // flood the zeros, as play does
+    const q = [i];
+    while (q.length) { const c = q.pop();
+      if (st[c] || mine[c]) continue; st[c] = 1;
+      if (num[c] === 0) for (const j of nb[c]) if (!st[j]) q.push(j);
+    }
+  };
+  open(sy * cols + sx);
+  let pairSteps = 0;
+  for (;;) {
+    let progress = false;
+    // basic rules: every open clue counts its hidden neighbours
+    const hidden = [], need = [];
+    for (let i = 0; i < N; i++) {
+      if (!st[i]) continue;
+      const h = nb[i].filter(j => !st[j]);
+      const f = nb[i].filter(j => st[j] === 2).length;
+      if (!h.length) continue;
+      hidden.push(h); need.push(num[i] - f);
+    }
+    for (let a = 0; a < hidden.length; a++) {
+      if (need[a] === 0) { for (const j of hidden[a]) if (!st[j]) open(j); progress = true; }
+      else if (need[a] === hidden[a].length) { for (const j of hidden[a]) if (!st[j]) st[j] = 2; progress = true; }
+    }
+    if (progress) continue;
+    // the pair rule: one clue's hidden set inside another's
+    outer: for (let a = 0; a < hidden.length; a++) for (let b = 0; b < hidden.length; b++) {
+      if (a === b) continue;
+      const HA = hidden[a], HB = hidden[b];
+      if (HB.length >= HA.length) continue;
+      const diff = HA.filter(j => !HB.includes(j));
+      if (diff.length + HB.length !== HA.length) continue; // not a subset
+      const d = need[a] - need[b];
+      if (d === 0) { for (const j of diff) if (!st[j]) open(j); pairSteps++; progress = true; break outer; }
+      if (d === diff.length) { for (const j of diff) if (!st[j]) st[j] = 2; pairSteps++; progress = true; break outer; }
+    }
+    if (!progress) break;
+  }
+  const safeLeft = st.some(v => !v) && mine.some((m, i) => !m && !st[i]);
+  if (safeLeft) return null; // the solver stalled with safe cells closed: a guess board
+  return pairSteps;
+}
+
+function newBoard(s) { // fresh, unopened; mines wait for the first click
+  s.fresh = true; s.opened = 0; s.flagsPlaced = 0; s.undo = []; s.fatalUsed = false;
+  s.phase = 'play'; s.clock = 0; s.revealT = 0; s.dead = false; s.cursor = { x: 0, y: 0 };
+  s.mine = null; s.num = null; s.st = null; s.bad = null;
+}
+function reset() {
+  seed = Number(params.get('seed')) || CONFIG.seed;
+  const s = { t: 0, score: 0, gained: '', tier: 0 };
+  state = s; setTier(0);
+}
+function setTier(k) {
+  const t = TIERS[k];
+  state.tier = k; state.cols = tune[t.cols] | 0; state.rows = tune[t.rows] | 0; state.mines = tune[t.mines] | 0;
+  newBoard(state);
+}
+// place mines after the first click, keeping its 3x3 clear, and regenerate until the
+// solver proves the board is guess-free at the tier's depth (gen_tries, then relax)
+function generate(s, cx, cy) {
+  const N = s.cols * s.rows;
+  let best = null;
+  for (let tries = 0; tries < tune.gen_tries; tries++) {
+    const mine = new Uint8Array(N);
+    const banned = new Set([idx(s, cx, cy)]);
+    for (const j of neighbors(s, idx(s, cx, cy))) banned.add(j);
+    let placed = 0, guard = 0;
+    while (placed < s.mines && guard++ < 4000) {
+      const i = (rng() * N) | 0;
+      if (mine[i] || banned.has(i)) continue;
+      mine[i] = 1; placed++;
+    }
+    if (placed < s.mines) continue; // the board is too small for this many mines
+    const depth = solverDepth(s.cols, s.rows, mine, cx, cy);
+    if (depth === null) continue; // needs a guess: throw it away
+    if (depth >= TIERS[s.tier].need) { best = { mine, depth }; break; }
+    if (!best || depth > best.depth) best = { mine, depth }; // keep the deepest so far
+  }
+  if (!best) return false; // no guess-free board found at all
+  s.mine = best.mine; s.depth = best.depth;
+  s.num = new Array(N).fill(0);
+  for (let i = 0; i < N; i++) if (s.mine[i]) for (const j of neighbors(s, i)) s.num[j]++;
+  s.st = new Uint8Array(N);
+  s.fresh = false;
+  return true;
+}
+function floodOpen(s, i) {
+  const q = [i];
+  while (q.length) { const c = q.pop();
+    if (s.st[c] || s.mine[c]) continue; s.st[c] = 1; s.opened++;
+    if (s.num[c] === 0) for (const j of neighbors(s, c)) if (!s.st[j]) q.push(j);
+  }
+}
+function snapshot(s) { return { st: s.st.slice(), opened: s.opened, flags: s.flagsPlaced }; }
+function restore(s, u) { s.st = u.st; s.opened = u.opened; s.flagsPlaced = u.flags; }
+function markFlags(s, on) { // flag paint: only adds; no flags before the first click
+  if (s.fresh || s.phase !== 'play') return;
+  const i = on;
+  if (s.st[i] === 1) return;
+  s.undo.push(snapshot(s));
+  if (s.st[i] === 2) { s.st[i] = 0; s.flagsPlaced--; }
+  else { s.st[i] = 2; s.flagsPlaced++; tone(300, 0.06, 'triangle', 0.12); events.push({ type: 'flag', i }); }
+  recomputeBad(s);
+}
+function openCell(s, i) {
+  if (s.phase !== 'play') return;
+  if (s.fresh) { if (!generate(s, i % s.cols, (i / s.cols) | 0)) { s.dead = '生成失败:换一盘 (R)'; return; } }
+  if (s.st[i] === 2 || s.st[i] === 1) return;
+  s.undo.push(snapshot(s));
+  if (s.mine[i]) { // a fatal click
+    s.phase = 'dead'; s.dead = s.fatalUsed ? '再踩一张新盘:按 R' : '踩到雷了 — 按 U 撤销这一次(每盘仅一次)';
+    tone(90, 0.3, 'sawtooth', 0.25); events.push({ type: 'fatal', i });
+    return;
+  }
+  floodOpen(s, i);
+  tone(420 + rng() * 60, 0.04, 'sine', 0.08); events.push({ type: 'open', i });
+  recomputeBad(s);
+  if (s.opened === s.cols * s.rows - s.mines) { // solved: the wave, then the chime
+    s.phase = 'won'; s.revealT = 0;
+    s.gained = `${TIERS[s.tier].name} 全想出来 · 用时 ${fmt(s.clock)} · 推理深度 ${s.depth} 步`;
+    tone(tune.chime_a, 0.5, 'sine', 0.18); tone(tune.chime_b, 0.7, 'sine', 0.15, 0.18);
+    events.push({ type: 'win', secs: s.clock, depth: s.depth });
+  }
+}
+function undoOnce(s) {
+  if (s.phase === 'won' || !s.undo.length) return;
+  const u = s.undo.pop();
+  if (s.phase === 'dead') { s.fatalUsed = true; s.phase = 'play'; s.dead = ''; }
+  restore(s, u); recomputeBad(s); tone(240, 0.05, 'triangle', 0.1);
+  events.push({ type: 'undo' });
+}
+function recomputeBad(s) { // self-violations: a clue with more flags than its number
+  if (!s.st) return;
+  s.bad = new Uint8Array(s.st.length);
+  for (let i = 0; i < s.st.length; i++) {
+    if (!s.st[i]) continue;
+    const f = neighbors(s, i).filter(j => s.st[j] === 2).length;
+    if (f > s.num[i]) { s.bad[i] = 1; for (const j of neighbors(s, i)) if (s.st[j] === 2) s.bad[j] = 1; }
+  }
+}
+function fmt(sec) { const m = (sec / 60) | 0, s2 = (sec % 60) | 0; return `${m}:${String(s2).padStart(2, '0')}`; }
+// deterministic wobble for the hand-drawn lines
+function jit(i, k) { const x = Math.sin(i * 12.9898 + k * 78.233) * 43758.5453; return ((x - Math.floor(x)) * 2 - 1); }
+
+function boardRect(s) {
+  const bw = s.cols * tune.cell_px, bh = s.rows * tune.cell_px;
+  const k = Math.min(1, (W - 80) / bw, (H - 190) / bh);
+  const cw = tune.cell_px * k;
+  return { x: (W - s.cols * cw) / 2, y: (H - s.rows * cw) / 2 + 26, cw };
+}
+function cellAt(s, px, py) {
+  const r = boardRect(s);
+  const x = Math.floor((px - r.x) / r.cw), y = Math.floor((py - r.y) / r.cw);
+  if (x < 0 || y < 0 || x >= s.cols || y >= s.rows) return -1;
+  return y * s.cols + x;
+}
+canvas.addEventListener('pointerdown', e => {
+  startAudio();
+  const [px, py] = toLogical(e);
+  pointer.x = px; pointer.y = py; pointer.has = true;
+  if (scene === 'title') {
+    if (e.button !== 0) return;
+    const tiers = [{ x: 156, y: 312, w: 150, h: 68 }, { x: 320, y: 312, w: 150, h: 68 }, { x: 484, y: 312, w: 150, h: 68 }];
+    for (let k = 0; k < tiers.length; k++) {
+      const b = tiers[k];
+      if (px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h) { setTier(k); tone(420 + k * 60, 0.05, 'triangle', 0.1); return; }
+    }
+    const btn = { x: 156, y: 544, w: 320, h: 64 };
+    if (px >= btn.x && px <= btn.x + btn.w && py >= btn.y && py <= btn.y + btn.h) {
+      canvas.style.cursor = 'default'; scene = 'play'; return;
+    }
+    return;
+  }
+  if (scene !== 'play') return;
+  const s = state;
+  if (s.phase === 'won') { reset(); return; } // any click starts a new board
+  const tr = tierRects(s);
+  for (let k = 0; k < tr.length; k++) if (px >= tr[k].x && px <= tr[k].x + tr[k].w && py >= tr[k].y && py <= tr[k].y + tr[k].h) { setTier(k); return; }
+  const i = cellAt(s, px, py);
+  if (i < 0) return;
+  if (e.button === 2) { dragFlag = true; lastDragCell = i; markFlags(s, i); }
+  else if (e.button === 0 && s.phase === 'play') openCell(s, i);
+});
+canvas.addEventListener('pointermove', e => {
+  const [px, py] = toLogical(e);
+  pointer.x = px; pointer.y = py; pointer.has = true;
+  if (dragFlag && scene === 'play' && state.phase === 'play') {
+    const i = cellAt(state, px, py);
+    if (i >= 0 && i !== lastDragCell) { lastDragCell = i; markFlags(state, i); }
+  }
+});
+addEventListener('pointerup', () => { dragFlag = false; lastDragCell = -1; });
+addEventListener('contextmenu', e => e.preventDefault());
+function tierRects(s) {
+  const r = boardRect(s), w = 96, h = 34, gap = 12;
+  const x0 = r.x, y0 = r.y - 52;
+  return TIERS.map((t, k) => ({ x: x0 + k * (w + gap), y: y0, w, h }));
+}
+
+// ---- Drawing: notebook paper, ballpoint everything ---------------------------------------
+function paper(x, y, w, h, c) {
+  ctx.fillStyle = c || '#f4ecd8'; ctx.fillRect(x, y, w, h);
+}
+function wobblyRect(x, y, w, h, seedI, amp) {
+  ctx.beginPath();
+  const pts = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]];
+  for (let k = 0; k < 4; k++) {
+    const [ax, ay] = pts[k], [bx, by] = pts[(k + 1) % 4];
+    const mx = (ax + bx) / 2 + jit(seedI + k, 7) * amp, my = (ay + by) / 2 + jit(seedI + k, 11) * amp;
+    if (k === 0) ctx.moveTo(ax + jit(seedI, 3) * amp, ay + jit(seedI, 5) * amp);
+    ctx.quadraticCurveTo(mx, my, bx + jit(seedI + k, 13) * amp, by + jit(seedI + k, 17) * amp);
+  }
+  ctx.closePath();
+}
+function drawFlag(cx, cy, sz, bad) {
+  ctx.strokeStyle = bad ? '#c0392b' : '#b3402e'; ctx.fillStyle = bad ? '#c0392b' : '#d0553f';
+  ctx.lineWidth = Math.max(1.6, sz * 0.09);
+  ctx.beginPath(); ctx.moveTo(cx - sz * 0.18, cy + sz * 0.32); ctx.lineTo(cx - sz * 0.1, cy - sz * 0.34); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - sz * 0.1, cy - sz * 0.34);
+  ctx.lineTo(cx + sz * 0.34, cy - sz * 0.12 + jit(cx | 0, 2) * sz * 0.03); ctx.lineTo(cx - sz * 0.06, cy - sz * 0.02);
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx - sz * 0.36, cy + sz * 0.34); ctx.lineTo(cx + sz * 0.14, cy + sz * 0.34); ctx.stroke();
+}
+function drawMine(cx, cy, sz) { // an ink star, not a plain circle
+  ctx.fillStyle = '#2b2b2b';
+  ctx.beginPath();
+  for (let k = 0; k < 9; k++) {
+    const a = k / 9 * 2 * Math.PI, r1 = sz * (0.16 + 0.05 * jit(k, 3)), r2 = sz * (0.42 + 0.1 * jit(k, 5));
+    ctx.lineTo(cx + Math.cos(a) * r2, cy + Math.sin(a) * r2);
+    ctx.lineTo(cx + Math.cos(a + 0.35) * r1, cy + Math.sin(a + 0.35) * r1);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.beginPath(); ctx.arc(cx - sz * 0.08, cy - sz * 0.08, sz * 0.05, 0, 7); ctx.fillStyle = '#f4ecd8'; ctx.fill();
+}
+function drawCell(s, i, px, py, cw, forSheet) {
+  const x = i % s.cols, y = (i / s.cols) | 0, st = s.st ? s.st[i] : 0;
+  const bad = s.bad ? s.bad[i] : 0;
+  let flip = 1; // 1 = paper side; the win wave shrinks it and shows the bright back
+  if (s.phase === 'won' && st === 1 && !forSheet) {
+    const start = (x + s.rows - 1 - y) * tune.wave_gap; // the wave sweeps from the lower-left
+    const k = (s.revealT - start) / tune.flip_dur;
+    if (k >= 1) flip = -1; else if (k > 0) flip = Math.abs(Math.cos(k * Math.PI)) * (k > 0.5 ? -1 : 1);
+  }
+  const cx = px + cw / 2;
+  ctx.save();
+  if (flip !== 1) { ctx.translate(cx, py + cw / 2); ctx.scale(Math.max(0.02, Math.abs(flip)), 1); ctx.translate(-cx, -(py + cw / 2)); }
+  // paper tile with a wobbly ballpoint border
+  wobblyRect(px + 1.5, py + 1.5, cw - 3, cw - 3, i * 3, cw * 0.035);
+  ctx.fillStyle = flip < 0 ? '#dcefd0' : '#f4ecd8'; ctx.fill();
+  ctx.strokeStyle = '#8d9bb5'; ctx.lineWidth = 1.2; ctx.stroke();
+  if (flip < 0) { ctx.restore(); return; } // the back side is the bright image
+  if (st === 2) { drawFlag(px + cw / 2, py + cw / 2, cw, bad); if (bad) { ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 2; wobblyRect(px + 2, py + 2, cw - 4, cw - 4, i, cw * 0.04); ctx.stroke(); } }
+  else if (st === 1) {
+    const n = s.num[i];
+    if (s.mine && s.mine[i]) drawMine(px + cw / 2, py + cw / 2, cw); // shown when a fatal click ends the board
+    else if (n > 0) {
+      const sat = neighbors(s, i).filter(j => s.st[j] === 2).length === n;
+      ctx.save(); ctx.translate(px + cw / 2, py + cw / 2); ctx.rotate(jit(i, 23) * 0.06);
+      text(String(n), 0, 1, cw * 0.5, sat ? '#a9b2a2' : (bad ? '#c0392b' : NUMC[n - 1]));
+      ctx.restore();
+      if (bad) { ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 2; wobblyRect(px + 2, py + 2, cw - 4, cw - 4, i + 1, cw * 0.04); ctx.stroke(); }
+    }
+  } else if (s.dead && s.mine && s.mine[i] && s.phase === 'dead') {
+    drawMine(px + cw / 2, py + cw / 2, cw); // the whole field shown at the end
+  }
+  ctx.restore();
+}
+
+// ---- Scenes: keep only the day-one screens the brief calls for ----------------------------
+// title: always. pause: real-time games. over: hard failure. results: a game with an end.
+// figures: every enemy kind and unit side by side, for the outline check (?scene=figures).
+// The checks look for play by name.
+let scene, state;
+const scenes = {
+  figures: {
+    update(dt) { state.t += dt; },
+    draw() {
+      clear('#efe6cf');
+      const cw = 90, x0 = (W - cw * 8) / 2, y0 = 220;
+      const names = ['空白纸格', '翻开空格', '数字 3', '满足变灰', '违规描红', '旗标', '地雷·墨星', '翻面亮底'];
+      for (let i = 0; i < 8; i++) {
+        wobblyRect(x0 + i * cw + 1.5, y0 + 1.5, cw - 3, cw - 3, i * 3, cw * 0.035);
+        ctx.fillStyle = i === 7 ? '#dcefd0' : '#f4ecd8'; ctx.fill();
+        ctx.strokeStyle = '#8d9bb5'; ctx.lineWidth = 1.2; ctx.stroke();
+      }
+      text('3', x0 + 2.5 * cw, y0 + cw / 2, cw * 0.5, NUMC[2]);
+      text('3', x0 + 3.5 * cw, y0 + cw / 2, cw * 0.5, '#a9b2a2'); // satisfied: gray
+      text('3', x0 + 4.5 * cw, y0 + cw / 2, cw * 0.5, '#c0392b'); // violated: red
+      ctx.strokeStyle = '#c0392b'; ctx.lineWidth = 2;
+      wobblyRect(x0 + 4 * cw + 2, y0 + 2, cw - 4, cw - 4, 41, cw * 0.04); ctx.stroke();
+      drawFlag(x0 + 5.5 * cw, y0 + cw / 2, cw, true);
+      drawMine(x0 + 6.5 * cw, y0 + cw / 2, cw);
+      for (let i = 0; i < 8; i++) text(names[i], x0 + i * cw + cw / 2, y0 + cw + 26, 20, '#4a4a4a');
+      text('每种状态都画:纸格·数字·变灰·描红·旗·墨星·翻面', W / 2, 120, 30, '#4a4a4a');
+    },
+  },
+  title: {
+    update(dt) {
+      state.t += dt;
+      if (pressed('Digit1')) setTier(0);
+      if (pressed('Digit2')) setTier(1);
+      if (pressed('Digit3')) setTier(2);
+      const px = pointer.x, py = pointer.y;
+      const tiers = [{ x: 156, y: 312, w: 150, h: 68 }, { x: 320, y: 312, w: 150, h: 68 }, { x: 484, y: 312, w: 150, h: 68 }];
+      const btn = { x: 156, y: 544, w: 320, h: 64 };
+      const hover = (px >= btn.x && px <= btn.x + btn.w && py >= btn.y && py <= btn.y + btn.h)
+        || tiers.some(b => px >= b.x && px <= b.x + b.w && py >= b.y && py <= b.y + b.h);
+      canvas.style.cursor = hover ? 'pointer' : 'default';
+      if (pressed('Enter') || pressed('Space')) { canvas.style.cursor = 'default'; scene = 'play'; }
+    },
+    draw() {
+      clear('#efe6cf');
+      paper(0, 0, W, H, '#efe6cf');
+      ctx.strokeStyle = '#b8c6dd'; ctx.lineWidth = 1; // the ruled notebook lines
+      for (let y = 76; y < H; y += 44) { ctx.beginPath(); ctx.moveTo(56, y + jit(y, 1) * 1.5); ctx.lineTo(W - 56, y); ctx.stroke(); }
+      ctx.strokeStyle = '#d8a7a0'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(116, 40); ctx.lineTo(116, H - 40); ctx.stroke();
+
+      const lx = 156, t = state.t || 0;
+      // 左侧笔记标签与标题
+      wobblyRect(lx, 96, 178, 32, 11, 1.5);
+      ctx.fillStyle = '#dcefd0'; ctx.fill();
+      ctx.strokeStyle = '#6c8d5e'; ctx.lineWidth = 1.5; ctx.stroke();
+      text('零猜测逻辑 · 不计时', lx + 89, 112, 15, '#3b5732');
+
+      text(TITLE, lx, 186, 80, '#36322d', 'left');
+      text('每一格都是想出来的 —— 第一下安全，踩雷可反悔一次', lx, 250, 21, '#6f675b', 'left');
+
+      // 可点击难度纸片
+      text('选择盘面大小（点击或按 1 / 2 / 3）', lx, 294, 16, '#7a7062', 'left');
+      const tierMeta = [
+        [TIERS[0].name, `${tune.t1_cols}×${tune.t1_rows} · ${tune.t1_mines}雷`],
+        [TIERS[1].name, `${tune.t2_cols}×${tune.t2_rows} · ${tune.t2_mines}雷`],
+        [TIERS[2].name, `${tune.t3_cols}×${tune.t3_rows} · ${tune.t3_mines}雷`],
+      ];
+      tierMeta.forEach(([name, sub], k) => {
+        const bx = lx + k * 164, by = 312, bw = 150, bh = 68;
+        const active = state.tier === k;
+        const hov = pointer.x >= bx && pointer.x <= bx + bw && pointer.y >= by && pointer.y <= by + bh;
+        wobblyRect(bx, by - (hov ? 2 : 0), bw, bh, 200 + k * 9, 1.8);
+        ctx.fillStyle = active ? '#dcefd0' : hov ? '#faf3e1' : '#f4ecd8'; ctx.fill();
+        ctx.strokeStyle = active ? '#4f7a44' : '#8d9bb5'; ctx.lineWidth = active ? 2.6 : 1.5; ctx.stroke();
+        text(name, bx + bw / 2, by + 23 - (hov ? 2 : 0), 22, active ? '#2f4c28' : '#4a4640');
+        text(sub, bx + bw / 2, by + 50 - (hov ? 2 : 0), 14, active ? '#4a6b3e' : '#7b7469');
+      });
+
+      // 操作说明芯片
+      const notes = [
+        ['左键 / 空格', '翻开纸格'],
+        ['右键 / 拖动', '插红旗标记'],
+        ['U 撤销 · R 换盘', '方向键也可游走'],
+      ];
+      notes.forEach(([k, v], i) => {
+        const ny = 408 + i * 40;
+        wobblyRect(lx, ny, 478, 32, 310 + i * 5, 1.2);
+        ctx.fillStyle = 'rgba(255,252,244,0.58)'; ctx.fill();
+        ctx.strokeStyle = 'rgba(141,155,181,0.45)'; ctx.lineWidth = 1; ctx.stroke();
+        text(k, lx + 14, ny + 16, 16, '#4a6fa5', 'left');
+        text(v, lx + 178, ny + 16, 16, '#565047', 'left');
+      });
+
+      // 主 CTA 按钮
+      const btn = { x: lx, y: 544, w: 320, h: 64 };
+      const bHov = pointer.x >= btn.x && pointer.x <= btn.x + btn.w && pointer.y >= btn.y && pointer.y <= btn.y + btn.h;
+      wobblyRect(btn.x, btn.y - (bHov ? 2 : 0), btn.w, btn.h, 99, 2.2);
+      ctx.fillStyle = bHov ? '#466b3c' : '#3a4a38'; ctx.fill();
+      ctx.strokeStyle = '#243022'; ctx.lineWidth = 2.4; ctx.stroke();
+      text('铺开新纸盘  [Enter / 空格]', btn.x + btn.w / 2, btn.y - (bHov ? 2 : 0) + btn.h / 2, 21, '#f7f1e1');
+
+      // 右侧手绘 4×4 示范纸盘
+      const gx = 748, gy = 148, cw = 88;
+      wobblyRect(gx - 22, gy - 22, cw * 4 + 44, cw * 4 + 86, 55, 2.5);
+      ctx.fillStyle = 'rgba(248,242,226,0.92)'; ctx.fill();
+      ctx.strokeStyle = '#9aa8c0'; ctx.lineWidth = 1.8; ctx.stroke();
+      const sample = [
+        [1, 1, 0, 0],
+        [1, 2, 2, 0],
+        [0, 1, 3, 2],
+        [0, 0, 'F', 'M'],
+      ];
+      for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
+        const px = gx + c * cw, py = gy + r * cw, v = sample[r][c], idxCell = r * 4 + c;
+        wobblyRect(px + 2, py + 2, cw - 4, cw - 4, idxCell * 5 + 7, 2.2);
+        ctx.fillStyle = (r === 2 && c === 2) ? '#dcefd0' : '#f4ecd8'; ctx.fill();
+        ctx.strokeStyle = '#8d9bb5'; ctx.lineWidth = 1.4; ctx.stroke();
+        if (typeof v === 'number' && v > 0) {
+          text(String(v), px + cw / 2, py + cw / 2, 34, (r === 1 && c === 0) ? '#a9b2a2' : NUMC[v - 1]);
+        } else if (v === 'F') {
+          ctx.save(); ctx.translate(0, Math.sin(t * 3) * 1.5); drawFlag(px + cw / 2, py + cw / 2, cw * 0.9, false); ctx.restore();
+        } else if (v === 'M') {
+          ctx.save(); ctx.translate(px + cw / 2, py + cw / 2); ctx.rotate(Math.sin(t * 0.8) * 0.08); drawMine(0, 0, cw * 0.85); ctx.restore();
+        }
+      }
+      text('满足变灰 · 旗标防误触 · 墨星即雷', gx + cw * 2, gy + cw * 4 + 34, 18, '#6a6358');
+    },
+  },
+  play: {
+    update(dt) {
+      const s = state;
+      s.t += dt;
+      if (s.phase === 'play') s.clock += dt;
+      if (s.phase === 'won') s.revealT += dt;
+      if (pressed('KeyR')) { setTier(s.tier); tone(200, 0.05, 'triangle', 0.08); return; }
+      if (pressed('Digit1')) { setTier(0); return; }
+      if (pressed('Digit2')) { setTier(1); return; }
+      if (pressed('Digit3')) { setTier(2); return; }
+      if (pressed('KeyU')) { undoOnce(s); return; }
+      if (s.phase === 'won' && (s.revealT - (s.cols + s.rows) * tune.wave_gap > tune.flip_dur) && pressed('Enter')) { setTier(s.tier); return; }
+      if (s.phase === 'dead' && pressed('Enter')) { setTier(s.tier); return; }
+      // the keyboard cursor
+      const mv = (dx, dy) => { s.cursor.x = Math.max(0, Math.min(s.cols - 1, s.cursor.x + dx)); s.cursor.y = Math.max(0, Math.min(s.rows - 1, s.cursor.y + dy)); };
+      if (pressed('ArrowLeft')) mv(-1, 0); if (pressed('ArrowRight')) mv(1, 0);
+      if (pressed('ArrowUp')) mv(0, -1); if (pressed('ArrowDown')) mv(0, 1);
+      if (pressed('Space')) openCell(s, idx(s, s.cursor.x, s.cursor.y));
+      if (pressed('KeyF')) markFlags(s, idx(s, s.cursor.x, s.cursor.y));
+    },
+    draw() {
+      const s = state;
+      clear('#efe6cf');
+      paper(0, 0, W, H, '#efe6cf');
+      ctx.strokeStyle = '#c9d4e6'; ctx.lineWidth = 1;
+      for (let y = 60; y < H; y += 44) { ctx.beginPath(); ctx.moveTo(40, y); ctx.lineTo(W - 40, y + jit(y, 2) * 1.2); ctx.stroke(); }
+      const r = boardRect(s);
+      // the tier buttons
+      const tr = tierRects(s);
+      tr.forEach((b, k) => {
+        wobblyRect(b.x, b.y, b.w, b.h, 100 + k * 7, 1.5);
+        ctx.fillStyle = k === s.tier ? '#dcefd0' : '#f4ecd8'; ctx.fill();
+        ctx.strokeStyle = k === s.tier ? '#5a7a4a' : '#8d9bb5'; ctx.lineWidth = 1.5; ctx.stroke();
+        text(TIERS[k].name, b.x + b.w / 2, b.y + b.h / 2, 22, '#4a4a4a');
+      });
+      text(`已标旗 ${s.flagsPlaced}/${s.mines}`, r.x, r.y + s.rows * r.cw + 24, 22, '#4a4a4a', 'left');
+      text(`用时 ${fmt(s.clock)}`, r.x + s.cols * r.cw, r.y + s.rows * r.cw + 24, 22, '#4a4a4a', 'right');
+      if (s.st) for (let i = 0; i < s.st.length; i++) drawCell(s, i, r.x + (i % s.cols) * r.cw, r.y + ((i / s.cols) | 0) * r.cw, r.cw);
+      else { // the fresh board: blank paper waiting for the first click
+        for (let i = 0; i < s.cols * s.rows; i++) drawCell(s, i, r.x + (i % s.cols) * r.cw, r.y + ((i / s.cols) | 0) * r.cw, r.cw);
+        text('先点一格:第一下必定安全', W / 2, r.y + s.rows * r.cw / 2, 30, '#8a8a7a');
+      }
+      // the keyboard cursor
+      ctx.strokeStyle = '#4a6fa5'; ctx.lineWidth = 2.5;
+      ctx.strokeRect(r.x + s.cursor.x * r.cw + 1, r.y + s.cursor.y * r.cw + 1, r.cw - 2, r.cw - 2);
+      text('左键翻开 · 右键/拖动标旗 · U 撤销 · R 换盘', W / 2, H - 34, 20, '#8a8a7a');
+      if (s.phase === 'dead') {
+        ctx.fillStyle = 'rgba(60,50,40,0.35)'; ctx.fillRect(0, 0, W, H);
+        text(s.dead, W / 2, H / 2, 34, '#fff');
+      }
+      if (s.phase === 'won' && s.revealT > (s.cols + s.rows) * tune.wave_gap + tune.flip_dur) {
+        text(s.gained, W / 2, H / 2 - 20, 34, '#3a3a3a');
+        text('Enter 再来一盘', W / 2, H / 2 + 34, 26, '#5a5a5a');
+      }
+    },
+  },
+  results: {
+    update() { if (pressed('Enter')) { reset(); scene = 'play'; } },
+    draw() { scenes.play.draw(); },
+  },
+};
+
+// ---- Loop: fixed step, frame time clamped ---------------------------------------------
+function step() {
+  if (pressed('KeyM')) { setMuted(!muted); hit.delete('KeyM'); }
+  scenes[scene].update(STEP); hit.clear();
+}
+let last, acc = 0, ALPHA = 1; // ALPHA: how far the frame is between the last two steps
+function tick() {
+  const now = clock.now();
+  acc += Math.min(now - last, 0.25); last = now; // a stall never fast-forwards the game
+  while (acc >= STEP) { step(); acc -= STEP; }
+  ALPHA = acc / STEP; // draw between steps, so the view never judders
+  drawFrame();
+}
+function drawFrame() { scenes[scene].draw(); }
+function frame() { tick(); requestAnimationFrame(frame); }
+// A headless browser on a time budget runs timers but almost no animation frames: a timer
+// ticks when no frame has come for 100 ms on a visible page; a hidden tab stays paused.
+function timer() { if (document.visibilityState === 'visible' && clock.now() - last > 0.1) tick(); }
+
+// ---- What a check can read and drive (?manual=1 stops the loop; players never see it) ----
+window.game = {
+  get scene() { return scene; },
+  get state() { return state; },
+  press(code) { hit.add(code); },
+  hold(code, on) { on ? down.add(code) : down.delete(code); },
+  get events() { return events; }, // the loop steps; a check empties it
+  step(n = 1, draw = true, alpha = 1) {
+    for (let i = 0; i < n; i++) step();
+    if (draw) { ALPHA = alpha; drawFrame(); }
+  },
+};
+
+reset();
+scene = params.get('scene') || 'title';
+last = clock.now();
+if (params.get('manual') === '1') drawFrame();
+else { requestAnimationFrame(frame); setInterval(timer, 50); }
+
+</script>
+</body>
+</html>

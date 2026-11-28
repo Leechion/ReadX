@@ -256,16 +256,30 @@ export function useLatexProject(projectId: string | null) {
   ): Promise<string> => {
     if (!projectId) return '项目已关闭，未保存修改。';
     signal?.throwIfAborted();
-    if (!(await openFile(proposal.filePath))) return '无法打开目标文件，未保存修改。';
+    let createdNew = false;
+    if (!(await openFile(proposal.filePath))) {
+      if (proposal.original) return '无法打开目标文件，未保存修改。';
+      try {
+        await api.latexCreateSnapshot(projectId, `AI 新建前：${proposal.filePath}`);
+        await api.latexFileOp(projectId, { op: 'new-file', to: proposal.filePath });
+        await refreshTree();
+        createdNew = true;
+      } catch (cause) {
+        return cause instanceof Error ? `新建文件失败：${cause.message}` : '新建文件失败。';
+      }
+      if (!(await openFile(proposal.filePath))) return '无法打开目标文件，未保存修改。';
+    }
     const current = filesRef.current.find((file) => file.path === proposal.filePath);
     if (current?.content !== proposal.original) {
       return '源码在 AI 生成期间发生了变化，未应用修改。请重新发送修改要求。';
     }
-    signal?.throwIfAborted();
-    try {
-      await api.latexCreateSnapshot(projectId, `AI 修改前：${proposal.filePath}`);
-    } catch (cause) {
-      return cause instanceof Error ? `创建修改前快照失败，未保存文件：${cause.message}` : '创建修改前快照失败，未保存文件。';
+    if (!createdNew) {
+      signal?.throwIfAborted();
+      try {
+        await api.latexCreateSnapshot(projectId, `AI 修改前：${proposal.filePath}`);
+      } catch (cause) {
+        return cause instanceof Error ? `创建修改前快照失败，未保存文件：${cause.message}` : '创建修改前快照失败，未保存文件。';
+      }
     }
     signal?.throwIfAborted();
     if (!replaceContentIfUnchanged(proposal.filePath, proposal.original, proposal.content)) {
@@ -274,7 +288,7 @@ export function useLatexProject(projectId: string | null) {
     return await saveFile(proposal.filePath)
       ? `已应用并保存：${proposal.filePath}`
       : '保存失败；修改前快照已保留。请处理编辑器中的保存提示。';
-  }, [openFile, projectId, replaceContentIfUnchanged, saveFile]);
+  }, [openFile, projectId, refreshTree, replaceContentIfUnchanged, saveFile]);
 
   /** 冲突时用户的第二种选择：以本地内容覆盖远端（重新取 revision 后再写）。 */
   const forceSave = useCallback(

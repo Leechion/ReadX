@@ -28,8 +28,6 @@ import { Icon } from './ui/Icon';
 import { IconButton, Segmented } from './ui/Primitives';
 
 type ReadingMode = 'source' | 'parallel' | 'translation';
-const modeLabels: Record<ReadingMode, string> = { source: '仅原文', parallel: '原文译文', translation: '仅译文' };
-const readingModes = ['source', 'parallel', 'translation'] as const;
 
 interface Props {
   detail: DocumentPhase;
@@ -1082,15 +1080,8 @@ export function ReaderScreen({
     }
   };
   const toolGroups: ReaderToolGroup[] = [{
-    id: 'reading', label: '阅读', summary: modeLabels[mode],
+    id: 'reading', label: '视图',
     sections: [
-      {
-        label: '显示模式',
-        tools: readingModes.map(item => ({
-          id: item, label: modeLabels[item], checked: mode === item, radio: true,
-          onSelect: () => switchMode(item),
-        })),
-      },
       {
         tools: [
           {

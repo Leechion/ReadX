@@ -224,6 +224,27 @@ export interface LatexAIEditProposal {
   content: string;
 }
 
+export interface AgentTaskStep {
+  id: string;
+  title: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | string;
+  agent?: string;
+  description?: string;
+}
+
+export interface AgentToolTrace {
+  id: string;
+  toolName: string;
+  label: string;
+  status: 'running' | 'completed' | 'failed' | string;
+  inputPreview?: string;
+  outputPreview?: string;
+  locations?: string[];
+  isError?: boolean;
+}
+
+export type AgentExecutionMode = 'agent' | 'review' | 'readonly';
+
 export interface ChatChunk {
   meta?: { included: number; total: number; scope: string; unit?: string; provider?: string; model?: string; reasoningEffort?: string };
   progress?: string;
@@ -233,6 +254,14 @@ export interface ChatChunk {
   error?: string;
   partial?: string;
   edit?: LatexAIEditProposal | null;
+  edits?: LatexAIEditProposal[];
+  autoApplied?: boolean;
+  snapshotId?: string;
+  agentMode?: AgentExecutionMode | string;
+  agentRole?: string;
+  thinking?: string;
+  taskPlan?: AgentTaskStep[];
+  toolCall?: AgentToolTrace;
 }
 
 /**
@@ -326,6 +355,8 @@ export async function streamChat(
     projectTitle?: string;
     filePath?: string;
     source?: string;
+    agentMode?: string;
+    referenceKeys?: string[];
   },
   onChunk: (chunk: ChatChunk) => void,
   signal?: AbortSignal,
@@ -352,7 +383,7 @@ export async function streamLatexRealtime(
 }
 
 export function streamLatexChat(
-  request: { key: string; projectId: string; projectTitle: string; filePath: string; source: string; question: string; referenceKeys?: string[]; history?: Array<{ role: string; text: string }> },
+  request: { key: string; projectId: string; projectTitle: string; filePath: string; source: string; question: string; agentMode?: string; referenceKeys?: string[]; history?: Array<{ role: string; text: string }> },
   onChunk: (chunk: ChatChunk) => void,
   signal?: AbortSignal,
 ): Promise<void> {

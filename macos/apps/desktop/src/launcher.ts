@@ -14,15 +14,17 @@ export class DesktopLauncher {
   private catalog: LauncherCatalog = { current: 'library', groups: [] };
   private ready = false;
   private disposed = false;
+  private enabled = true;
   private stopHook: (() => void) | null = null;
   private lastMove = 0;
   private origin = { x: 0, y: 0 };
   private hold: AltHold;
 
   constructor(private options: {
-    url: string; preload: string; apiBase: string; token: string;
+    url: string; preload: string; apiBase: string; token: string; enabled?: boolean;
     main: () => BrowserWindow | null; restore: () => void; log: (message: string) => void;
   }) {
+    this.enabled = options.enabled ?? true;
     this.window = new BrowserWindow({
       width: 720, height: 720, show: false, frame: false, transparent: true,
       resizable: false, movable: false, skipTaskbar: true, alwaysOnTop: true,
@@ -53,11 +55,30 @@ export class DesktopLauncher {
     const url = new URL(options.url);
     url.searchParams.set('readxWindow', 'launcher');
     void this.window.loadURL(url.toString()).catch(error => options.log(`轮盘加载失败：${String(error)}`));
-    this.enableHook();
+    if (this.enabled) this.enableHook();
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  setEnabled(next: boolean): void {
+    this.enabled = next;
+    if (next) this.enableHook();
+    else this.disableHook();
+  }
+
+  disableHook(): void {
+    this.hold.cancel();
+    this.hide();
+    if (this.stopHook) {
+      this.stopHook();
+      this.stopHook = null;
+    }
   }
 
   enableHook(): void {
-    if (this.stopHook || this.disposed) return;
+    if (!this.enabled || this.stopHook || this.disposed) return;
     // macOS needs Accessibility permission before libuiohook can observe Option/Alt.
     if (process.platform === 'darwin' && !systemPreferences.isTrustedAccessibilityClient(false)) return;
     try {
@@ -106,7 +127,7 @@ export class DesktopLauncher {
 
   /** Tray entry also makes the wheel available without holding a key. */
   show(): void {
-    if (!this.ready || this.disposed) return;
+    if (!this.enabled || !this.ready || this.disposed) return;
     const cursor = screen.getCursorScreenPoint();
     this.origin = cursor;
     const area = screen.getDisplayNearestPoint(cursor).workArea;

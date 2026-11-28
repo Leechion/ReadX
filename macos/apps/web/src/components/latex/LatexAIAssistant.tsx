@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DocumentSummary, LatexAutoFixResult, LatexBuild, LatexSnapshot } from '@cbct/shared';
-import { api, latexAIFix, streamLatexChat, type LatexAISettings, type LatexSnapshotDiffResult } from '../../api/client';
+import { api, latexAIFix, streamLatexChat, type AgentExecutionMode, type LatexAISettings, type LatexSnapshotDiffResult } from '../../api/client';
 import { useAIPreferences } from '../../hooks/useAIPreferences';
 import { useConfirm } from '../ConfirmDialog';
 import { ChatWorkspace } from '../ChatWorkspace';
@@ -27,6 +27,8 @@ export function LatexAIAssistant({
   onAutoFix,
   onRollbackSnapshot,
   onRefreshSnapshots,
+  onAgentDirectApplied,
+  onOpenFile,
 }: {
   projectId: string;
   projectTitle: string;
@@ -48,10 +50,13 @@ export function LatexAIAssistant({
   onAutoFix: (question: string) => void;
   onRollbackSnapshot: (snapshotId: string) => void;
   onRefreshSnapshots: () => void;
+  onAgentDirectApplied?: (filePaths: string[]) => Promise<void>;
+  onOpenFile?: (path: string) => void;
 }) {
   const preferences = useAIPreferences();
   const confirmDialog = useConfirm();
   const chatKey = `latex-project:${projectId}`;
+  const [agentMode, setAgentMode] = useState<AgentExecutionMode>('agent');
   const [fixing, setFixing] = useState(false);
   const [applying, setApplying] = useState(false);
   const [fixError, setFixError] = useState('');
@@ -240,7 +245,11 @@ export function LatexAIAssistant({
   }, [modelSettings, preferences]);
   const effectiveReady = effective?.configured ?? false;
   const transport = useCallback(
-    (request: { key: string; question: string; history?: Array<{ role: string; text: string }> }, onChunk: Parameters<typeof streamLatexChat>[1], signal?: AbortSignal) =>
+    (
+      request: { key: string; question: string; history?: Array<{ role: string; text: string }>; agentMode?: string },
+      onChunk: Parameters<typeof streamLatexChat>[1],
+      signal?: AbortSignal,
+    ) =>
       runLatexChat(
         {
           key: request.key,
@@ -249,13 +258,26 @@ export function LatexAIAssistant({
           filePath,
           source,
           question: request.question,
+          agentMode: request.agentMode || agentMode,
           referenceKeys: referenceKeys.length ? referenceKeys : undefined,
           history: request.history,
         },
-        onChunk,
+        (chunk) => {
+          onChunk(chunk);
+          if (chunk.done && chunk.autoApplied) {
+            const changedPaths = (chunk.edits && chunk.edits.length > 0 ? chunk.edits : chunk.edit ? [chunk.edit] : [])
+              .map((item) => item.filePath)
+              .filter(Boolean);
+            if (changedPaths.length && onAgentDirectApplied) {
+              void onAgentDirectApplied(changedPaths);
+            } else {
+              onRefreshSnapshots();
+            }
+          }
+        },
         signal,
       ),
-    [filePath, projectId, projectTitle, referenceKeys, source],
+    [agentMode, filePath, onAgentDirectApplied, onRefreshSnapshots, projectId, projectTitle, referenceKeys, source],
   );
 
   const generateFix = async () => {
@@ -731,25 +753,33 @@ export function LatexAIAssistant({
         transport={transport}
         trackDocumentStatus={false}
         supportsImages={false}
-        welcomeHeading="和 AI 一起写论文"
+        welcomeHeading="LaTeX 智能体工作流"
         welcomeQuestions={
           referenceKeys.length
             ? [
-                '基于已选书库文献的精读与批注，为当前章节起草一段 Related Work 并插入 \\cite{}。',
-                '把已选书库文献的方法与实验配置整理成一张 LaTeX booktabs 对比表。',
-                '检查当前 LaTeX 源码中的错误，并给出修复建议。',
+                '@章节撰写 基于已选书库文献的精读与批注，为当前章节起草一段 Related Work 并插入 \\cite{}。',
+                '@章节撰写 把已选书库文献的方法与实验配置整理成一张 LaTeX booktabs 对比表。',
+                '@引用补齐 将已选书库文献补齐到 references.bib 并在正文中插入引用。',
               ]
             : [
-                '检查当前 LaTeX 源码中的错误，并给出修复建议。',
-                '帮我润色这一段论文文字，保留原意并返回 LaTeX。',
-                '为当前章节补充一个结构清晰的写作提纲。',
+                '@编译排错 检查当前项目中的 LaTeX 错误并直接修复目标文件。',
+                '@全文润色 帮我润色当前章节的学术表达，保留公式与原意并更新源码。',
+                '@章节撰写 为当前论文新建或完善 Method / Experiments 章节文件。',
               ]
         }
         onApplyEdit={onApplyFix}
+        agentMode={agentMode}
+        onAgentModeChange={setAgentMode}
+        onRollbackSnapshot={onRollbackSnapshot}
+        onOpenFile={onOpenFile}
         composerHint={
-          referenceKeys.length
-            ? `已挂载 ${referenceKeys.length} 篇书库精读资料；确认修改卡片后保存`
-            : '发送修改要求，确认对话中的卡片后保存'
+          agentMode === 'agent'
+            ? `智能体直改模式：自动创建快照并直接写入/新建文件${referenceKeys.length ? `（已挂载 ${referenceKeys.length} 篇书库文献）` : ''}`
+            : agentMode === 'readonly'
+              ? '只读规划模式：仅分析源码与规划结构，不改写任何文件'
+              : referenceKeys.length
+                ? `已挂载 ${referenceKeys.length} 篇书库精读资料；确认修改卡片后保存`
+                : '审批修改模式：生成单文件或多文件修改卡片，确认后保存'
         }
       />
       {confirmDialog.node}

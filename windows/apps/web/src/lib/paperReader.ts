@@ -22,7 +22,12 @@ export async function preparePaperReading(_key: string, pdf: PDFDocumentProxy | 
         continue;
       }
       try {
-        const [reference] = await prepareReadingVisuals([visual], signal, () => report({ percent: 37, message: `正在准备正文原图 · Page ${visual.page}` }));
+        const [reference] = await prepareReadingVisuals(
+          [visual],
+          signal,
+          () => report({ percent: 37, message: `正在准备正文原图 · Page ${visual.page}` }),
+          { includeNeedsReview: true },
+        );
         if (!reference) continue;
         if (input.visuals.length >= 256 || encodedSize + reference.imagePNG.length > (60 << 20)) throw new Error('原图附件超过单次容量');
         input.visuals.push(reference);

@@ -49,7 +49,7 @@ require(path.join(root, 'apps/desktop/dist/main.js'));
   screen.getCursorScreenPoint = () => cursor;
 
   main.close();
-  await until(() => main.isMinimized(), 'close must minimize the main window');
+  await until(() => !main.isVisible(), 'close must hide the main window');
   assert.equal(main.isDestroyed(), false);
   assert((await api(main, '/v1/meta')).pid > 0, 'server must stay running after close');
   key('keydown', UiohookKey.Alt); await delay(100); key('keyup', UiohookKey.Alt); await delay(300);
@@ -59,7 +59,7 @@ require(path.join(root, 'apps/desktop/dist/main.js'));
 
   const show = async () => { key('keydown', UiohookKey.Alt); await until(() => wheel.isVisible(), 'Alt hold did not open wheel'); };
   await show();
-  assert.equal(main.isMinimized(), true, 'showing the wheel must not restore the main window');
+  assert.equal(main.isVisible(), false, 'showing the wheel must not restore the main window');
   assert.equal(await js(wheel, 'document.querySelectorAll(".readx-wheel-workspace").length'), 5);
   const screenshot = await wheel.webContents.capturePage();
   fs.writeFileSync(path.join(workspace, 'wheel.png'), screenshot.toPNG());
@@ -69,7 +69,7 @@ require(path.join(root, 'apps/desktop/dist/main.js'));
   const angle = 126 * Math.PI / 180;
   cursor = { x: bounds.x + (360 + Math.cos(angle) * 122) * scale, y: bounds.y + (360 + Math.sin(angle) * 122) * scale };
   key('keyup', UiohookKey.Alt);
-  await until(() => !wheel.isVisible() && !main.isMinimized(), 'release must restore main and dismiss wheel');
+  await until(() => !wheel.isVisible() && main.isVisible(), 'release must restore main and dismiss wheel');
   await until(() => js(main, '!!document.querySelector(".latex-empty, .latex-projects")'), 'LaTeX list not opened');
 
   const project = await api(main, '/v1/latex/projects', 'POST', { title: '轮盘集成项目', engine: 'xelatex' });

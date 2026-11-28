@@ -2,7 +2,7 @@ import { Activity, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useS
 const ReaderScreen = lazy(() => import('./components/ReaderScreen').then((module) => ({ default: module.ReaderScreen })));
 const ReproductionSection = lazy(() => import('./components/ReproductionSection').then((module) => ({ default: module.ReproductionSection })));
 import { LibraryScreen } from './components/LibraryScreen';
-import type { DocumentSummary, LauncherOpenRequest, LauncherTarget, LauncherWorkspace } from '@cbct/shared';
+import type { DocumentSummary, LauncherOpenRequest, LauncherTarget, LauncherWorkspace, PetSettings } from '@cbct/shared';
 const KnowledgeGraphSection = lazy(() => import('./components/KnowledgeGraphSection').then((module) => ({ default: module.KnowledgeGraphSection })));
 const ReadingCalendarSection = lazy(() => import('./components/ReadingCalendarSection').then((module) => ({ default: module.ReadingCalendarSection })));
 import { useAnnotations } from './hooks/useAnnotations';
@@ -29,6 +29,7 @@ import { readString, STORAGE_KEYS, writeString } from './lib/storage';
 import { ResearchWorkbench } from './components/ResearchWorkbench';
 import { FocusPendant } from './components/research/FocusPendant';
 import { useResearchWorkbench } from './hooks/useResearchWorkbench';
+import { finishFocusSession, focusSeconds, formatFocusClock, isFocusRunning, startFocusSession, toggleFocusSession } from './lib/researchWorkbench';
 import { useLauncherCatalog } from './hooks/useLauncherCatalog';
 import { api } from './api/client';
 
@@ -92,6 +93,7 @@ export default function App() {
   const [launcherRequest, setLauncherRequest] = useState<LauncherOpenRequest | null>(null);
   const [launcherError, setLauncherError] = useState('');
   const [launcherEnabled, setLauncherEnabled] = useState<boolean>(() => readString(STORAGE_KEYS.launcherWheelEnabled, '1') !== '0');
+  const [petSettings, setPetSettings] = useState<PetSettings | null>(null);
   const [libraryView, setLibraryView] = useState<'all' | 'favorite' | 'trash' | 'shelves'>('all');
   const [mode, setMode] = useState<WorkspaceMode>(readWorkspaceMode);
   const [curtain, setCurtain] = useState<{ target: WorkspaceMode; phase: 'closing' | 'opening' } | null>(null);
@@ -388,6 +390,95 @@ export default function App() {
     enabled: !popupTarget && launcherEnabled,
   });
 
+  useEffect(() => {
+    if (popupTarget) return;
+    const petBridge = window.__READX_PET__;
+    if (!petBridge) return;
+    let disposed = false;
+    void petBridge.getSettings().then((loaded) => {
+      if (!disposed) setPetSettings(loaded);
+    }).catch(() => {});
+    const offSettings = petBridge.onSettingsChanged((next) => setPetSettings(next));
+    const offLibrary = petBridge.onLibraryUpdated(() => reload());
+    const offNavigate = petBridge.onNavigateMain((target) => {
+      if (target.kind === 'focus') {
+        const now = Date.now();
+        researchWorkbench.setData((current) => {
+          if (target.action === 'start25') {
+            return { ...current, focusMode: 'countdown', focusSession: startFocusSession('countdown', 25, '', now) };
+          }
+          if (target.action === 'start45') {
+            return { ...current, focusMode: 'countdown', focusSession: startFocusSession('countdown', 45, '', now) };
+          }
+          if (target.action === 'toggle') {
+            return current.focusSession
+              ? toggleFocusSession(current, now)
+              : { ...current, focusMode: 'countdown', focusSession: startFocusSession('countdown', 25, '', now) };
+          }
+          return finishFocusSession(current, now, true);
+        });
+        return;
+      }
+      void (async () => {
+        if (currentScreen.current === 'latex' && latexBeforeLeave.current && !await latexBeforeLeave.current()) return;
+        changingMode.current = false;
+        setCurtain(null);
+        if (target.kind === 'mode') {
+          setMode(target.mode);
+          return;
+        }
+        setMode('research');
+        if (target.kind === 'import') {
+          commitScreen('library');
+          setImportFiles([]);
+        } else if (target.kind === 'document') {
+          if (target.id) openDocument(target.id);
+          else if (target.key) openDocumentByKey(target.key);
+          else commitScreen('library');
+        } else if (target.kind === 'screen') {
+          if (target.screen === 'library') setLibraryView('all');
+          commitScreen(target.screen);
+        }
+      })();
+    });
+    return () => {
+      disposed = true;
+      offSettings();
+      offLibrary();
+      offNavigate();
+    };
+  }, [openDocument, openDocumentByKey, popupTarget, reload, researchWorkbench.setData]);
+
+  const petRecentDocs = useMemo(() => {
+    const rank = (status: string) => (status === 'reading' ? 0 : status === 'queue' ? 1 : 2);
+    return [...launcherDocuments]
+      .sort((a, b) => rank(a.status) - rank(b.status) || b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, 5)
+      .map((doc) => ({ id: doc.id, key: doc.key, title: doc.translatedTitle || doc.title, status: doc.status }));
+  }, [launcherDocuments]);
+
+  useEffect(() => {
+    if (popupTarget) return;
+    const petBridge = window.__READX_PET__;
+    if (!petBridge) return;
+    const session = researchWorkbench.data.focusSession;
+    const push = () => {
+      const running = isFocusRunning(session);
+      const clock = session ? formatFocusClock(focusSeconds(session, Date.now())) : undefined;
+      petBridge.publishAppState({
+        theme: theme.resolved,
+        focusRunning: running,
+        focusClock: clock,
+        workspaceMode: mode,
+        recentDocs: petRecentDocs,
+      });
+    };
+    push();
+    if (!isFocusRunning(session)) return;
+    const timer = window.setInterval(push, 1000);
+    return () => window.clearInterval(timer);
+  }, [mode, petRecentDocs, popupTarget, researchWorkbench.data.focusSession, theme.resolved]);
+
   return (
     <div
       className="flex h-full min-h-0 flex-col"
@@ -618,6 +709,12 @@ export default function App() {
                 enabled: launcherEnabled,
                 onToggle: toggleLauncherEnabled,
               }}
+              desktopPet={petSettings ? {
+                enabled: petSettings.enabled,
+                onToggle: (next) => {
+                  void window.__READX_PET__?.updateSettings({ enabled: next }).then(setPetSettings);
+                },
+              } : undefined}
             />
           </Suspense>
         )}

@@ -172,8 +172,48 @@ function checkedGutenbergDownload(value: string): string | null {
   }
 }
 
+function isAllowedDevOrigin(originHeader: string, devPort: number): boolean {
+  try {
+    const parsed = new URL(originHeader);
+    if (parsed.protocol !== 'http:') return false;
+    const allowedHosts = new Set(['127.0.0.1', 'localhost', '[::1]']);
+    const effectivePort = parsed.port || '80';
+    return allowedHosts.has(parsed.hostname) && effectivePort === String(devPort);
+  } catch {
+    return false;
+  }
+}
+
+function devProxyOriginGuard(): Plugin {
+  return {
+    name: 'readx-dev-proxy-origin-guard',
+    configureServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const pathname = new URL(req.url ?? '/', 'http://127.0.0.1').pathname;
+        if (!pathname.startsWith('/v1/') && pathname !== '/v1' && pathname !== '/healthz') {
+          next();
+          return;
+        }
+        const devPort = server.config.server.port ?? 5183;
+        const fetchSite = req.headers['sec-fetch-site'];
+        const origin = req.headers.origin;
+        if (
+          (typeof fetchSite === 'string' && fetchSite === 'cross-site') ||
+          (typeof origin === 'string' && origin.length > 0 && !isAllowedDevOrigin(origin, devPort))
+        ) {
+          res.statusCode = 403;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+          res.end(JSON.stringify({ error: '拒绝跨站本地开发代理请求' }));
+          return;
+        }
+        next();
+      });
+    },
+  };
+}
+
 export default defineConfig({
-  plugins: [react(), tailwindcss(), booksDevelopmentProxy()],
+  plugins: [react(), tailwindcss(), devProxyOriginGuard(), booksDevelopmentProxy()],
   server: {
     port: 5183,
     strictPort: true,

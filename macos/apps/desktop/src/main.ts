@@ -13,6 +13,7 @@ import { downloadVerifiedUpdate } from './update-download';
 import { MacInstallerUpdater } from './mac-installer-update';
 import { createUpdateFetcher } from './update-fetch';
 import { DesktopLauncher } from './launcher';
+import { DesktopPet } from './pet';
 import { verifyBackup } from './backup';
 import { parseBrowserCapture } from './browser-capture';
 
@@ -40,6 +41,7 @@ interface ServerHandle {
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let launcher: DesktopLauncher | null = null;
+let pet: DesktopPet | null = null;
 let launcherEnabled = true;
 let windowStateSaveTimer: NodeJS.Timeout | null = null;
 let server: ServerHandle | null = null;
@@ -81,21 +83,27 @@ if (!app.requestSingleInstanceLock()) {
   void bootstrap();
 }
 
+function assertMainWindowSender(event: Electron.IpcMainInvokeEvent, message: string): void {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) {
+    throw new Error(message);
+  }
+}
+
 async function bootstrap(): Promise<void> {
   await app.whenReady();
   launcherEnabled = readLauncherEnabled();
   setupUpdater();
   setupBackup();
   ipcMain.handle('readx-capture:enable', event => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口启用采集');
+    assertMainWindowSender(event, '只允许主窗口启用采集');
     return app.isPackaged ? app.setAsDefaultProtocolClient('readx-capture') : app.setAsDefaultProtocolClient('readx-capture', process.execPath, [app.getAppPath()]);
   });
   ipcMain.handle('readx-launcher:get-enabled', event => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口读取轮盘设置');
+    assertMainWindowSender(event, '只允许主窗口读取轮盘设置');
     return launcherEnabled;
   });
   ipcMain.handle('readx-launcher:set-enabled', (event, next: unknown) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口修改轮盘设置');
+    assertMainWindowSender(event, '只允许主窗口修改轮盘设置');
     launcherEnabled = Boolean(next);
     writeLauncherEnabled(launcherEnabled);
     launcher?.setEnabled(launcherEnabled);
@@ -190,6 +198,8 @@ async function bootstrap(): Promise<void> {
   });
   app.on('before-quit', (event) => {
     stopping = true;
+    pet?.dispose();
+    pet = null;
     launcher?.dispose();
     launcher = null;
     tray?.destroy();
@@ -209,6 +219,7 @@ async function bootstrap(): Promise<void> {
 function restoreMainWindow(): void {
   if (!mainWindow && server) createWindow();
   if (!mainWindow) return;
+  if (process.platform !== 'darwin') mainWindow.setSkipTaskbar(false);
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   if (process.platform === 'win32') {
@@ -246,13 +257,35 @@ function writeLauncherEnabled(enabled: boolean): void {
 
 function refreshTrayMenu(): void {
   if (!tray) return;
+  const petSettings = pet?.getSettings();
   tray.setToolTip(launcherEnabled ? 'ReadX · 按住 Alt 呼出轮盘' : 'ReadX');
   tray.setContextMenu(Menu.buildFromTemplate([
     { label: '打开 ReadX', click: restoreMainWindow },
     { label: launcherEnabled ? '打开快速轮盘' : '打开快速轮盘（已关闭）', enabled: launcherEnabled, click: () => launcher?.show() },
+    { type: 'separator' },
+    {
+      label: '显示桌面伴侣',
+      type: 'checkbox',
+      checked: petSettings?.enabled ?? true,
+      click: (item) => {
+        pet?.setEnabled(item.checked);
+        refreshTrayMenu();
+      },
+    },
+    {
+      label: '锁定伴侣穿透（Alt 可拖动）',
+      type: 'checkbox',
+      enabled: petSettings?.enabled ?? true,
+      checked: petSettings?.clickThrough ?? false,
+      click: (item) => {
+        pet?.updateSettings({ clickThrough: item.checked });
+        refreshTrayMenu();
+      },
+    },
     ...(process.platform === 'darwin' ? [{ label: '启用 Alt 轮盘（辅助功能权限）', enabled: launcherEnabled, click: () => {
       systemPreferences.isTrustedAccessibilityClient(true);
       launcher?.enableHook();
+      pet?.enableHook();
     } }] : []),
     { type: 'separator' },
     { label: '退出 ReadX', click: () => app.quit() },
@@ -265,6 +298,18 @@ function setupLauncher(): void {
     url: startUrl(server), preload: path.join(__dirname, 'preload.js'),
     apiBase: allowedOrigin, token: server.info.token, enabled: launcherEnabled,
     main: () => mainWindow, restore: restoreMainWindow, log: logLifecycle,
+  });
+  pet = new DesktopPet({
+    url: startUrl(server),
+    preload: path.join(__dirname, 'preload.js'),
+    apiBase: allowedOrigin,
+    token: server.info.token,
+    settingsFile: path.join(app.getPath('userData'), 'pet-settings.json'),
+    main: () => mainWindow,
+    restore: restoreMainWindow,
+    showLauncher: () => launcher?.show(),
+    onSettingsChange: () => refreshTrayMenu(),
+    log: logLifecycle,
   });
   tray = new Tray(nativeImage.createFromPath(APP_ICON).resize({ width: 18, height: 18 }));
   refreshTrayMenu();
@@ -308,11 +353,26 @@ function setupUpdater(): void {
     autoUpdater.on('error', error => updates.onError(error));
   }
 
-  ipcMain.handle('readx-updates:status', () => updates.getStatus());
-  ipcMain.handle('readx-updates:check', () => updates.check());
-  ipcMain.handle('readx-updates:download', () => updates.download());
-  ipcMain.handle('readx-updates:install', () => updates.install());
-  ipcMain.handle('readx-sync:choose-folder', async () => {
+  const assertDesktopControl = (event: Electron.IpcMainInvokeEvent) =>
+    assertMainWindowSender(event, '只允许主窗口访问桌面更新与同步凭据');
+  ipcMain.handle('readx-updates:status', (event) => {
+    assertDesktopControl(event);
+    return updates.getStatus();
+  });
+  ipcMain.handle('readx-updates:check', (event) => {
+    assertDesktopControl(event);
+    return updates.check();
+  });
+  ipcMain.handle('readx-updates:download', (event) => {
+    assertDesktopControl(event);
+    return updates.download();
+  });
+  ipcMain.handle('readx-updates:install', (event) => {
+    assertDesktopControl(event);
+    return updates.install();
+  });
+  ipcMain.handle('readx-sync:choose-folder', async (event) => {
+    assertDesktopControl(event);
     const options: OpenDialogOptions = {
       title: '选择 ReadX 同步文件夹',
       properties: ['openDirectory', 'createDirectory'],
@@ -322,12 +382,14 @@ function setupUpdater(): void {
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
-  ipcMain.handle('readx-sync:get-nutstore-password', () => {
+  ipcMain.handle('readx-sync:get-nutstore-password', (event) => {
+    assertDesktopControl(event);
     const file = path.join(app.getPath('userData'), 'sync-nutstore-secret.bin');
     if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(file)) return '';
     try { return safeStorage.decryptString(fs.readFileSync(file)); } catch { return ''; }
   });
-  ipcMain.handle('readx-sync:set-nutstore-password', (_event, password: unknown) => {
+  ipcMain.handle('readx-sync:set-nutstore-password', (event, password: unknown) => {
+    assertDesktopControl(event);
     if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储暂不可用');
     const file = path.join(app.getPath('userData'), 'sync-nutstore-secret.bin');
     if (typeof password !== 'string' || !password) {
@@ -348,7 +410,7 @@ function publishUpdateStatus(status: DesktopUpdateStatus): void {
 function setupBackup(): void {
   const pending = path.join(app.getPath('userData'), 'readx-browser-restore.json');
   const checkSender = (event: Electron.IpcMainInvokeEvent) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口执行备份操作');
+    assertMainWindowSender(event, '只允许主窗口执行备份操作');
   };
   ipcMain.handle('readx-backup:browser-state', event => {
     checkSender(event);
@@ -677,7 +739,7 @@ function createWindow(): void {
       spellcheck: false,
       // token 只经主进程进渲染进程，不进 URL、不落磁盘。
       backgroundThrottling: false,
-      additionalArguments: [`--cbct-api-base=${injected.apiBase}`, `--cbct-token=${injected.token}`],
+      additionalArguments: [`--cbct-api-base=${injected.apiBase}`, `--cbct-token=${injected.token}`, '--readx-main-window=1'],
     },
   });
 
@@ -695,7 +757,8 @@ function createWindow(): void {
     saveWindowState(mainWindow);
     if (!stopping && !stopRequested) {
       event.preventDefault();
-      mainWindow?.minimize();
+      if (process.platform !== 'darwin') mainWindow?.setSkipTaskbar(true);
+      mainWindow?.hide();
     }
   });
   mainWindow.on('closed', () => {
@@ -750,7 +813,9 @@ function scheduleWindowStateSave(window: BrowserWindow | null): void {
 function saveWindowState(window: BrowserWindow | null): void {
   if (!window || window.isDestroyed()) return;
   try {
-    const bounds = window.isMaximized() || window.isMinimized() ? window.getNormalBounds() : window.getBounds();
+    const bounds = window.isMaximized() || window.isMinimized() || !window.isVisible()
+      ? window.getNormalBounds()
+      : window.getBounds();
     const value: SavedWindowState = {
       bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
       maximized: window.isMaximized(),
@@ -783,7 +848,11 @@ function isAllowedReaderPopup(target: string): boolean {
 }
 
 function startUrl(handle: ServerHandle): string {
-  return process.env.ELECTRON_START_URL || (!app.isPackaged && process.env.CBCT_V2_BROWSER_PROXY) || `http://${handle.info.host}:${handle.info.port}/`;
+  if (!app.isPackaged) {
+    if (process.env.ELECTRON_START_URL) return process.env.ELECTRON_START_URL;
+    if (process.env.CBCT_V2_BROWSER_PROXY) return process.env.CBCT_V2_BROWSER_PROXY;
+  }
+  return `http://${handle.info.host}:${handle.info.port}/`;
 }
 
 function sameOrigin(target: string): boolean {

@@ -136,11 +136,11 @@ func (s *Server) handleLibraryChat(w http.ResponseWriter, r *http.Request) {
 	emit := out.Send
 	emit(map[string]any{
 		"meta": map[string]any{
-			"scope":          scope,
-			"sources":        sources,
-			"coverage":       coverage,
-			"provider":       config.ProviderName(),
-			"model":          config.ModelName(),
+			"scope":           scope,
+			"sources":         sources,
+			"coverage":        coverage,
+			"provider":        config.ProviderName(),
+			"model":           config.ModelName(),
 			"reasoningEffort": config.ReasoningEffort,
 		},
 	})

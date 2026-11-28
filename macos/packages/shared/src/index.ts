@@ -192,6 +192,7 @@ declare global {
     __READX_BACKUP__?: DesktopBackupBridge;
     __READX_CAPTURE__?: { enable(): Promise<boolean> };
     __READX_LAUNCHER__?: DesktopLauncherBridge;
+    __READX_PET__?: DesktopPetBridge;
   }
 }
 
@@ -255,6 +256,91 @@ export interface DesktopLauncherBridge {
   onEvent(callback: (event: LauncherEvent) => void): () => void;
   onRequestCatalog(callback: () => void): () => void;
   onNavigate(callback: (target: LauncherTarget) => void): () => void;
+}
+
+export type PetSkinId = 'kuro';
+export type PetAccessory = 'bowtie' | 'gradcap' | 'glasses' | 'scarf' | 'none';
+export type PetMood =
+  | 'idle'
+  | 'working'
+  | 'thinking'
+  | 'waiting'
+  | 'done'
+  | 'error'
+  | 'sleeping'
+  | 'petted'
+  | 'angry'
+  | 'drink';
+export type PetPeekEdge = 'none' | 'left' | 'right';
+export type PetActionCommand =
+  | 'pet'
+  | 'nap'
+  | 'wake'
+  | 'briefing'
+  | 'clipboard_import'
+  | 'drink_reminder';
+
+export interface PetSettings {
+  enabled: boolean;
+  skin: PetSkinId;
+  clickThrough: boolean;
+  scale: number;
+  opacity?: number;
+  accessory?: PetAccessory;
+  soundEnabled?: boolean;
+  waterReminderMin?: number;
+  x: number | null;
+  y: number | null;
+  peekEdge?: PetPeekEdge;
+}
+
+export interface PetRecentDoc {
+  id: string;
+  key: string;
+  title: string;
+  status: string;
+}
+
+export interface PetAppState {
+  theme?: 'light' | 'dark' | 'paper';
+  focusRunning?: boolean;
+  focusClock?: string;
+  voicePlaying?: boolean;
+  workspaceMode?: 'research' | 'slack';
+  recentDocs?: PetRecentDoc[];
+}
+
+export type PetHostEvent =
+  | { type: 'settings'; settings: PetSettings }
+  | { type: 'pointer'; x: number; y: number; inside: boolean; altHeld: boolean }
+  | { type: 'keyPulse' }
+  | { type: 'alt'; held: boolean }
+  | { type: 'appState'; state: PetAppState }
+  | { type: 'action'; action: PetActionCommand };
+
+export type PetNavigateTarget =
+  | { kind: 'document'; key?: string; id?: string }
+  | { kind: 'screen'; screen: 'library' | 'research' | 'presentation' | 'latex' | 'compare' | 'graph' | 'calendar' | 'reproduction' }
+  | { kind: 'mode'; mode: 'research' | 'slack' }
+  | { kind: 'focus'; action: 'start25' | 'start45' | 'toggle' | 'stop' }
+  | { kind: 'import' }
+  | { kind: 'launcher' };
+
+export interface DesktopPetBridge {
+  ready(): void;
+  getSettings(): Promise<PetSettings>;
+  updateSettings(patch: Partial<PetSettings>): Promise<PetSettings>;
+  moveTo(x: number, y: number): Promise<{ x: number; y: number; peekEdge: PetPeekEdge }>;
+  setInteractive(interactive: boolean): void;
+  showContextMenu(): void;
+  readClipboard(): Promise<string>;
+  navigateMain(target: PetNavigateTarget): void;
+  notifyLibraryUpdated(): void;
+  publishAppState(state: PetAppState): void;
+  onHostEvent(callback: (event: PetHostEvent) => void): () => void;
+  onNavigateMain(callback: (target: PetNavigateTarget) => void): () => void;
+  onLibraryUpdated(callback: () => void): () => void;
+  onSettingsChanged(callback: (settings: PetSettings) => void): () => void;
 }
 
 export * from './pdfLayout.js';

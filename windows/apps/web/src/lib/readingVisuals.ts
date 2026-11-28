@@ -11,8 +11,16 @@ export function currentVisualAnalyses(items: ReadingVisualAnalysis[] | undefined
   return (items ?? []).filter((item) => { const visual = current.get(item.id); return visual && visualRevision(visual) === item.revision && visual.caption === item.caption; });
 }
 
-export async function prepareReadingVisuals(visuals: PaperVisual[], signal: AbortSignal, onProgress: (progress: GenerateProgress) => void): Promise<ReadingVisualReference[]> {
-  const ready = visuals.filter((v) => v.extractionStatus === 'ready' && v.reviewStatus !== 'needs-review');
+export async function prepareReadingVisuals(
+  visuals: PaperVisual[],
+  signal: AbortSignal,
+  onProgress: (progress: GenerateProgress) => void,
+  options?: { includeNeedsReview?: boolean },
+): Promise<ReadingVisualReference[]> {
+  const includeNeedsReview = options?.includeNeedsReview ?? false;
+  const ready = visuals.filter(
+    (v) => v.extractionStatus === 'ready' && (includeNeedsReview || v.reviewStatus !== 'needs-review'),
+  );
   const references: ReadingVisualReference[] = [];
   let size = 0;
   for (const [index, visual] of ready.entries()) {

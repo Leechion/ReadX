@@ -320,14 +320,16 @@ export function WebSourceFinder({
                   >
                     {importingKey === book.bookUrl ? '解析目录并加入中…' : '加入书架'}
                   </button>
-                  <a
-                    className="slack-finder__open"
-                    href={book.bookUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    在网页中打开 ↗
-                  </a>
+                  {/^https?:\/\//i.test(book.bookUrl) ? (
+                    <a
+                      className="slack-finder__open"
+                      href={book.bookUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      在网页中打开 ↗
+                    </a>
+                  ) : null}
                 </div>
               </div>
             </article>

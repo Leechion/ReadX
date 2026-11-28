@@ -65,6 +65,10 @@ export function LatexWorkspace({
   const panesRef = useRef<HTMLDivElement>(null);
   const resizeGesture = useRef<{ divider: 0 | 1; startX: number; weights: [number, number, number] } | null>(null);
   const treeResizeGesture = useRef<{ startX: number; startWidth: number } | null>(null);
+  const treeWidthRef = useRef(treeWidth);
+  treeWidthRef.current = treeWidth;
+  const assistantOpenRef = useRef(assistantOpen);
+  assistantOpenRef.current = assistantOpen;
   const assetRequest = useRef(0);
   const lastCompiledSignature = useRef('');
   const assetUrl = assetPreview?.url;
@@ -89,6 +93,7 @@ export function LatexWorkspace({
     const treeGesture = treeResizeGesture.current;
     if (treeGesture) {
       const nextWidth = Math.max(180, Math.min(900, treeGesture.startWidth + event.clientX - treeGesture.startX));
+      treeWidthRef.current = nextWidth;
       setTreeWidth(nextWidth);
       return;
     }
@@ -96,7 +101,8 @@ export function LatexWorkspace({
     if (!gesture || !panesRef.current) return;
     const bounds = panesRef.current.getBoundingClientRect();
     const contentWidth = Math.max(bounds.width, panesRef.current.scrollWidth);
-    const fixedWidth = treeWidth + 6 * (assistantOpen ? 2 : 1) + 260 + 300 + (assistantOpen ? 320 : 0);
+    const isAssistantOpen = assistantOpenRef.current;
+    const fixedWidth = treeWidthRef.current + 6 * (isAssistantOpen ? 2 : 1) + 260 + 300 + (isAssistantOpen ? 320 : 0);
     const flexibleWidth = Math.max(1, contentWidth - fixedWidth);
     const left = gesture.divider;
     const pairTotal = gesture.weights[left]! + gesture.weights[left + 1]!;
@@ -108,17 +114,17 @@ export function LatexWorkspace({
       next[left + 1] = pairTotal - nextLeft;
       return next;
     });
-  }, [assistantOpen, treeWidth]);
+  }, []);
 
   const stopResize = useCallback(() => {
     if (treeResizeGesture.current) {
       treeResizeGesture.current = null;
-      window.localStorage.setItem(STORAGE_KEYS.latexTreeWidth, String(treeWidth));
+      window.localStorage.setItem(STORAGE_KEYS.latexTreeWidth, String(treeWidthRef.current));
     }
     resizeGesture.current = null;
     document.body.style.removeProperty('cursor');
     document.body.style.removeProperty('user-select');
-  }, [treeWidth]);
+  }, []);
 
   useEffect(() => {
     window.addEventListener('pointermove', resizePanes);

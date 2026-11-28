@@ -9,6 +9,20 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  parity:
+    name: Cross-platform core parity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Check Windows / macOS core parity
+        run: node scripts/sync-platforms.mjs --check
+
   windows:
     name: Windows · Go + web + desktop
     runs-on: windows-latest

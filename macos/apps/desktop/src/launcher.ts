@@ -1,6 +1,7 @@
-import { BrowserWindow, ipcMain, screen, systemPreferences } from 'electron';
+import { BrowserWindow, ipcMain, screen } from 'electron';
 import type { LauncherCatalog, LauncherEvent, LauncherTarget } from '@cbct/shared';
 import { AltHold } from './alt-hold';
+import { canStartGlobalHook, subscribeGlobalHook } from './hook-manager';
 
 const WORKSPACES = ['library', 'research', 'presentation', 'latex', 'slack'];
 export function validLauncherTarget(value: unknown): value is LauncherTarget {
@@ -80,48 +81,36 @@ export class DesktopLauncher {
   enableHook(): void {
     if (!this.enabled || this.stopHook || this.disposed) return;
     // macOS needs Accessibility permission before libuiohook can observe Option/Alt.
-    if (process.platform === 'darwin' && !systemPreferences.isTrustedAccessibilityClient(false)) return;
+    if (!canStartGlobalHook()) return;
     try {
-      const { uIOhook, UiohookKey } = require('uiohook-napi') as typeof import('uiohook-napi');
+      const { UiohookKey } = require('uiohook-napi') as typeof import('uiohook-napi');
       const alts = new Set<number>();
-      const down = (event: import('uiohook-napi').UiohookKeyboardEvent) => {
-        if (event.keycode === UiohookKey.Alt || event.keycode === UiohookKey.AltRight) {
-          alts.add(event.keycode);
-          this.hold.press(event.ctrlKey || event.metaKey || event.shiftKey);
-        } else this.hold.cancel();
-      };
-      const up = (event: import('uiohook-napi').UiohookKeyboardEvent) => {
-        alts.delete(event.keycode);
-        if ((event.keycode === UiohookKey.Alt || event.keycode === UiohookKey.AltRight) && !alts.size) this.hold.release();
-      };
-      const move = () => {
-        if (!this.window.isVisible() || Date.now() - this.lastMove < 16) return;
-        this.lastMove = Date.now();
-        this.send({ type: 'pointer', ...this.pointer() });
-      };
-      const mouse = () => {
-        if (!this.window.isVisible()) { this.hold.cancel(); return; }
-        const { x, y } = this.pointer();
-        const { width, height } = this.window.getBounds();
-        if (x < 0 || y < 0 || x > width || y > height) this.hold.cancel();
-      };
-      const wheel = (event: import('uiohook-napi').UiohookWheelEvent) => {
-        if (this.window.isVisible()) this.send({ type: 'wheel', delta: event.rotation });
-      };
-      uIOhook.on('keydown', down);
-      uIOhook.on('keyup', up);
-      uIOhook.on('mousemove', move);
-      uIOhook.on('mousedown', mouse);
-      uIOhook.on('wheel', wheel);
-      uIOhook.start();
-      this.stopHook = () => {
-        uIOhook.removeListener('keydown', down);
-        uIOhook.removeListener('keyup', up);
-        uIOhook.removeListener('mousemove', move);
-        uIOhook.removeListener('mousedown', mouse);
-        uIOhook.removeListener('wheel', wheel);
-        uIOhook.stop();
-      };
+      this.stopHook = subscribeGlobalHook({
+        onKeyDown: (event) => {
+          if (event.keycode === UiohookKey.Alt || event.keycode === UiohookKey.AltRight) {
+            alts.add(event.keycode);
+            this.hold.press(event.ctrlKey || event.metaKey || event.shiftKey);
+          } else this.hold.cancel();
+        },
+        onKeyUp: (event) => {
+          alts.delete(event.keycode);
+          if ((event.keycode === UiohookKey.Alt || event.keycode === UiohookKey.AltRight) && !alts.size) this.hold.release();
+        },
+        onMouseMove: () => {
+          if (!this.window.isVisible() || Date.now() - this.lastMove < 16) return;
+          this.lastMove = Date.now();
+          this.send({ type: 'pointer', ...this.pointer() });
+        },
+        onMouseDown: () => {
+          if (!this.window.isVisible()) { this.hold.cancel(); return; }
+          const { x, y } = this.pointer();
+          const { width, height } = this.window.getBounds();
+          if (x < 0 || y < 0 || x > width || y > height) this.hold.cancel();
+        },
+        onWheel: (event) => {
+          if (this.window.isVisible()) this.send({ type: 'wheel', delta: event.rotation });
+        },
+      }, (error) => this.options.log(`无法启用 Alt 轮盘：${String(error)}`));
     } catch (error) { this.options.log(`无法启用 Alt 轮盘：${String(error)}`); }
   }
 

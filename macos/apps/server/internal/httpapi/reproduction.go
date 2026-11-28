@@ -18,8 +18,8 @@ import (
 	"net/http"
 	"strings"
 
-	"cbctv2/server/internal/catalog"
 	"cbctv2/server/internal/appstate"
+	"cbctv2/server/internal/catalog"
 	"cbctv2/server/internal/validate"
 )
 

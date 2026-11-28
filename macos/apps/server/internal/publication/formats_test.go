@@ -150,6 +150,30 @@ func TestParseDOCXRejectsNonZip(t *testing.T) {
 	}
 }
 
+func TestParseDOCXChineseHeadings(t *testing.T) {
+	body := `<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>` +
+		`<w:p><w:pPr><w:pStyle w:val="标题 1"/></w:pPr><w:r><w:t>第一章 引言</w:t></w:r></w:p>` +
+		`<w:p><w:pPr><w:pStyle w:val="标题2"/></w:pPr><w:r><w:t>1.1 背景</w:t></w:r></w:p>` +
+		`<w:p><w:r><w:t>背景正文。</w:t></w:r></w:p>` +
+		`<w:p><w:pPr><w:pStyle w:val="标题 1"/></w:pPr><w:r><w:t>第二章 结论</w:t></w:r></w:p>` +
+		`<w:p><w:r><w:t>结论正文。</w:t></w:r></w:p>` +
+		`</w:body></w:document>`
+	data := zipFixture(t, map[string]string{"word/document.xml": body})
+	book, err := ParseDOCX("cn.docx", data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(book.Sections) != 2 {
+		t.Fatalf("sections = %d, want 2: %+v", len(book.Sections), book.Sections)
+	}
+	if book.Sections[0].Title != "第一章 引言" || book.Sections[1].Title != "第二章 结论" {
+		t.Fatalf("unexpected section titles: %+v", book.Sections)
+	}
+	if len(book.Sections[0].Blocks) < 2 || book.Sections[0].Blocks[0].Kind != "h2" {
+		t.Fatalf("expected h2 block for 标题2, got %+v", book.Sections[0].Blocks)
+	}
+}
+
 func TestParseFB2Sections(t *testing.T) {
 	doc := `<?xml version="1.0" encoding="UTF-8"?>
 <FictionBook xmlns="http://www.gribuser.ru/xml/fictionbook/2.0" xmlns:l="http://www.w3.org/1999/xlink">

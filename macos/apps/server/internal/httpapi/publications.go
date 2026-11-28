@@ -784,6 +784,27 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 		emit(map[string]any{"error": "这篇论文已有导入任务正在运行"})
 		return
 	}
+	jobHandedOff := false
+	jobErr := ""
+	defer func() {
+		if !jobHandedOff {
+			status := "failed"
+			if jobCtx.Err() != nil {
+				status = "cancelled"
+			}
+			msg := jobErr
+			if status == "cancelled" {
+				msg = "已取消"
+			} else if msg == "" {
+				msg = "导入未完成"
+			}
+			s.finishImportJob(key, status, msg)
+		}
+	}()
+	fail := func(msg string) {
+		jobErr = msg
+		emit(map[string]any{"error": msg})
+	}
 	metadata := recognizedPaperMetadata{Title: document.Title, TranslatedTitle: document.TranslatedTitle, DOI: document.DOI, Authors: document.Authors, Venue: document.Venue}
 	if document.Year != nil {
 		metadata.Year = *document.Year
@@ -791,8 +812,7 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 	emit(map[string]any{"progress": map[string]any{"stage": "ocr", "message": "Lee 正在识别并处理论文", "completed": 0, "total": 0}})
 	_, err = s.runLeePDFImport(jobCtx, key, name, data, &metadata)
 	if err != nil {
-		s.finishImportJob(key, importFailureStatus(jobCtx, err), err.Error())
-		emit(map[string]any{"error": "论文 OCR 与翻译失败: " + err.Error()})
+		fail("论文 OCR 与翻译失败: " + err.Error())
 		return
 	}
 	emit(map[string]any{"progress": map[string]any{"stage": "saving", "message": "正在保存 Lee 处理结果", "completed": 0, "total": 1}})
@@ -800,20 +820,20 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 	paths := legacy.NewPaths(s.cfg.DataRoot)
 	dir := paths.LibraryDir()
 	if err = os.MkdirAll(dir, 0755); err != nil {
-		emit(map[string]any{"error": "无法创建书库文件夹: " + err.Error()})
+		fail("无法创建书库文件夹: " + err.Error())
 		return
 	}
 	target := filepath.Join(dir, key+".pdf")
 	if _, statErr := os.Stat(target); statErr == nil {
-		emit(map[string]any{"error": "书库中已存在该文件，未覆盖"})
+		fail("书库中已存在该文件，未覆盖")
 		return
 	} else if !errors.Is(statErr, os.ErrNotExist) {
-		emit(map[string]any{"error": "无法检查书库文件: " + statErr.Error()})
+		fail("无法检查书库文件: " + statErr.Error())
 		return
 	}
 	tmp, err := os.CreateTemp(dir, ".arxiv-download-*")
 	if err != nil {
-		emit(map[string]any{"error": "无法创建临时文件: " + err.Error()})
+		fail("无法创建临时文件: " + err.Error())
 		return
 	}
 	tmpName := tmp.Name()
@@ -825,11 +845,11 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 		err = closeErr
 	}
 	if err != nil {
-		emit(map[string]any{"error": "保存 PDF 失败: " + err.Error()})
+		fail("保存 PDF 失败: " + err.Error())
 		return
 	}
 	if err = os.Rename(tmpName, target); err != nil {
-		emit(map[string]any{"error": "移动 PDF 到书库失败: " + err.Error()})
+		fail("移动 PDF 到书库失败: " + err.Error())
 		return
 	}
 	// 关联失败时不能无条件删文件：并发请求 B 可能已经把这个 target 写进另一条
@@ -838,7 +858,7 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 	tx, err := s.handle.BeginTx(r.Context(), nil)
 	if err != nil {
 		s.removeUnreferencedLibraryFile(r.Context(), target)
-		emit(map[string]any{"error": "PDF 已下载，但无法开启书库事务: " + err.Error()})
+		fail("PDF 已下载，但无法开启书库事务: " + err.Error())
 		return
 	}
 	defer tx.Rollback()
@@ -847,28 +867,28 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		tx.Rollback()
 		s.removeUnreferencedLibraryFile(r.Context(), target)
-		emit(map[string]any{"error": "PDF 已下载，但关联书库条目失败: " + err.Error()})
+		fail("PDF 已下载，但关联书库条目失败: " + err.Error())
 		return
 	}
 	if err = saveImportText(r.Context(), tx, key, stamp, metadata); err != nil {
 		tx.Rollback()
 		s.removeUnreferencedLibraryFile(r.Context(), target)
-		emit(map[string]any{"error": "PDF 已下载，但保存 OCR 译文失败: " + err.Error()})
+		fail("PDF 已下载，但保存 OCR 译文失败: " + err.Error())
 		return
 	}
 	if changed, _ := update.RowsAffected(); changed != 1 {
 		tx.Rollback()
 		s.removeUnreferencedLibraryFile(r.Context(), target)
-		emit(map[string]any{"error": "书库条目已被其他操作更新，请刷新后重试"})
+		fail("书库条目已被其他操作更新，请刷新后重试")
 		return
 	}
 	if err = tx.Commit(); err != nil {
 		s.removeUnreferencedLibraryFile(r.Context(), target)
-		emit(map[string]any{"error": "提交论文 OCR 译文失败: " + err.Error()})
+		fail("提交论文 OCR 译文失败: " + err.Error())
 		return
 	}
 	if err = s.saveRecognizedPDFMetadata(r.Context(), key, document.Title, metadata); err != nil {
-		emit(map[string]any{"error": "PDF 已关联，但保存补齐的出版信息失败: " + err.Error()})
+		fail("PDF 已关联，但保存补齐的出版信息失败: " + err.Error())
 		return
 	}
 	s.linkImportJobDocument(key, key)
@@ -880,6 +900,7 @@ func (s *Server) handleDocumentArxivPDF(w http.ResponseWriter, r *http.Request) 
 	}()
 	backgroundCtx, cancelBackground := s.processingBackground(r.Context(), 24*time.Hour)
 	s.setJobCancel(key, cancelBackground)
+	jobHandedOff = true
 	ocrPages := append([]ocr.Page(nil), metadata.OCRPages...)
 	go func() {
 		defer cancelBackground()
@@ -1010,18 +1031,41 @@ func (s *Server) handlePublicationURL(w http.ResponseWriter, r *http.Request) {
 	if bytes.HasPrefix(data, []byte("%PDF-")) {
 		ctx, cancel := context.WithTimeout(r.Context(), 6*time.Hour)
 		defer cancel()
+		sum := sha256.Sum256(data)
+		jobKey := "doc-" + hex.EncodeToString(sum[:16])
+		jobCtx, jobCancel := context.WithCancel(ctx)
+		defer jobCancel()
+		if s.beginImportJob(jobKey, name, 0, jobCancel) == nil {
+			fail(http.StatusConflict, "相同论文已有导入任务正在运行，请查看处理进度")
+			return
+		}
+		s.jobStage(jobKey, "ocr", "running", "正在执行 OCR 与段落整理", 0, 0)
 		metadata := recognizedPaperMetadata{
 			Title:   strings.TrimSuffix(strings.TrimSuffix(strings.TrimSpace(body.Title), ".pdf"), ".PDF"),
 			DOI:     strings.TrimPrefix(strings.TrimSpace(body.DOI), "https://doi.org/"),
 			Authors: body.Authors, Venue: body.Venue, Year: body.Year,
 		}
-		result, err = s.runLocalPDFImport(ctx, name, final, data, nil, &metadata, func(stage, message string, completed, total int) {
+		result, err = s.runLocalPDFImport(jobCtx, name, final, data, nil, &metadata, func(stage, message string, completed, total int) {
 			if stream {
 				emit(map[string]any{"progress": map[string]any{"stage": stage, "message": message, "completed": completed, "total": total}})
 			}
 		})
 		if err != nil {
+			status := importFailureStatus(jobCtx, err)
+			msg := err.Error()
+			if status == "cancelled" {
+				msg = "已取消"
+			}
+			s.finishImportJob(jobKey, status, msg)
 			fail(http.StatusBadGateway, "论文 OCR 与翻译失败："+err.Error())
+			return
+		}
+		if result.Existing {
+			s.finishImportJob(jobKey, "done", "")
+		} else if result.Document != nil && len(metadata.LayoutPages) == 0 {
+			errMsg := "OCR 没有保存可供排版的段落"
+			s.finishImportJob(jobKey, "failed", errMsg)
+			fail(http.StatusUnprocessableEntity, errMsg)
 			return
 		}
 	} else {

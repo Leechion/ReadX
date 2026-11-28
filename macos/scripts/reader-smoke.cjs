@@ -76,7 +76,8 @@ app.whenReady().then(async () => {
     await new Promise((resolve) => upstream.listen(0, '127.0.0.1', resolve));
     fs.mkdirSync(path.join(workspace, 'app'), { recursive: true });
     fs.writeFileSync(path.join(workspace, 'app/config.json'), JSON.stringify({ model: 'fake-model', apiKey: 'test-only', baseURL: `http://127.0.0.1:${upstream.address().port}` }));
-    server = spawn(path.join(root, 'apps/server/bin/server.exe'), ['--data-root', workspace, '--static', path.join(root, 'apps/web/dist'), '--exit-on-stdin-eof'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    const serverBin = process.platform === 'win32' ? 'server.exe' : 'server';
+    server = spawn(path.join(root, 'apps/server/bin', serverBin), ['--data-root', workspace, '--static', path.join(root, 'apps/web/dist'), '--exit-on-stdin-eof'], { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
     const info = await new Promise((resolve, reject) => {
       let buffer = '';
       server.stdout.on('data', (chunk) => {
@@ -323,7 +324,7 @@ app.whenReady().then(async () => {
     assert(savedPaperFiles.length > 0, 'must check a real imported copy');
     await click('清空回收站');
     await waitFor(`!!document.querySelector('dialog[open] #empty-trash-title')`);
-    assert(await window.webContents.executeJavaScript(`document.querySelector('dialog[open]').textContent.includes('所有 PDF / EPUB 文件均保留')`));
+    assert(await window.webContents.executeJavaScript(`document.querySelector('dialog[open]').textContent.includes('原始位置的 PDF / EPUB 文件保留')`));
     await new Promise(resolve => setTimeout(resolve, 100));
     fs.writeFileSync(path.join(workspace, 'empty-trash-confirm.png'), (await window.webContents.capturePage()).toPNG());
     await click('取消');

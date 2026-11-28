@@ -16,9 +16,18 @@ document.getElementById('collect').addEventListener('click', async () => {
       metadata = result?.result || {};
     } catch { /* Built-in PDF pages may prohibit script injection; retain URL/title. */ }
     const data = { url: tab.url, title: String(metadata.title || tab.title || '').slice(0, 2000), doi: String(metadata.doi || '').slice(0, 500), authors: metadata.authors || [] };
-    if (metadata.pdfUrl) { const pdf = new URL(metadata.pdfUrl, tab.url); if (/^https?:$/.test(pdf.protocol) && !pdf.username && !pdf.password) data.pdfUrl = pdf.href; }
+    if (metadata.pdfUrl) {
+      try {
+        const pdf = new URL(metadata.pdfUrl, tab.url);
+        if (/^https?:$/.test(pdf.protocol) && !pdf.username && !pdf.password) data.pdfUrl = pdf.href;
+      } catch { /* Ignore malformed citation_pdf_url metadata. */ }
+    }
     if (!data.pdfUrl && /\.pdf(?:[?#]|$)/i.test(tab.url)) data.pdfUrl = tab.url;
-    const binary = String.fromCharCode(...new TextEncoder().encode(JSON.stringify(data)));
+    const bytes = new TextEncoder().encode(JSON.stringify(data));
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    }
     await chrome.tabs.create({ url: 'readx-capture://collect?data=' + encodeURIComponent(btoa(binary)) });
     status.textContent = '已请求打开 ReadX。请在桌面端确认已保存；未安装或未启用接收时，请先完成桌面端设置。';
   } catch (error) { status.textContent = error instanceof Error ? error.message : String(error); }

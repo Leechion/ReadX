@@ -156,22 +156,6 @@ func cleanModelJSON(raw string) string {
 	return trimmed
 }
 
-// shouldUseMultiStepLatexAgent 判断请求是否需要走 codepluse-hub 多步智能体工作流。
-func shouldUseMultiStepLatexAgent(agentMode, question string) bool {
-	if agentMode == "agent" || agentMode == "review" || agentMode == "readonly" {
-		if strings.TrimSpace(agentMode) != "" {
-			return true
-		}
-	}
-	q := strings.ToLower(strings.TrimSpace(question))
-	for _, kw := range []string{"@", "新建", "创建", "所有文件", "多个文件", "章节", "全文", "重构", "拆解", "补齐", "排错", "检查项目"} {
-		if strings.Contains(q, kw) {
-			return true
-		}
-	}
-	return false
-}
-
 // runLatexAgentWorkflow 执行迁移自 codepluse-hub 的 LaTeX 智能体工作流：
 //  1. 任务拆解与角色分派（Task Plan）
 //  2. 工具调用轨迹（list_files / read_file / search_project / get_diagnostics / read_library_references / write_file / create_file / patch_file）

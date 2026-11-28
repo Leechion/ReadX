@@ -83,21 +83,27 @@ if (!app.requestSingleInstanceLock()) {
   void bootstrap();
 }
 
+function assertMainWindowSender(event: Electron.IpcMainInvokeEvent, message: string): void {
+  if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) {
+    throw new Error(message);
+  }
+}
+
 async function bootstrap(): Promise<void> {
   await app.whenReady();
   launcherEnabled = readLauncherEnabled();
   setupUpdater();
   setupBackup();
   ipcMain.handle('readx-capture:enable', event => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口启用采集');
+    assertMainWindowSender(event, '只允许主窗口启用采集');
     return app.isPackaged ? app.setAsDefaultProtocolClient('readx-capture') : app.setAsDefaultProtocolClient('readx-capture', process.execPath, [app.getAppPath()]);
   });
   ipcMain.handle('readx-launcher:get-enabled', event => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口读取轮盘设置');
+    assertMainWindowSender(event, '只允许主窗口读取轮盘设置');
     return launcherEnabled;
   });
   ipcMain.handle('readx-launcher:set-enabled', (event, next: unknown) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口修改轮盘设置');
+    assertMainWindowSender(event, '只允许主窗口修改轮盘设置');
     launcherEnabled = Boolean(next);
     writeLauncherEnabled(launcherEnabled);
     launcher?.setEnabled(launcherEnabled);
@@ -347,11 +353,26 @@ function setupUpdater(): void {
     autoUpdater.on('error', error => updates.onError(error));
   }
 
-  ipcMain.handle('readx-updates:status', () => updates.getStatus());
-  ipcMain.handle('readx-updates:check', () => updates.check());
-  ipcMain.handle('readx-updates:download', () => updates.download());
-  ipcMain.handle('readx-updates:install', () => updates.install());
-  ipcMain.handle('readx-sync:choose-folder', async () => {
+  const assertDesktopControl = (event: Electron.IpcMainInvokeEvent) =>
+    assertMainWindowSender(event, '只允许主窗口访问桌面更新与同步凭据');
+  ipcMain.handle('readx-updates:status', (event) => {
+    assertDesktopControl(event);
+    return updates.getStatus();
+  });
+  ipcMain.handle('readx-updates:check', (event) => {
+    assertDesktopControl(event);
+    return updates.check();
+  });
+  ipcMain.handle('readx-updates:download', (event) => {
+    assertDesktopControl(event);
+    return updates.download();
+  });
+  ipcMain.handle('readx-updates:install', (event) => {
+    assertDesktopControl(event);
+    return updates.install();
+  });
+  ipcMain.handle('readx-sync:choose-folder', async (event) => {
+    assertDesktopControl(event);
     const options: OpenDialogOptions = {
       title: '选择 ReadX 同步文件夹',
       properties: ['openDirectory', 'createDirectory'],
@@ -361,12 +382,14 @@ function setupUpdater(): void {
       : await dialog.showOpenDialog(options);
     return result.canceled ? null : result.filePaths[0] ?? null;
   });
-  ipcMain.handle('readx-sync:get-nutstore-password', () => {
+  ipcMain.handle('readx-sync:get-nutstore-password', (event) => {
+    assertDesktopControl(event);
     const file = path.join(app.getPath('userData'), 'sync-nutstore-secret.bin');
     if (!safeStorage.isEncryptionAvailable() || !fs.existsSync(file)) return '';
     try { return safeStorage.decryptString(fs.readFileSync(file)); } catch { return ''; }
   });
-  ipcMain.handle('readx-sync:set-nutstore-password', (_event, password: unknown) => {
+  ipcMain.handle('readx-sync:set-nutstore-password', (event, password: unknown) => {
+    assertDesktopControl(event);
     if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储暂不可用');
     const file = path.join(app.getPath('userData'), 'sync-nutstore-secret.bin');
     if (typeof password !== 'string' || !password) {
@@ -387,7 +410,7 @@ function publishUpdateStatus(status: DesktopUpdateStatus): void {
 function setupBackup(): void {
   const pending = path.join(app.getPath('userData'), 'readx-browser-restore.json');
   const checkSender = (event: Electron.IpcMainInvokeEvent) => {
-    if (!mainWindow || event.sender !== mainWindow.webContents || event.senderFrame !== mainWindow.webContents.mainFrame) throw new Error('只允许主窗口执行备份操作');
+    assertMainWindowSender(event, '只允许主窗口执行备份操作');
   };
   ipcMain.handle('readx-backup:browser-state', event => {
     checkSender(event);
@@ -716,7 +739,7 @@ function createWindow(): void {
       spellcheck: false,
       // token 只经主进程进渲染进程，不进 URL、不落磁盘。
       backgroundThrottling: false,
-      additionalArguments: [`--cbct-api-base=${injected.apiBase}`, `--cbct-token=${injected.token}`],
+      additionalArguments: [`--cbct-api-base=${injected.apiBase}`, `--cbct-token=${injected.token}`, '--readx-main-window=1'],
     },
   });
 
@@ -825,7 +848,11 @@ function isAllowedReaderPopup(target: string): boolean {
 }
 
 function startUrl(handle: ServerHandle): string {
-  return process.env.ELECTRON_START_URL || (!app.isPackaged && process.env.CBCT_V2_BROWSER_PROXY) || `http://${handle.info.host}:${handle.info.port}/`;
+  if (!app.isPackaged) {
+    if (process.env.ELECTRON_START_URL) return process.env.ELECTRON_START_URL;
+    if (process.env.CBCT_V2_BROWSER_PROXY) return process.env.CBCT_V2_BROWSER_PROXY;
+  }
+  return `http://${handle.info.host}:${handle.info.port}/`;
 }
 
 function sameOrigin(target: string): boolean {

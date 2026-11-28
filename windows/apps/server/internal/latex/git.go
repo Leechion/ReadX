@@ -25,16 +25,16 @@ type GitFileChange struct {
 
 // GitStatusReport 描述当前 LaTeX 项目的 Git 仓库状态。
 type GitStatusReport struct {
-	Available  bool            `json:"available"`
-	Initialized bool           `json:"initialized"`
-	Branch     string          `json:"branch"`
-	RemoteURL  string          `json:"remoteUrl"`
-	Clean      bool            `json:"clean"`
-	Ahead      int             `json:"ahead"`
-	Behind     int             `json:"behind"`
-	LastCommit string          `json:"lastCommit"`
-	Changes    []GitFileChange `json:"changes"`
-	Message    string          `json:"message,omitempty"`
+	Available   bool            `json:"available"`
+	Initialized bool            `json:"initialized"`
+	Branch      string          `json:"branch"`
+	RemoteURL   string          `json:"remoteUrl"`
+	Clean       bool            `json:"clean"`
+	Ahead       int             `json:"ahead"`
+	Behind      int             `json:"behind"`
+	LastCommit  string          `json:"lastCommit"`
+	Changes     []GitFileChange `json:"changes"`
+	Message     string          `json:"message,omitempty"`
 }
 
 // GitSyncResult 描述一次 commit/pull/push 同步操作的结果。

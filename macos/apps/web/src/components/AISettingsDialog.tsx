@@ -127,6 +127,11 @@ export interface LauncherWheelProps {
   onToggle: (next: boolean) => void;
 }
 
+export interface DesktopPetProps {
+  enabled: boolean;
+  onToggle: (next: boolean) => void;
+}
+
 const SHORTCUTS: ReadonlyArray<{ keys: string[]; title: string; desc: string }> = [
   { keys: ['Ctrl', 'K'], title: '全局命令面板', desc: '快速跳转工作区、切换主题、创建备份' },
   { keys: ['Ctrl', '1–9'], title: '切换主工作区', desc: '按左侧活动栏顺序快速切换到对应屏幕' },
@@ -140,12 +145,14 @@ export function AISettingsDialog({
   onClose,
   appearance,
   launcherWheel,
+  desktopPet,
   initialTab = 'ai',
   focusSection,
 }: {
   onClose: () => void;
   appearance?: AppearanceProps;
   launcherWheel?: LauncherWheelProps;
+  desktopPet?: DesktopPetProps;
   initialTab?: SettingsTab;
   focusSection?: 'ocr';
 }) {
@@ -1281,6 +1288,23 @@ export function AISettingsDialog({
                       ariaLabel="快速轮盘"
                       value={launcherWheel.enabled ? 'on' : 'off'}
                       onChange={(next) => launcherWheel.onToggle(next === 'on')}
+                      options={[
+                        { value: 'on', label: '开启' },
+                        { value: 'off', label: '关闭' },
+                      ]}
+                    />
+                  </div>
+                ) : null}
+                {desktopPet ? (
+                  <div className="rx-setting-row">
+                    <div className="rx-setting-label">
+                      <strong>桌面科研伴侣</strong>
+                      <span>透明置顶书房小黑猫，支持拖入论文入库与后台翻译/编译进度提醒</span>
+                    </div>
+                    <Segmented<'on' | 'off'>
+                      ariaLabel="桌面科研伴侣"
+                      value={desktopPet.enabled ? 'on' : 'off'}
+                      onChange={(next) => desktopPet.onToggle(next === 'on')}
                       options={[
                         { value: 'on', label: '开启' },
                         { value: 'off', label: '关闭' },

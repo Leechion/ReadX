@@ -3,7 +3,7 @@ package httpapi
 import "testing"
 
 // 图表归属解析决定一张候选图能否进入精读正文：解析失败的图原先整图丢弃
-//（五重奏「不稳定」的一个来源）。这里锁定：精确命中、宽松命中、以及
+// （五重奏「不稳定」的一个来源）。这里锁定：精确命中、宽松命中、以及
 // 归属行不合目录/缺失时的兜底——只要分析内容在，图必须被用上。
 func TestParsePaperVisualPlacement(t *testing.T) {
 	cases := []struct {

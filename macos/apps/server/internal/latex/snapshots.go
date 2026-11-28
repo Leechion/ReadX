@@ -36,12 +36,12 @@ type RestoreReport struct {
 
 // SnapshotFileDiff 描述单个文件在某个快照与当前工作区之间的差异。
 type SnapshotFileDiff struct {
-	Path    string `json:"path"`
-	Status  string `json:"status"` // "modified" | "added" | "deleted"
-	Before  string `json:"before,omitempty"`
-	After   string `json:"after,omitempty"`
-	Binary  bool   `json:"binary,omitempty"`
-	TooBig  bool   `json:"tooBig,omitempty"`
+	Path   string `json:"path"`
+	Status string `json:"status"` // "modified" | "added" | "deleted"
+	Before string `json:"before,omitempty"`
+	After  string `json:"after,omitempty"`
+	Binary bool   `json:"binary,omitempty"`
+	TooBig bool   `json:"tooBig,omitempty"`
 }
 
 // SnapshotDiffResult 返回快照与当前项目源码的逐文件对比结果。

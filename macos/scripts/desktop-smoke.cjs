@@ -175,13 +175,14 @@ app.on('browser-window-created', (_event, window) => {
       assert(recovered, 'Go server must recover after an unexpected exit');
       assert.equal((await api(window, '/v1/documents/mac-smoke/location')).location.page, 2);
       assert.equal(errorDialogs.length, 0, 'Automatic recovery must not close the reader');
-      stage = 'close-to-minimize and window restoration';
+      stage = 'close-to-tray and window restoration';
       window.close();
       await new Promise(resolve => setTimeout(resolve, 200));
       assert(!window.isDestroyed(), 'Closing must preserve the main window');
-      assert(window.isMinimized(), 'Closing must minimize the main window');
+      assert(!window.isVisible(), 'Closing must hide the main window to the tray');
       app.emit('activate');
       await waitFor(window, '!!window.__CBCT_V2__ && !!document.querySelector(".library-sidebar, .pdf-reader")');
+      assert(window.isVisible(), 'Activation must restore the main window');
       assert(!window.isMinimized(), 'Activation must restore the main window');
       assert.equal((await api(window, '/v1/documents')).total, 1);
       console.log('Desktop smoke OK: real main/preload, auth, SQLite import, PDF reader, sentence tracking, render resources, update bridge, reading location, backend crash recovery and Dock activation.');

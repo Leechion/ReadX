@@ -137,6 +137,23 @@ func TestCascadeDeleteKeepsNoOrphans(t *testing.T) {
 			t.Fatalf("%s 残留孤儿行 %d 条（级联删除未生效）", table, n)
 		}
 	}
+	var ftsHits int
+	if err := handle.QueryRowContext(ctx, `SELECT COUNT(*) FROM document_pages_fts WHERE document_pages_fts MATCH 'first'`).Scan(&ftsHits); err != nil {
+		t.Fatalf("查询 FTS5 失败: %v", err)
+	}
+	if ftsHits != 0 {
+		t.Fatalf("级联删除文档后 document_pages_fts 不应残留命中，实际 %d 条", ftsHits)
+	}
+	var docsize int
+	if err := handle.QueryRowContext(ctx, `SELECT COUNT(*) FROM document_pages_fts_docsize`).Scan(&docsize); err != nil {
+		t.Fatalf("查询 FTS5 docsize 失败: %v", err)
+	}
+	if docsize != 0 {
+		t.Fatalf("级联删除文档后 document_pages_fts_docsize 应为 0，实际 %d 条", docsize)
+	}
+	if _, err := handle.ExecContext(ctx, `INSERT INTO document_pages_fts(document_pages_fts) VALUES('integrity-check')`); err != nil {
+		t.Fatalf("document_pages_fts integrity-check 失败: %v", err)
+	}
 }
 
 func TestDuplicateDocumentKeyRejectedButEmptyAllowed(t *testing.T) {

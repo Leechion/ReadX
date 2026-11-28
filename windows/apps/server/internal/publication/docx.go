@@ -197,7 +197,7 @@ func docxHeadingLevel(style string) int {
 		}
 	}
 	if strings.HasPrefix(lower, "标题") {
-		if n, err := strconv.Atoi(strings.TrimSpace(lower[2:])); err == nil && n >= 1 && n <= 6 {
+		if n, err := strconv.Atoi(strings.TrimSpace(strings.TrimPrefix(lower, "标题"))); err == nil && n >= 1 && n <= 6 {
 			return n
 		}
 	}

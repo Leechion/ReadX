@@ -5,15 +5,19 @@ import { restoreBrowserBackup } from './lib/browserBackup';
 import { ProcessingConsentDialog } from './components/ProcessingConsentDialog';
 
 const LauncherWheel = lazy(() => import('./components/LauncherWheel').then(module => ({ default: module.LauncherWheel })));
+const PetStage = lazy(() => import('./components/pet/PetStage').then(module => ({ default: module.PetStage })));
 const App = lazy(() => import('./App'));
-const isLauncher = new URLSearchParams(window.location.search).get('readxWindow') === 'launcher';
+const windowMode = new URLSearchParams(window.location.search).get('readxWindow');
+const isLauncher = windowMode === 'launcher';
+const isPet = windowMode === 'pet';
 if (isLauncher) document.documentElement.classList.add('readx-launcher-window');
+if (isPet) document.documentElement.classList.add('readx-pet-window');
 
 const container = document.getElementById('root');
 if (!container) throw new Error('缺少 #root 挂载点，index.html 被改坏了');
 
 async function mount(): Promise<void> {
-  if (!isLauncher && window.__READX_BACKUP__) {
+  if (!isLauncher && !isPet && window.__READX_BACKUP__) {
     const pending = await window.__READX_BACKUP__.pendingBrowserState();
     if (pending) {
       await restoreBrowserBackup(pending);
@@ -22,8 +26,8 @@ async function mount(): Promise<void> {
   }
   createRoot(container!).render(
   <StrictMode>
-    <ProcessingConsentDialog />
-    <Suspense fallback={null}>{isLauncher ? <LauncherWheel /> : <App />}</Suspense>
+    {!isPet ? <ProcessingConsentDialog /> : null}
+    <Suspense fallback={null}>{isLauncher ? <LauncherWheel /> : isPet ? <PetStage /> : <App />}</Suspense>
   </StrictMode>,
 );
 }
